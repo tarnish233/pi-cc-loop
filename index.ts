@@ -1026,7 +1026,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		// reader wants to see in the header.
 		const prompt = text.replace(/^\[loop tick[^\]]*\]\n?/, "");
 		const summary = firstLine(prompt);
-		const header = `↻ loop tick #${details.tickCount ?? "?"}${summary ? ` · ${summary}` : ""}`;
+		const header = `loop tick #${details.tickCount ?? "?"}${summary ? ` · ${summary}` : ""}`;
 		return renderCard({
 			header,
 			body: prompt,

@@ -77,7 +77,7 @@ test("the tick is drawn as a readable card, not [pi-cc-loop-tick]", () => {
 	};
 
 	const collapsed = render(renderer, message, false);
-	assert.ok(collapsed.includes("↻ loop tick #7"), collapsed);
+	assert.ok(collapsed.includes("loop tick #7"), collapsed);
 	assert.ok(collapsed.includes("check the deploy and tell me what happened"), collapsed);
 	assert.ok(!collapsed.includes("[pi-cc-loop-tick]"), "the machine name is gone");
 

@@ -187,13 +187,13 @@ Pi 默认会把 custom message 的 `customType` 当标题画成 `[pi-cc-loop-tic
 本扩展注册了自己的 renderer，画成可折叠的卡片：
 
 ```
-↻ loop tick #7 · 每10秒钟打印一次hello world        (Ctrl+O 展开)
+loop tick #7 · 每10秒钟打印一次hello world        (Ctrl+O 展开)
 ```
 
 展开后：
 
 ```
-↻ loop tick #7 · 每10秒钟打印一次hello world
+loop tick #7 · 每10秒钟打印一次hello world
 
 每10秒钟打印一次hello world
 ```
