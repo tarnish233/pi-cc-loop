@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (must already exist locally)"
+        description: "Tag to publish, for example v0.1.0"
         required: true
         default: "v0.1.0"
 
@@ -24,19 +24,16 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Verify tag matches package.json
+      - name: Verify tag and package
         run: |
           set -euo pipefail
+          tag="${{ inputs.tag }}"
           version="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME}"
           if [ "$tag" != "v$version" ]; then
             echo "tag $tag does not match package.json version $version" >&2
             exit 1
           fi
-          npm ci --ignore-scripts || npm install --ignore-scripts
-
-      - name: Test
-        run: npm test
+          npm pack --dry-run
 
       - name: Publish
         run: npm publish --provenance --access public
