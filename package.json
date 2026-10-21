@@ -1,0 +1,23 @@
+{
+	"name": "pi-cc-loop",
+	"version": "0.2.0",
+	"description": "A Claude Code compatible /loop for the Pi coding agent: cron-scheduled fixed intervals and self-paced chains, with the same dispatch semantics as Claude Code.",
+	"type": "module",
+	"license": "MIT",
+	"keywords": ["pi-package", "extension", "loop", "cron", "scheduler", "claude-code"],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"test": "node --test tests/*.test.mjs",
+		"typecheck": "tsc --noEmit -p tsconfig.json"
+	}
+}

@@ -1,0 +1,359 @@
+/**
+ * Minimal 5-field cron support for the pi-cc-loop extension.
+ *
+ * Fields: minute hour day-of-month month day-of-week
+ * Per-field syntax: `*`, `*\/N`, `a`, `a-b`, `a-b/N`, `a,b,c`
+ *
+ * Deliberately unsupported (same subset Claude Code accepts): `L`, `W`, `?`
+ * and name aliases such as `MON`.
+ */
+
+export interface CronFields {
+	minute: Set<number>;
+	hour: Set<number>;
+	dom: Set<number>;
+	month: Set<number>;
+	dow: Set<number>;
+	/** True when the day-of-month field was not `*`. */
+	domRestricted: boolean;
+	/** True when the day-of-week field was not `*`. */
+	dowRestricted: boolean;
+}
+
+interface FieldSpec {
+	name: string;
+	min: number;
+	max: number;
+}
+
+const FIELDS: FieldSpec[] = [
+	{ name: "minute", min: 0, max: 59 },
+	{ name: "hour", min: 0, max: 23 },
+	{ name: "day of month", min: 1, max: 31 },
+	{ name: "month", min: 1, max: 12 },
+	{ name: "day of week", min: 0, max: 7 },
+];
+
+export const CRON_FIELD_COUNT = FIELDS.length;
+
+function parseField(spec: FieldSpec, raw: string): Set<number> | null {
+	const out = new Set<number>();
+	const parts = raw.split(",");
+	for (const part of parts) {
+		const trimmed = part.trim();
+		if (!trimmed) return null;
+
+		const [rangePart, stepPart] = trimmed.split("/");
+		let step = 1;
+		if (stepPart !== undefined) {
+			if (!/^\d+$/.test(stepPart)) return null;
+			step = Number(stepPart);
+			if (step < 1) return null;
+		}
+
+		let start: number;
+		let end: number;
+		if (rangePart === "*") {
+			start = spec.min;
+			end = spec.max;
+		} else {
+			const m = /^(\d+)(?:-(\d+))?$/.exec(rangePart);
+			if (!m) return null;
+			start = Number(m[1]);
+			end = m[2] !== undefined ? Number(m[2]) : start;
+			if (end < start) return null;
+		}
+
+		if (start < spec.min || end > spec.max) return null;
+		for (let v = start; v <= end; v += step) {
+			// cron treats 7 and 0 as Sunday
+			out.add(spec.name === "day of week" && v === 7 ? 0 : v);
+		}
+	}
+	return out;
+}
+
+/** Parse a 5-field cron expression. Returns null when the expression is invalid. */
+export function parseCron(expression: string): CronFields | null {
+	const trimmed = expression.trim();
+	if (!trimmed) return null;
+	const tokens = trimmed.split(/\s+/);
+	if (tokens.length !== CRON_FIELD_COUNT) return null;
+
+	const parsed: Set<number>[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const set = parseField(FIELDS[i], tokens[i]);
+		if (!set || set.size === 0) return null;
+		parsed.push(set);
+	}
+
+	return {
+		minute: parsed[0],
+		hour: parsed[1],
+		dom: parsed[2],
+		month: parsed[3],
+		dow: parsed[4],
+		domRestricted: tokens[2] !== "*",
+		dowRestricted: tokens[4] !== "*",
+	};
+}
+
+function dayMatches(fields: CronFields, date: Date): boolean {
+	const domOk = fields.dom.has(date.getDate());
+	const dowOk = fields.dow.has(date.getDay());
+	// vixie-cron semantics: when both day fields are restricted, either may match.
+	if (fields.domRestricted && fields.dowRestricted) return domOk || dowOk;
+	if (fields.domRestricted) return domOk;
+	if (fields.dowRestricted) return dowOk;
+	return true;
+}
+
+/**
+ * Next time the expression matches strictly after `from`, or null when nothing
+ * matches within the search window.
+ */
+export function nextFireAfter(
+	fields: CronFields,
+	from: Date,
+	limitDays = 366 * 4,
+): Date | null {
+	const cursor = new Date(from.getTime());
+	cursor.setSeconds(0, 0);
+	cursor.setMinutes(cursor.getMinutes() + 1);
+	const limit = from.getTime() + limitDays * 24 * 60 * 60 * 1000;
+
+	while (cursor.getTime() <= limit) {
+		if (!fields.month.has(cursor.getMonth() + 1)) {
+			cursor.setMonth(cursor.getMonth() + 1, 1);
+			cursor.setHours(0, 0, 0, 0);
+			continue;
+		}
+		if (!dayMatches(fields, cursor)) {
+			cursor.setDate(cursor.getDate() + 1);
+			cursor.setHours(0, 0, 0, 0);
+			continue;
+		}
+		if (!fields.hour.has(cursor.getHours())) {
+			cursor.setHours(cursor.getHours() + 1, 0, 0, 0);
+			continue;
+		}
+		if (!fields.minute.has(cursor.getMinutes())) {
+			cursor.setMinutes(cursor.getMinutes() + 1, 0, 0);
+			continue;
+		}
+		return cursor;
+	}
+	return null;
+}
+
+/** True when the expression can never match (e.g. February 30th). */
+export function isUnreachable(expression: string): boolean {
+	const fields = parseCron(expression);
+	if (!fields) return true;
+	// Look a year ahead; if nothing matches, the expression is dead.
+	return nextFireAfter(fields, new Date(), 366) === null;
+}
+
+export interface IntervalSpec {
+	/** Number of seconds the schedule actually uses. */
+	seconds: number;
+	/** Cron expression that implements the interval. */
+	cron: string;
+	/** Human readable cadence, e.g. "every 5 minutes". */
+	human: string;
+	/** True when the requested interval had to be adjusted. */
+	adjusted: boolean;
+	/** What the user asked for, in seconds. */
+	requestedSeconds: number;
+	/** Human readable explanation of the adjustment, for the user. */
+	note?: string;
+}
+
+const UNIT_SECONDS: Record<string, number> = {
+	s: 1,
+	m: 60,
+	h: 3600,
+	d: 86400,
+};
+
+const UNIT_NAMES: Record<string, [string, string]> = {
+	s: ["second", "seconds"],
+	m: ["minute", "minutes"],
+	h: ["hour", "hours"],
+	d: ["day", "days"],
+};
+
+/**
+ * The divisor of `total` closest to `n`.
+ *
+ * Claude Code rounds a non-dividing interval to the nearest clean one: "If the
+ * interval doesn't cleanly divide its unit, round to the nearest clean interval
+ * and tell the user what you rounded to."
+ */
+function nearestDivisor(n: number, total: number): number {
+	let best = 1;
+	let bestDistance = Number.POSITIVE_INFINITY;
+	for (let d = 1; d <= total; d++) {
+		if (total % d !== 0) continue;
+		const distance = Math.abs(d - n);
+		if (distance < bestDistance) {
+			best = d;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+
+/**
+ * Convert a duration into a cron expression, following Claude Code's rule:
+ *
+ *   "Supported suffixes: `s` -> ceil to nearest minute, `m` (minutes),
+ *    `h` (hours), `d` (days). Examples: `5m` -> a 5 minute step, `1h` -> `0 * * * *`,
+ *    `1d` -> `0 0 * * *`. If the interval doesn't cleanly divide its unit, round to the
+ *    nearest clean interval and tell the user what you rounded to."
+ */
+export function intervalToCron(seconds: number): IntervalSpec | null {
+	if (!Number.isFinite(seconds) || seconds <= 0) return null;
+
+	// Sub-minute: the scheduler's granularity is one minute, so round up.
+	if (seconds < 60) {
+		return {
+			seconds: 60,
+			cron: "* * * * *",
+			human: "every minute",
+			adjusted: true,
+			requestedSeconds: seconds,
+			note: `${seconds}s rounded up to 1 minute (the scheduler's minimum granularity is 1 minute)`,
+		};
+	}
+
+	if (seconds < 3600) {
+		const requested = Math.round(seconds / 60);
+		const minutes = nearestDivisor(requested, 60);
+		return {
+			seconds: minutes * 60,
+			cron: `*/${minutes} * * * *`,
+			human: `every ${minutes} minute${minutes === 1 ? "" : "s"}`,
+			adjusted: minutes !== requested,
+			requestedSeconds: seconds,
+			...(minutes !== requested
+				? { note: `${requested}m rounded to ${minutes}m, the nearest clean interval` }
+				: {}),
+		};
+	}
+
+	if (seconds < 86400) {
+		const requested = Math.round(seconds / 3600);
+		const hours = nearestDivisor(requested, 24);
+		return {
+			seconds: hours * 3600,
+			cron: hours === 1 ? "0 * * * *" : `0 */${hours} * * *`,
+			human: `every ${hours} hour${hours === 1 ? "" : "s"}`,
+			adjusted: hours !== requested,
+			requestedSeconds: seconds,
+			...(hours !== requested
+				? { note: `${requested}h rounded to ${hours}h, the nearest clean interval` }
+				: {}),
+		};
+	}
+
+	const days = Math.max(1, Math.round(seconds / 86400));
+	return {
+		seconds: days * 86400,
+		cron: days === 1 ? "0 0 * * *" : `0 0 */${days} * *`,
+		human: days === 1 ? "every day" : `every ${days} days`,
+		adjusted: days * 86400 !== seconds,
+		requestedSeconds: seconds,
+	};
+}
+
+/** Parse a duration token such as `5m`, `30s`, `2h`, `1d`. */
+export function parseIntervalToken(token: string): number | null {
+	const m = /^(\d+)\s*([smhd])$/i.exec(token.trim());
+	if (!m) return null;
+	const unit = m[2].toLowerCase();
+	const amount = Number(m[1]);
+	if (!Number.isFinite(amount) || amount <= 0) return null;
+	return amount * UNIT_SECONDS[unit];
+}
+
+/** Parse `every 20m` / `every 5 minutes` / `every 2 hours` style clauses. */
+export function parseEveryClause(input: string): { interval: number; prompt: string } | null {
+	const m = /\bevery\s+(\d+)\s*([a-z]+)\s*$/i.exec(input.trim());
+	if (!m) return null;
+	const amount = Number(m[1]);
+	const word = m[2].toLowerCase();
+	let unitSeconds: number | undefined;
+	for (const [key, names] of Object.entries(UNIT_NAMES)) {
+		if (names[0] === word || names[1] === word) {
+			unitSeconds = UNIT_SECONDS[key];
+			break;
+		}
+	}
+	// Single letter units, e.g. "every 20m".
+	if (unitSeconds === undefined && word.length === 1 && word in UNIT_SECONDS) {
+		unitSeconds = UNIT_SECONDS[word];
+	}
+	if (unitSeconds === undefined) return null;
+	const prompt = input.trim().slice(0, m.index).trim();
+	return { interval: amount * unitSeconds, prompt };
+}
+
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/**
+ * A human readable cadence for a cron expression, the way Claude Code
+ * reports it ("Every minute", "Every 5 minutes", "Daily at 9:00 AM").
+ */
+export function humanSchedule(expression: string): string {
+	const fields = parseCron(expression);
+	if (!fields) return expression;
+	const [minute, hour, dom, month, dow] = expression.trim().split(/\s+/);
+	const everyMinute = minute === "*" && hour === "*" && dom === "*" && month === "*" && dow === "*";
+	if (everyMinute) return "Every minute";
+
+	const step = /^\*\/(\d+)$/.exec(minute);
+	if (step && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+		const n = Number(step[1]);
+		return n === 1 ? "Every minute" : `Every ${n} minutes`;
+	}
+
+	const clock = clockText(minute, hour);
+	if (dom === "*" && month === "*" && dow === "*") {
+		if (hour === "*") return `Every hour at :${minute.padStart(2, "0")}`;
+		if (minute === "0") return `Hourly`;
+		return `Daily at ${clock}`;
+	}
+	if (month === "*" && dow === "*") return `On day ${dom} at ${clock}`;
+	if (month === "*") {
+		const days = dow
+			.split(",")
+			.map((d) => DAY_NAMES[Number(d) % 7])
+			.join(", ");
+		return `Every ${days} at ${clock}`;
+	}
+	return expression;
+}
+
+/** "9:05 AM" style time for the minute and hour fields. */
+function clockText(minute: string, hour: string): string {
+	if (hour === "*") return `:${minute.padStart(2, "0")}`;
+	const h = Number(hour);
+	const suffix = h < 12 ? "AM" : "PM";
+	const display = h % 12 === 0 ? 12 : h % 12;
+	return `${display}:${minute.padStart(2, "0")} ${suffix}`;
+}
+
+/** Human readable summary of a cron expression. */
+export function describeCron(expression: string): string {
+	const fields = parseCron(expression);
+	if (!fields) return expression;
+	const [minute, hour, dom, month, dow] = expression.trim().split(/\s+/);
+	const parts: string[] = [];
+	if (minute !== "*") parts.push(`minute ${minute}`);
+	if (hour !== "*") parts.push(`hour ${hour}`);
+	if (dom !== "*") parts.push(`day-of-month ${dom}`);
+	if (month !== "*") parts.push(`month ${month}`);
+	if (dow !== "*") parts.push(`day-of-week ${dow}`);
+	return parts.length ? parts.join(", ") : "every minute";
+}
