@@ -184,19 +184,16 @@ check the deploy and tell me what happened
 ### 界面
 
 Pi 默认会把 custom message 的 `customType` 当标题画成 `[pi-cc-loop-tick]`，一眼机器名。
-本扩展注册了自己的 renderer，画成可折叠的卡片：
+本扩展注册了自己的 renderer，画成两行的轻量块（无图标、无底色），格式参照
+Claude Code 的 `scheduled_task_fire` 标记：
 
 ```
-loop tick #7 · 每10秒钟打印一次hello world        (Ctrl+O 展开)
+loop #7 · 4:13 PM
+  每10秒钟打印一次hello world
 ```
 
-展开后：
-
-```
-loop tick #7 · 每10秒钟打印一次hello world
-
-每10秒钟打印一次hello world
-```
+prompt 超过 3 行时折叠为 `+N more lines`；`Ctrl+O` 展开后显示完整 prompt 和
+`job … · cron … · scheduled by /loop`。
 
 renderer 只影响**显示**，模型看到的内容不变（模型看到的仍然是带来源标注的完整
 prompt）。

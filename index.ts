@@ -40,7 +40,7 @@ import {
 	parseIntervalToken,
 } from "./cron.ts";
 import { generateId, LoopScheduler, type LoopJob } from "./schedule.ts";
-import { contentText, firstLine, renderCard } from "./render.ts";
+import { bodyLines, contentText, formatStamp, renderBlock, stripProvenance } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
@@ -1016,23 +1016,39 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	// ----------------------------------------------------------------- events
 
 	/**
-	 * Draw the tick as a readable card instead of Pi's default
+	 * Draw the tick as a quiet two-line block instead of Pi's default
 	 * `[pi-cc-loop-tick]` title.
 	 */
 	pi.registerMessageRenderer(TICK_MESSAGE_TYPE, (message, options, theme) => {
-		const details = (message.details ?? {}) as { tickCount?: number; jobId?: string };
+		const details = (message.details ?? {}) as {
+			tickCount?: number;
+			jobId?: string;
+			cron?: string;
+			immediate?: boolean;
+		};
 		const text = contentText(message.content);
-		// The content starts with the provenance line; the prompt is what the
-		// reader wants to see in the header.
-		const prompt = text.replace(/^\[loop tick[^\]]*\]\n?/, "");
-		const summary = firstLine(prompt);
-		const header = `loop tick #${details.tickCount ?? "?"}${summary ? ` · ${summary}` : ""}`;
-		return renderCard({
+		const prompt = stripProvenance(text, /^\[loop tick[^\]]*\]\n?/);
+		const label = details.tickCount !== undefined ? `loop #${details.tickCount}` : "loop";
+		const stamp = formatStamp(message.timestamp);
+		const header = stamp
+			? `${theme.fg("accent", theme.bold(label))}${theme.fg("dim", " · ")}${theme.fg("muted", stamp)}`
+			: theme.fg("accent", theme.bold(label));
+
+		const meta: string[] = [];
+		if (details.jobId) meta.push(`job ${details.jobId}`);
+		if (details.cron) meta.push(`cron ${details.cron}`);
+		else if (details.immediate) meta.push("immediate run");
+		else meta.push("self-paced");
+		meta.push("scheduled by /loop");
+
+		return renderBlock({
 			header,
-			body: prompt,
+			body: bodyLines(prompt),
+			meta,
 			expanded: options.expanded,
 			outputPad: options.outputPad,
 			theme,
+			maxBodyLines: 3,
 		});
 	});
 
