@@ -3,6 +3,21 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// Isolate pi-cc-extensions' config as well: the compat sync must not touch
+// the real file when a test toggles compact tool rows.
+if (!process.env.PI_CC_EXTENSIONS_CONFIG_FILE) {
+	const ccstyleConfig = path.join(os.tmpdir(), `pi-cc-extensions-${process.pid}.json`);
+	fs.writeFileSync(ccstyleConfig, JSON.stringify({ excludeRenderers: [] }));
+	process.env.PI_CC_EXTENSIONS_CONFIG_FILE = ccstyleConfig;
+}
+
+// Isolate the shared settings file so tests never read or write the user's.
+if (!process.env.PI_CC_CONFIG_FILE) {
+	const configFile = path.join(os.tmpdir(), `pi-cc-config-${process.pid}.json`);
+	fs.writeFileSync(configFile, JSON.stringify({ compactMessages: true, compactToolRows: true }));
+	process.env.PI_CC_CONFIG_FILE = configFile;
+}
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const extensionDir = path.resolve(here, "..");
 

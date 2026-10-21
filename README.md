@@ -5,6 +5,42 @@
 不是「一个能重复跑 prompt 的循环」，而是照着 Claude Code 二进制里的实际实现做的：
 同样的 cron 语义、同样的调度时机、同样的投递优先级、同样的兜底心跳预算。
 
+## 界面设置（pi-cc-loop 与 pi-cc-monitor 共享）
+
+两个扩展读同一个配置文件 `~/.pi/agent/pi-cc.json`：
+
+```json
+{
+  "compactMessages": true,
+  "compactToolRows": true,
+  "managePiCcExtensions": true
+}
+```
+
+三个默认值都是 `true`。用命令切换：
+
+```
+/loop settings
+/loop settings messages on|off
+/loop settings tools on|off
+```
+
+- `messages off`：回到旧的带底色卡片（带 `Ctrl+O to expand` 提示）
+- `tools off`：回到 Pi 默认的工具行（如果装了 `pi-cc-extensions`，回到它的 CC 风格工具卡）
+
+> **和 `pi-cc-extensions` 的兼容**：它会全局接管工具卡渲染。`tools on` 时本扩展会把
+> `cron_create` / `cron_delete` / `cron_list` / `schedule_wakeup` / `Monitor` /
+> `monitor_stop` / `monitor_list` 加进它的 `~/.pi/agent/pi-cc-extensions.json`
+> `excludeRenderers`，让紧凑行生效；`tools off` 时只移除自己加的名字，不碰你手工加的。
+> 它只在启动时读配置，所以切换后需要 `/reload` 一次。
+> 不想要这个自动同步就设 `"managePiCcExtensions": false`（或
+> `PI_CC_MANAGE_CCSTYLE=0`）。
+> 文件里的 `managedExcludes` 是内部记录，用来在关闭时只移除本扩展加过的名字。
+
+也可以用环境变量 `PI_CC_COMPACT_MESSAGES=0` / `PI_CC_COMPACT_TOOL_ROWS=0` 临时覆盖。
+切换立即影响之后的新消息 / 新工具调用；已经画出的旧行需要 `/reload` 才会按新样式重画。
+改配置文件后如果没用命令切换，需要 `/reload` 让两个扩展重新读取。
+
 ---
 
 ## 用法
@@ -16,6 +52,9 @@
 /loop stop [id]          停掉某个 loop（或全部）
 /loop status              列出当前所有 loop
 /loop widget on|off       显示/隐藏输入框上方的状态行（默认关，和 CC 一致）
+/loop settings            查看界面设置
+/loop settings messages on|off   紧凑消息样式
+/loop settings tools on|off      紧凑工具行
 /loop help                帮助
 ```
 
@@ -198,6 +237,22 @@ prompt 超过 3 行时折叠为 `+N more lines`；`Ctrl+O` 展开后显示完整
 renderer 只影响**显示**，模型看到的内容不变（模型看到的仍然是带来源标注的完整
 prompt）。
 
+`compactMessages` 关闭时回到旧的带底色卡片（带 `Ctrl+O to expand` 提示）。
+
+### 工具行（可关）
+
+`compactToolRows` 打开时，工具结果从 Pi 默认的
+`↳ 2 lines returned · click to show more` 换成一行实际结果，并在结果返回后隐藏调用行：
+
+```
+✓ Scheduled hu2389lz · Every minute · next 04:55 PM
+✓ Cancelled hu2389lz
+✓ 1 job · hu2389lz every minute · next 04:55 PM
+✓ Wakeup in 20m · loop lu42sakp
+```
+
+`Ctrl+O` 展开后仍可看到完整 prompt、cron、输出路径等信息。关闭后完全回到 Pi 默认工具行。
+
 ### 状态条（默认关闭）
 
 **Claude Code 的主会话里没有任何常驻的 loop 状态显示** —— job id 只出现一次，在
@@ -320,13 +375,20 @@ The /loop chain for "<prompt>" was stopped and must not be rescheduled.
 | `PI_LOOP_KEEPALIVE_SECONDS` | `1200` | 兜底心跳延迟；`0` 表示禁用兜底（模型一轮不调度就直接结束） |
 | `PI_LOOP_JITTER` | `0` | 抖动比例（0~1）。CC 线上默认是 0.5（最多晚 30 分钟），这里默认 0＝准点 |
 | `PI_LOOP_SCAN_MS` | `1000` | 调度扫描间隔，测试时可调大 |
+| `PI_CC_CONFIG_FILE` | `~/.pi/agent/pi-cc.json` | 共享设置文件路径 |
+| `PI_CC_COMPACT_MESSAGES` | `1` | `0` 关闭紧凑消息样式 |
+| `PI_CC_COMPACT_TOOL_ROWS` | `1` | `0` 关闭紧凑工具行 |
+| `PI_CC_MANAGE_CCSTYLE` | `1` | `0` 不自动修改 `pi-cc-extensions.json` 的 `excludeRenderers` |
+| `PI_CC_EXTENSIONS_CONFIG_FILE` | `~/.pi/agent/pi-cc-extensions.json` | `pi-cc-extensions` 配置路径 |
 
 ## 文件
 
 ```
 index.ts      扩展主体：命令、工具、事件、持久化
+config.ts     共享设置（~/.pi/agent/pi-cc.json）
 cron.ts       5 字段 cron 解析 + 下次触发时间计算
 schedule.ts   任务仓库 + 调度队列（pending / in-flight / 漏跑合并）
+render.ts     紧凑两行块 + 旧卡片 fallback
 tests/        单元测试
 ```
 
@@ -337,4 +399,4 @@ cd ~/workspace/pi_extensions/pi-cc-loop
 node --test tests/*.test.mjs
 ```
 
-（测试用 `jiti` 直接加载 TS，路径按本机 Pi 安装位置写死在 `tests/helpers.mjs` 里。）
+（测试用 `jiti` 直接加载 TS；`PI_CC_CONFIG_FILE` 会自动指向临时文件，不会读写你的真实设置。）

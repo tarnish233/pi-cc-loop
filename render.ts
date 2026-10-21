@@ -3,18 +3,20 @@
  *
  * Pi renders a custom message with the raw `customType` as its title
  * (`[pi-cc-loop-tick]`), which reads like a machine name. A custom renderer
- * replaces that with a quiet two-line block, modelled on Claude Code's
- * `scheduled_task_fire` system marker: a timestamped header plus the prompt.
+ * replaces that with either a quiet two-line block (the default) or the
+ * legacy padded card, depending on `compactMessages`.
  *
- * No icon and no background: the accent-coloured label carries the meaning,
- * and the timestamp makes a minute-by-minute loop easy to scan.
+ * The quiet block is modelled on Claude Code's `scheduled_task_fire` marker:
+ * a timestamped header plus the prompt. No icon and no background; the
+ * accent-coloured label carries the meaning, and the timestamp makes a
+ * minute-by-minute loop easy to scan.
  *
  * The renderer only affects the display. The message content the model sees is
  * unchanged.
  */
 
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { keyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Text } from "@earendil-works/pi-tui";
 
 /** Flatten a custom message body to plain text. */
 export function contentText(content: unknown): string {
@@ -34,6 +36,15 @@ export function contentText(content: unknown): string {
 /** Remove the provenance line the model needs but the reader does not. */
 export function stripProvenance(text: string, pattern: RegExp): string {
 	return text.replace(pattern, "");
+}
+
+/** The first non-empty line of a text block. */
+export function firstLine(text: string): string {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed) return trimmed;
+	}
+	return "";
 }
 
 /** Split a text block into displayable lines, dropping blank ones. */
@@ -56,6 +67,48 @@ export function formatStamp(epochMs: number | undefined): string {
 	if (date.toDateString() === now.toDateString()) return time;
 	const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 	return `${day} ${time}`;
+}
+
+/**
+ * Draw the legacy padded card used when `compactMessages` is off.
+ *
+ * `header` is the one-line summary, `body` the full text shown when the
+ * message is expanded.
+ */
+export function renderCard(options: {
+	header: string;
+	body?: string;
+	expanded: boolean;
+	outputPad: number;
+	theme: Theme;
+}): Box {
+	const { header, body, expanded, outputPad, theme } = options;
+	const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+	box.addChild(new Text(theme.fg("customMessageLabel", header), 0, 0));
+	if (expanded && body) {
+		box.addChild(new Text(theme.fg("customMessageText", `\n${body}`), 0, 0));
+	} else if (!expanded) {
+		box.addChild(new Text(theme.fg("dim", `  ${expandHint()}`), 0, 0));
+	}
+	return box;
+}
+
+/**
+ * The hint for the expand shortcut. The keybinding is configurable and the
+ * theme has to be initialised, so fall back to the default when the hint
+ * would come out empty.
+ */
+function expandHint(): string {
+	try {
+		const hint = keyHint("app.tools.expand", "to expand");
+		const plain = hint.replace(/\x1b\[[0-9;]*m/g, "");
+		if (!plain.trim() || plain.trim().startsWith("to expand")) {
+			return "(Ctrl+O to expand)";
+		}
+		return hint;
+	} catch {
+		return "(Ctrl+O to expand)";
+	}
 }
 
 /**

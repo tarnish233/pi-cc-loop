@@ -28,7 +28,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	Theme,
+	ToolRenderers,
+} from "@earendil-works/pi-coding-agent";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	describeCron,
@@ -39,12 +46,30 @@ import {
 	parseEveryClause,
 	parseIntervalToken,
 } from "./cron.ts";
+import {
+	configPath,
+	loadConfig,
+	saveConfig,
+	syncPiCcExtensionsExcludes,
+	type PiCcConfig,
+} from "./config.ts";
 import { generateId, LoopScheduler, type LoopJob } from "./schedule.ts";
-import { bodyLines, contentText, formatStamp, renderBlock, stripProvenance } from "./render.ts";
+import {
+	bodyLines,
+	contentText,
+	firstLine,
+	formatStamp,
+	renderBlock,
+	renderCard,
+	stripProvenance,
+} from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
 const WIDGET_KEY = "pi-cc-loop";
+const CONFIG_CHANNEL = "pi-cc:config";
+const LOOP_TOOL_NAMES = ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"];
+const ALL_PI_CC_TOOLS = [...LOOP_TOOL_NAMES, "Monitor", "monitor_stop", "monitor_list"];
 
 /**
  * The event channel pi-cc-monitor publishes on. When a monitor names a loop
@@ -187,6 +212,55 @@ function formatClock(epochMs: number | undefined): string {
 function truncate(text: string, max: number): string {
 	const clean = text.replace(/\s+/g, " ").trim();
 	return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/** A compact one-line call row for a tool. */
+function toolCall(label: string, detail: string, theme: Theme): Text {
+	const title = theme.fg("toolTitle", theme.bold(label));
+	return new Text(detail ? `${title} ${theme.fg("muted", detail)}` : title, 0, 0);
+}
+
+/** A compact one-line result row for a tool. */
+function toolResult(
+	summary: string,
+	detail: string | undefined,
+	options: { expanded: boolean; isPartial: boolean; isError: boolean },
+	theme: Theme,
+): Text {
+	if (options.isPartial) return new Text(theme.fg("warning", "Working…"), 0, 0);
+	const prefix = options.isError ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
+	const body = options.isError ? theme.fg("error", summary) : theme.fg("toolOutput", summary);
+	const text = prefix + body;
+	if (options.expanded && detail) return new Text(`${text}\n${theme.fg("dim", detail)}`, 0, 0);
+	return new Text(text, 0, 0);
+}
+
+/** Hide the call row once the result has arrived, leaving one result line. */
+function completedCall(): Container {
+	return new Container();
+}
+
+/** The first text line of a tool result, used as a fallback summary. */
+function resultText(result: { content?: Array<{ type?: string; text?: string }> }): string {
+	for (const block of result.content ?? []) {
+		if (block?.type === "text" && typeof block.text === "string") {
+			return block.text.split("\n")[0] ?? "";
+		}
+	}
+	return "";
+}
+
+function formatDelay(seconds: number | undefined): string {
+	if (seconds === undefined) return "unknown";
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.round(seconds / 60)}m`;
+}
+
+function jobSummary(job: LoopJob): string {
+	if (job.kind === "cron" && job.cron) {
+		return `${job.id} ${humanSchedule(job.cron)} · next ${formatClock(job.nextFireAt)}`;
+	}
+	return `${job.id} self-paced · ${job.scheduledFor ? `next ${formatClock(job.scheduledFor)}` : "unscheduled"}`;
 }
 
 function resolveLoopFile(cwd: string): { path: string; content: string } | null {
@@ -527,11 +601,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	/** The tool names to exclude from pi-cc-extensions' global styling. */
+	function piCcToolNames(): string[] {
+		return monitorToolAvailable() ? ALL_PI_CC_TOOLS : LOOP_TOOL_NAMES;
+	}
+
 	// ---------------------------------------------------------------- command
 
 	pi.registerCommand("loop", {
 		description:
-			"Run a prompt repeatedly. Usage: /loop [interval] <prompt> | /loop <prompt> | /loop stop [id] | /loop status | /loop list",
+			"Run a prompt repeatedly. Usage: /loop [interval] <prompt> | /loop <prompt> | /loop stop [id] | /loop status | /loop settings",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			lastCtx = ctx;
 			const raw = args.trim();
@@ -561,6 +640,25 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					persist(scheduler.list());
 					refreshWidget(scheduler.list());
 					notify(ctx, `Loop status widget ${widgetEnabled ? "enabled" : "disabled"}`, "info");
+					return;
+				}
+				case "settings":
+				case "config": {
+					const [key, value] = rest;
+					if (!key) {
+						showSettings(ctx);
+						return;
+					}
+					const name = key.toLowerCase();
+					if (name === "messages" || name === "message") {
+						setSetting(ctx, "messages", value);
+						return;
+					}
+					if (name === "tools" || name === "tool" || name === "rows") {
+						setSetting(ctx, "tools", value);
+						return;
+					}
+					notify(ctx, "Usage: /loop settings [messages|tools] [on|off]", "info");
 					return;
 				}
 				case "help":
@@ -752,6 +850,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop stop [id]             cancel one loop, or all of them",
 			"/loop status                list the active loops",
 			"/loop widget on|off         show or hide the status line above the editor",
+			"/loop settings              show UI settings",
+			"/loop settings messages on|off   compact two-line markers",
+			"/loop settings tools on|off      one-line tool results",
 			"",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
 			"       --max N   stop the loop after N fires.",
@@ -759,259 +860,457 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		if (ctx.hasUI) ctx.ui.notify(help, "info");
 	}
 
+	function showSettings(ctx: ExtensionContext): void {
+		const config = loadConfig();
+		const lines = [
+			`pi-cc settings · ${configPath()}`,
+			`  messages:  ${config.compactMessages ? "compact" : "card"}`,
+			`  tool rows: ${config.compactToolRows ? "compact" : "default"}`,
+			"",
+			"Usage: /loop settings messages on|off",
+			"       /loop settings tools on|off",
+		];
+		if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
+	}
+
+	function setSetting(ctx: ExtensionContext, key: "messages" | "tools", raw: string | undefined): void {
+		const value = (raw ?? "").toLowerCase();
+		const on = value === "on" || value === "true" || value === "1";
+		const off = value === "off" || value === "false" || value === "0";
+		if (!on && !off) {
+			showSettings(ctx);
+			return;
+		}
+		const patch: Partial<PiCcConfig> =
+			key === "messages" ? { compactMessages: on } : { compactToolRows: on };
+		const next = saveConfig(patch);
+		let compatChanged = false;
+		if (key === "tools") {
+			compatChanged = syncPiCcExtensionsExcludes(piCcToolNames(), on);
+		}
+		try {
+			pi.events.emit(CONFIG_CHANNEL, next);
+		} catch {
+			// another extension must not break the command
+		}
+		notify(ctx, `${key === "messages" ? "Compact message style" : "Compact tool rows"} ${on ? "enabled" : "disabled"}`, "info");
+		if (compatChanged) {
+			notify(ctx, "pi-cc-extensions excludeRenderers updated · /reload to apply", "info");
+		}
+	}
+
 	// ------------------------------------------------------------------ tools
 
-	pi.registerTool({
-		name: "cron_create",
-		label: "Create Scheduled Job",
-		description:
-			"Schedule a prompt to run on a 5-field cron expression in local time. Use this for fixed-interval " +
-			"work such as polling a deployment or re-running a check. One-shot reminders should set " +
-			"recurring to false. The job id can be cancelled with cron_delete.",
-		parameters: Type.Object({
-			cron: Type.String({
-				description:
-					'Standard 5-field cron expression in local time: "M H DoM Mon DoW" (e.g. "*/5 * * * *" = every 5 minutes).',
+	function registerTools(): void {
+
+		pi.registerTool({
+			name: "cron_create",
+			label: "Create Scheduled Job",
+			description:
+				"Schedule a prompt to run on a 5-field cron expression in local time. Use this for fixed-interval " +
+				"work such as polling a deployment or re-running a check. One-shot reminders should set " +
+				"recurring to false. The job id can be cancelled with cron_delete.",
+			parameters: Type.Object({
+				cron: Type.String({
+					description:
+						'Standard 5-field cron expression in local time: "M H DoM Mon DoW" (e.g. "*/5 * * * *" = every 5 minutes).',
+				}),
+				prompt: Type.String({ description: "The prompt to enqueue at each fire time." }),
+				recurring: Type.Optional(
+					Type.Boolean({
+						description:
+							"true (default) = fire on every cron match until deleted or auto-expired. false = fire once at the next match, then auto-delete.",
+					}),
+				),
+				durable: Type.Optional(
+					Type.Boolean({ description: "Write the job to .pi/scheduled_tasks.json so it survives a restart." }),
+				),
+				maxFires: Type.Optional(
+					Type.Number({
+						minimum: 1,
+						description: "Stop the job after this many fires. Claude Code has no such cap; it is an addition here.",
+					}),
+				),
 			}),
-			prompt: Type.String({ description: "The prompt to enqueue at each fire time." }),
-			recurring: Type.Optional(
-				Type.Boolean({
-					description:
-						"true (default) = fire on every cron match until deleted or auto-expired. false = fire once at the next match, then auto-delete.",
-				}),
-			),
-			durable: Type.Optional(
-				Type.Boolean({ description: "Write the job to .pi/scheduled_tasks.json so it survives a restart." }),
-			),
-			maxFires: Type.Optional(
-				Type.Number({
-					minimum: 1,
-					description: "Stop the job after this many fires. Claude Code has no such cap; it is an addition here.",
-				}),
-			),
-		}),
-		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const fields = parseCron(params.cron);
-			if (!fields) {
-				throw new Error(
-					`Invalid cron expression '${params.cron}'. Expected 5 fields: M H DoM Mon DoW.`,
-				);
-			}
-			if (isUnreachable(params.cron)) {
-				throw new Error(`Cron expression '${params.cron}' does not match any date within the next year.`);
-			}
-			if (scheduler.size >= MAX_JOBS) {
-				throw new Error(`Too many scheduled jobs (max ${MAX_JOBS}). Cancel one first.`);
-			}
-			if (!params.prompt?.trim()) {
-				throw new Error("prompt must not be empty.");
-			}
-
-			const job = scheduler.add({
-				id: generateId(),
-				kind: "cron",
-				cron: params.cron.trim(),
-				prompt: params.prompt,
-				recurring: params.recurring ?? true,
-				createdAt: Date.now(),
-				durable: params.durable ?? false,
-				maxFires: params.maxFires,
-				// Continue the tick numbering of the /loop run that led here.
-				tickCount: tickCounters.get(params.prompt) ?? 0,
-				label: humanSchedule(params.cron),
-				source: "cron_create",
-			});
-
-			return {
-				content: [
-					{
-						type: "text",
-						text:
-							`Scheduled ${job.id} (${job.label}, next run ${formatClock(job.nextFireAt)})\n` +
-							`Cancel it with cron_delete { "id": "${job.id}" }.`,
-					},
-				],
-				details: {
-					id: job.id,
-					cron: job.cron,
-					recurring: job.recurring,
-					durable: job.durable,
-					nextFireAt: job.nextFireAt,
-					prompt: job.prompt,
-				},
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "cron_delete",
-		label: "Cancel Scheduled Job",
-		description: "Cancel a scheduled job by its id. Use it to stop a recurring /loop.",
-		parameters: Type.Object({
-			id: Type.String({ description: "The job id returned by cron_create." }),
-		}),
-		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const job = scheduler.get(params.id);
-			if (!job) {
-				return {
-					content: [{ type: "text" as const, text: `No scheduled job with id ${params.id}.` }],
-					details: { cancelled: false, id: params.id },
-				};
-			}
-			scheduler.remove(params.id);
-			return {
-				content: [{ type: "text" as const, text: `Cancelled job ${params.id}.` }],
-				details: { cancelled: true, id: params.id },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "cron_list",
-		label: "List Scheduled Jobs",
-		description: "List the scheduled jobs of this session with their ids, cron expressions and next run times.",
-		parameters: Type.Object({}),
-		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const jobs = scheduler.list();
-			if (!jobs.length) {
-				return {
-					content: [{ type: "text" as const, text: "No scheduled jobs." }],
-					details: { jobs: [] },
-				};
-			}
-			const text = jobs
-				.map((job) =>
-					job.kind === "cron"
-						? `${job.id}  cron ${job.cron}  recurring=${job.recurring}  next ${formatClock(job.nextFireAt)}  ${truncate(job.prompt, 80)}`
-						: `${job.id}  self-paced  next ${job.scheduledFor ? formatClock(job.scheduledFor) : "unscheduled"}  ${truncate(job.prompt, 80)}`,
-				)
-				.join("\n");
-			return {
-				content: [{ type: "text" as const, text }],
-				details: { jobs },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "schedule_wakeup",
-		label: "Schedule Next Loop Iteration",
-		description:
-			"Schedule the next iteration of a self-paced /loop, or end the loop. " +
-			"Pass delaySeconds (60-3600), a one-sentence reason, and the same /loop prompt verbatim. " +
-			"Pass stop: true when the task is complete or can no longer make progress.",
-		parameters: Type.Object({
-			delaySeconds: Type.Optional(
-				Type.Number({
-					description:
-						"Seconds from now to wake up. Clamped to [60, 3600] by the runtime. Required unless stop is true.",
-				}),
-			),
-			reason: Type.Optional(
-				Type.String({ description: "One short sentence explaining the chosen delay. Shown to the user." }),
-			),
-			prompt: Type.Optional(
-				Type.String({
-					description:
-						"The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing continues the loop.",
-				}),
-			),
-			stop: Type.Optional(
-				Type.Boolean({
-					description: "Set to true to end the self-paced loop immediately. All other fields are ignored.",
-				}),
-			),
-		}),
-		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-
-			if (params.stop === true) {
-				const chains = scheduler.byKind("wakeup");
-				for (const chain of chains) {
-					// Retiring also stops the monitors that belong to this chain.
-					retireChain(chain, "stopped by the agent");
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				lastCtx = ctx;
+				const fields = parseCron(params.cron);
+				if (!fields) {
+					throw new Error(
+						`Invalid cron expression '${params.cron}'. Expected 5 fields: M H DoM Mon DoW.`,
+					);
 				}
+				if (isUnreachable(params.cron)) {
+					throw new Error(`Cron expression '${params.cron}' does not match any date within the next year.`);
+				}
+				if (scheduler.size >= MAX_JOBS) {
+					throw new Error(`Too many scheduled jobs (max ${MAX_JOBS}). Cancel one first.`);
+				}
+				if (!params.prompt?.trim()) {
+					throw new Error("prompt must not be empty.");
+				}
+
+				const job = scheduler.add({
+					id: generateId(),
+					kind: "cron",
+					cron: params.cron.trim(),
+					prompt: params.prompt,
+					recurring: params.recurring ?? true,
+					createdAt: Date.now(),
+					durable: params.durable ?? false,
+					maxFires: params.maxFires,
+					// Continue the tick numbering of the /loop run that led here.
+					tickCount: tickCounters.get(params.prompt) ?? 0,
+					label: humanSchedule(params.cron),
+					source: "cron_create",
+				});
+
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Scheduled ${job.id} (${job.label}, next run ${formatClock(job.nextFireAt)})\n` +
+								`Cancel it with cron_delete { "id": "${job.id}" }.`,
+						},
+					],
+					details: {
+						id: job.id,
+						cron: job.cron,
+						recurring: job.recurring,
+						durable: job.durable,
+						nextFireAt: job.nextFireAt,
+						prompt: job.prompt,
+					},
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "cron_delete",
+			label: "Cancel Scheduled Job",
+			description: "Cancel a scheduled job by its id. Use it to stop a recurring /loop.",
+			parameters: Type.Object({
+				id: Type.String({ description: "The job id returned by cron_create." }),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				lastCtx = ctx;
+				const job = scheduler.get(params.id);
+				if (!job) {
+					return {
+						content: [{ type: "text" as const, text: `No scheduled job with id ${params.id}.` }],
+						details: { cancelled: false, id: params.id },
+					};
+				}
+				scheduler.remove(params.id);
+				return {
+					content: [{ type: "text" as const, text: `Cancelled job ${params.id}.` }],
+					details: { cancelled: true, id: params.id },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "cron_list",
+			label: "List Scheduled Jobs",
+			description: "List the scheduled jobs of this session with their ids, cron expressions and next run times.",
+			parameters: Type.Object({}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+				lastCtx = ctx;
+				const jobs = scheduler.list();
+				if (!jobs.length) {
+					return {
+						content: [{ type: "text" as const, text: "No scheduled jobs." }],
+						details: { jobs: [] },
+					};
+				}
+				const text = jobs
+					.map((job) =>
+						job.kind === "cron"
+							? `${job.id}  cron ${job.cron}  recurring=${job.recurring}  next ${formatClock(job.nextFireAt)}  ${truncate(job.prompt, 80)}`
+							: `${job.id}  self-paced  next ${job.scheduledFor ? formatClock(job.scheduledFor) : "unscheduled"}  ${truncate(job.prompt, 80)}`,
+					)
+					.join("\n");
+				return {
+					content: [{ type: "text" as const, text }],
+					details: { jobs },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "schedule_wakeup",
+			label: "Schedule Next Loop Iteration",
+			description:
+				"Schedule the next iteration of a self-paced /loop, or end the loop. " +
+				"Pass delaySeconds (60-3600), a one-sentence reason, and the same /loop prompt verbatim. " +
+				"Pass stop: true when the task is complete or can no longer make progress.",
+			parameters: Type.Object({
+				delaySeconds: Type.Optional(
+					Type.Number({
+						description:
+							"Seconds from now to wake up. Clamped to [60, 3600] by the runtime. Required unless stop is true.",
+					}),
+				),
+				reason: Type.Optional(
+					Type.String({ description: "One short sentence explaining the chosen delay. Shown to the user." }),
+				),
+				prompt: Type.Optional(
+					Type.String({
+						description:
+							"The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing continues the loop.",
+					}),
+				),
+				stop: Type.Optional(
+					Type.Boolean({
+						description: "Set to true to end the self-paced loop immediately. All other fields are ignored.",
+					}),
+				),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				lastCtx = ctx;
+
+				if (params.stop === true) {
+					const chains = scheduler.byKind("wakeup");
+					for (const chain of chains) {
+						// Retiring also stops the monitors that belong to this chain.
+						retireChain(chain, "stopped by the agent");
+					}
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: chains.length
+									? `Loop ended. ${chains.length} pending wakeup(s) cancelled.`
+									: "Loop ended. Nothing was pending.",
+							},
+						],
+						details: { stopped: true, cancelledWakeups: chains.length },
+					};
+				}
+
+				if (typeof params.delaySeconds !== "number" || !Number.isFinite(params.delaySeconds)) {
+					throw new Error("delaySeconds is required unless stop is true.");
+				}
+				const prompt = params.prompt?.trim();
+				if (!prompt) {
+					throw new Error("prompt is required unless stop is true.");
+				}
+
+				const requested = params.delaySeconds;
+				const clamped = Math.min(MAX_DELAY_SECONDS, Math.max(MIN_DELAY_SECONDS, requested));
+				const wasClamped = clamped !== requested;
+
+				let chain = findChain(prompt);
+				if (!chain) {
+					if (stoppedPrompts.has(prompt)) {
+						throw new Error(
+							`The /loop chain for "${prompt}" was stopped and must not be rescheduled. ` +
+								"Do not call schedule_wakeup for it again. If the work should continue, ask the user to start a new /loop.",
+						);
+					}
+					chain = scheduler.add({
+						id: generateId(),
+						kind: "wakeup",
+						prompt,
+						recurring: false,
+						createdAt: Date.now(),
+						chainStartedAt: Date.now(),
+						durable: false,
+						source: "schedule_wakeup",
+					});
+				}
+
+				const scheduledFor = Date.now() + clamped * 1000;
+				scheduler.update(chain.id, {
+					scheduledFor,
+					keepaliveUsed: false,
+					keepaliveTurn: false,
+					awaitingReschedule: false,
+					reason: params.reason,
+				});
+
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: chains.length
-								? `Loop ended. ${chains.length} pending wakeup(s) cancelled.`
-								: "Loop ended. Nothing was pending.",
+							text:
+								`Next iteration scheduled in ${clamped}s` +
+								(wasClamped ? ` (clamped from ${requested}s)` : "") +
+								` for loop ${chain.id}.`,
 						},
 					],
-					details: { stopped: true, cancelledWakeups: chains.length },
-				};
-			}
-
-			if (typeof params.delaySeconds !== "number" || !Number.isFinite(params.delaySeconds)) {
-				throw new Error("delaySeconds is required unless stop is true.");
-			}
-			const prompt = params.prompt?.trim();
-			if (!prompt) {
-				throw new Error("prompt is required unless stop is true.");
-			}
-
-			const requested = params.delaySeconds;
-			const clamped = Math.min(MAX_DELAY_SECONDS, Math.max(MIN_DELAY_SECONDS, requested));
-			const wasClamped = clamped !== requested;
-
-			let chain = findChain(prompt);
-			if (!chain) {
-				if (stoppedPrompts.has(prompt)) {
-					throw new Error(
-						`The /loop chain for "${prompt}" was stopped and must not be rescheduled. ` +
-							"Do not call schedule_wakeup for it again. If the work should continue, ask the user to start a new /loop.",
-					);
-				}
-				chain = scheduler.add({
-					id: generateId(),
-					kind: "wakeup",
-					prompt,
-					recurring: false,
-					createdAt: Date.now(),
-					chainStartedAt: Date.now(),
-					durable: false,
-					source: "schedule_wakeup",
-				});
-			}
-
-			const scheduledFor = Date.now() + clamped * 1000;
-			scheduler.update(chain.id, {
-				scheduledFor,
-				keepaliveUsed: false,
-				keepaliveTurn: false,
-				awaitingReschedule: false,
-				reason: params.reason,
-			});
-
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text:
-							`Next iteration scheduled in ${clamped}s` +
-							(wasClamped ? ` (clamped from ${requested}s)` : "") +
-							` for loop ${chain.id}.`,
+					details: {
+						id: chain.id,
+						scheduledFor,
+						clampedDelaySeconds: clamped,
+						wasClamped,
+						stopped: false,
 					},
-				],
-				details: {
-					id: chain.id,
-					scheduledFor,
-					clampedDelaySeconds: clamped,
-					wasClamped,
-					stopped: false,
+				};
+			},
+		});
+	}
+
+	registerTools();
+
+	// ---------------------------------------------------------------- rendering
+
+	/**
+	 * Compact one-line tool rows.
+	 *
+	 * The resolver is consulted every time a tool row renders, so setting
+	 * `compactToolRows` to false falls back to Pi's default rendering without
+	 * re-registering the tool or reloading the extension.
+	 */
+	function registerToolRenderers(): void {
+		if (typeof pi.registerToolRenderer !== "function") return;
+		const renderers: Record<string, ToolRenderers> = {
+			cron_create: {
+				renderCall(args: any, theme: Theme, context: any) {
+					if (!context.isPartial && context.executionStarted) return completedCall();
+					return toolCall("Schedule", `${args.cron ?? ""} · ${truncate(args.prompt ?? "", 40)}`, theme);
 				},
-			};
-		},
-	});
+				renderResult(result: any, options: any, theme: Theme, context: any) {
+					if (context.isError) {
+						return toolResult(
+							resultText(result) || "Failed",
+							undefined,
+							{ expanded: options.expanded, isPartial: options.isPartial, isError: true },
+							theme,
+						);
+					}
+					const d = (result.details ?? {}) as {
+						id?: string;
+						cron?: string;
+						nextFireAt?: number;
+						recurring?: boolean;
+						durable?: boolean;
+						prompt?: string;
+					};
+					const summary =
+						`Scheduled ${d.id ?? "?"} · ${humanSchedule(d.cron ?? "")} · next ${formatClock(d.nextFireAt)}` +
+						(d.recurring === false ? " · one-shot" : "") +
+						(d.durable ? " · durable" : "");
+					return toolResult(
+						summary,
+						d.prompt,
+						{ expanded: options.expanded, isPartial: options.isPartial, isError: context.isError },
+						theme,
+					);
+				},
+			},
+			cron_delete: {
+				renderCall(args: any, theme: Theme, context: any) {
+					if (!context.isPartial && context.executionStarted) return completedCall();
+					return toolCall("Cancel", args.id ?? "", theme);
+				},
+				renderResult(result: any, options: any, theme: Theme, context: any) {
+					if (context.isError) {
+						return toolResult(
+							resultText(result) || "Failed",
+							undefined,
+							{ expanded: options.expanded, isPartial: options.isPartial, isError: true },
+							theme,
+						);
+					}
+					const d = (result.details ?? {}) as { cancelled?: boolean; id?: string };
+					const summary = d.cancelled ? `Cancelled ${d.id ?? "?"}` : `No job ${d.id ?? "?"}`;
+					return toolResult(
+						summary,
+						undefined,
+						{ expanded: options.expanded, isPartial: options.isPartial, isError: context.isError },
+						theme,
+					);
+				},
+			},
+			cron_list: {
+				renderCall(_args: any, theme: Theme, context: any) {
+					if (!context.isPartial && context.executionStarted) return completedCall();
+					return toolCall("List scheduled jobs", "", theme);
+				},
+				renderResult(result: any, options: any, theme: Theme, context: any) {
+					if (context.isError) {
+						return toolResult(
+							resultText(result) || "Failed",
+							undefined,
+							{ expanded: options.expanded, isPartial: options.isPartial, isError: true },
+							theme,
+						);
+					}
+					const d = (result.details ?? {}) as { jobs?: LoopJob[] };
+					const jobs = d.jobs ?? [];
+					let summary: string;
+					if (!jobs.length) summary = "No scheduled jobs";
+					else if (jobs.length === 1) summary = `1 job · ${jobSummary(jobs[0])}`;
+					else {
+						const shown = jobs.slice(0, 2).map(jobSummary).join(" · ");
+						summary = `${jobs.length} jobs · ${shown}${jobs.length > 2 ? " …" : ""}`;
+					}
+					const detail = options.expanded
+						? jobs.map((job) => `${jobSummary(job)} · ${truncate(job.prompt, 60)}`).join("\n")
+						: undefined;
+					return toolResult(
+						summary || resultText(result),
+						detail,
+						{ expanded: options.expanded, isPartial: options.isPartial, isError: context.isError },
+						theme,
+					);
+				},
+			},
+			schedule_wakeup: {
+				renderCall(args: any, theme: Theme, context: any) {
+					if (!context.isPartial && context.executionStarted) return completedCall();
+					if (args.stop === true) return toolCall("Stop loop", "", theme);
+					const reason = args.reason ? ` · ${truncate(args.reason, 40)}` : "";
+					return toolCall("Wakeup", `${formatDelay(args.delaySeconds)}${reason}`, theme);
+				},
+				renderResult(result: any, options: any, theme: Theme, context: any) {
+					if (context.isError) {
+						return toolResult(
+							resultText(result) || "Failed",
+							undefined,
+							{ expanded: options.expanded, isPartial: options.isPartial, isError: true },
+							theme,
+						);
+					}
+					const d = (result.details ?? {}) as {
+						id?: string;
+						scheduledFor?: number;
+						clampedDelaySeconds?: number;
+						wasClamped?: boolean;
+						stopped?: boolean;
+						cancelledWakeups?: number;
+					};
+					const summary = d.stopped
+						? `Stopped · ${d.cancelledWakeups ?? 0} wakeup${d.cancelledWakeups === 1 ? "" : "s"} cancelled`
+						: `Wakeup in ${formatDelay(d.clampedDelaySeconds)} · loop ${d.id ?? "?"}${d.wasClamped ? " (clamped)" : ""}`;
+					const detail = options.expanded
+						? [context.args.reason, d.scheduledFor ? `at ${formatClock(d.scheduledFor)}` : undefined]
+								.filter(Boolean)
+								.join(" · ")
+						: undefined;
+					return toolResult(
+						summary,
+						detail || undefined,
+						{ expanded: options.expanded, isPartial: options.isPartial, isError: context.isError },
+						theme,
+					);
+				},
+			},
+		};
+
+		pi.registerToolRenderer((toolName, next) => {
+			if (!loadConfig().compactToolRows) return next();
+			return renderers[toolName] ?? next();
+		});
+	}
+
+	registerToolRenderers();
 
 	// ----------------------------------------------------------------- events
 
@@ -1028,6 +1327,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		};
 		const text = contentText(message.content);
 		const prompt = stripProvenance(text, /^\[loop tick[^\]]*\]\n?/);
+		if (!loadConfig().compactMessages) {
+			const summary = firstLine(prompt);
+			const header = `loop tick #${details.tickCount ?? "?"}${summary ? ` · ${summary}` : ""}`;
+			return renderCard({
+				header,
+				body: prompt,
+				expanded: options.expanded,
+				outputPad: options.outputPad,
+				theme,
+			});
+		}
 		const label = details.tickCount !== undefined ? `loop #${details.tickCount}` : "loop";
 		const stamp = formatStamp(message.timestamp);
 		const header = stamp
@@ -1165,6 +1475,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		restoreState(ctx);
 		expireOldJobs(ctx);
 		scheduler.start();
+		if (syncPiCcExtensionsExcludes(piCcToolNames(), loadConfig().compactToolRows)) {
+			notify(ctx, "pi-cc-extensions excludeRenderers updated · /reload to apply", "info");
+		}
 	});
 
 	pi.on("session_before_switch", async () => {

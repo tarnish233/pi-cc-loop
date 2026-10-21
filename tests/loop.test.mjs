@@ -18,6 +18,7 @@ function makeHarness() {
 	const commands = new Map();
 	const tools = new Map();
 	const renderers = new Map();
+	const toolRenderers = [];
 	const handlers = new Map();
 	const busEvents = [];
 	const sent = [];
@@ -35,6 +36,9 @@ function makeHarness() {
 		},
 		registerMessageRenderer(customType, renderer) {
 			renderers.set(customType, renderer);
+		},
+		registerToolRenderer(resolver) {
+			toolRenderers.push(resolver);
 		},
 		on(event, handler) {
 			handlers.set(event, handler);
@@ -88,6 +92,7 @@ function makeHarness() {
 
 	return {
 		pi,
+		toolRenderers,
 		ctx,
 		state,
 		commands,

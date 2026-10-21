@@ -28,6 +28,7 @@ function makeSharedPi() {
 		registerCommand: (name, options) => commands.set(name, options),
 		registerTool: (tool) => tools.set(tool.name, tool),
 		registerMessageRenderer: () => {},
+		registerToolRenderer: () => {},
 		on: (event, handler) => {
 			handlers.set(event, handler);
 			return () => handlers.delete(event);

@@ -43,6 +43,7 @@ function makeHarness() {
 		registerMessageRenderer(customType, renderer) {
 			renderers.set(customType, renderer);
 		},
+		registerToolRenderer() {},
 		on(event, handler) {
 			handlers.set(event, handler);
 			return () => handlers.delete(event);
