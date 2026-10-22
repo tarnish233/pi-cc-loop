@@ -79,75 +79,11 @@ function tickMessage(content, details = {}) {
 	};
 }
 
-test("the tick is a quiet two-line block, not [pi-cc-loop-tick]", () => {
-	const h = makeHarness();
-	const renderer = h.renderers.get("pi-cc-loop-tick");
-	assert.ok(renderer, "a renderer is registered for the tick message type");
-
-	const message = tickMessage(
-		"[loop tick #7 · scheduled by /loop, not typed by the user]\ncheck the deploy and tell me what happened",
-		{ jobId: "abc12345" },
-	);
-
-	const { text, lines, bgCalls } = render(renderer, message, false);
-	assert.equal(lines.length, 2, text);
-	assert.ok(lines[0].includes("loop #7"), text);
-	assert.match(lines[0], /\d{1,2}:\d{2}/, "the header carries a timestamp");
-	assert.equal(lines[1].trim(), "check the deploy and tell me what happened");
-	assert.ok(!text.includes("[pi-cc-loop-tick]"), "the machine name is gone");
-	assert.ok(!text.includes("↻"), "no arrow glyph");
-	assert.equal(bgCalls.count, 0, "no background is painted");
-});
-
-test("expanded shows the job metadata", () => {
-	const h = makeHarness();
-	const renderer = h.renderers.get("pi-cc-loop-tick");
-	const message = tickMessage(
-		"[loop tick #7 · scheduled by /loop, not typed by the user]\ncheck the deploy",
-		{ jobId: "abc12345", cron: "*/5 * * * *" },
-	);
-
-	const { text } = render(renderer, message, true);
-	assert.ok(text.includes("job abc12345"), text);
-	assert.ok(text.includes("cron */5 * * * *"), text);
-	assert.ok(text.includes("scheduled by /loop"), text);
-});
-
-test("long prompts are capped when collapsed and complete when expanded", () => {
-	const h = makeHarness();
-	const renderer = h.renderers.get("pi-cc-loop-tick");
-	const prompt = ["line one", "line two", "line three", "line four", "line five"].join("\n");
-	const message = tickMessage(
-		`[loop tick #7 · scheduled by /loop, not typed by the user]\n${prompt}`,
-	);
-
-	const collapsed = render(renderer, message, false);
-	assert.ok(collapsed.text.includes("line one"), collapsed.text);
-	assert.ok(collapsed.text.includes("line three"), collapsed.text);
-	assert.ok(collapsed.text.includes("+2 more lines"), collapsed.text);
-	assert.ok(!collapsed.text.includes("line four"), collapsed.text);
-
-	const expanded = render(renderer, message, true);
-	assert.ok(expanded.text.includes("line four"), expanded.text);
-	assert.ok(expanded.text.includes("line five"), expanded.text);
-	assert.ok(!expanded.text.includes("more lines"), expanded.text);
-});
 
 
 
-test("a scheduled fire is labelled like Claude Code's 'Running scheduled task'", async () => {
-	const { renderTickMessage } = await loadModule("renderers.ts");
-	const { text } = render(
-		renderTickMessage,
-		tickMessage(
-			"[scheduled task 751ff0dc \u00b7 Every minute \u00b7 started by the schedule; do not call schedule_wakeup]\n\u56de\u590d ok",
-			{ kind: "cron", tickCount: 3, jobId: "751ff0dc" },
-		),
-	);
-	assert.match(text, /scheduled task/);
-	assert.ok(!text.includes("#3"), "not a loop iteration");
-	assert.ok(!text.includes("751ff0dc"), "the id belongs in /loop status, not on every fire");
-});
+
+
 
 test("clock times read like Claude Code's '6:16pm'", async () => {
 	const { formatClock } = await loadModule("renderers.ts");

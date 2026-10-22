@@ -85,8 +85,10 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 
 	const ctx = makeCtx(workdir);
 
-	// 1. the user starts a self-paced loop
-	await commands.get("loop").handler("每10秒钟打印一次hello world", ctx);
+	// 1. the model starts a self-paced loop
+	const armedLoop = await tools
+		.get("schedule_wakeup")
+		.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
 
 	// 2. the agent arms a Monitor that belongs to the chain
 	const armed = await tools
@@ -109,9 +111,9 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 		.get("schedule_wakeup")
 		.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
 
-	// 4. the user runs /loop stop
+	// 4. the user asks to stop, and the model calls cron_delete (as /loop stop does now)
 	const sentBeforeStop = shared.sent.length;
-	await commands.get("loop").handler("stop", ctx);
+	await tools.get("cron_delete").execute("d", { id: armedLoop.details.id }, undefined, undefined, ctx);
 
 	// 5. the monitor that belonged to the chain is stopped too
 	const list = await tools.get("monitor_list").execute("c", {}, undefined, undefined, ctx);

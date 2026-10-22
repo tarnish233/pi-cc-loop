@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { makeHarness, start, startSelfPaced } from "./harness.mjs";
+import { createCron, makeHarness, start, startSelfPaced } from "./harness.mjs";
 
 const statusFile = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
@@ -19,21 +19,21 @@ function schedule(h, id, inMs) {
 
 test("the footer shows how many loops are armed and when the next one runs", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	schedule(h, h.scheduler().list()[0].id, 3 * 60_000 + 30_000);
 	assert.equal(h.status("loop"), "loop 1 · next 4m");
 });
 
 test("the next run under a minute reads as <1m", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	schedule(h, h.scheduler().list()[0].id, 40_000);
 	assert.equal(h.status("loop"), "loop 1 · next <1m");
 });
 
 test("several loops collapse into one count with the earliest run", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	await startSelfPaced(h, "watch ci", 1200); // a self-paced chain, armed by the model
 	const fixed = h.scheduler().byKind("cron")[0];
 	h.scheduler().update(fixed.id, { nextFireAt: Date.now() + 3 * 60_000 });
@@ -44,7 +44,7 @@ test("several loops collapse into one count with the earliest run", async () => 
 
 test("the footer is repainted only when its text changes", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	const id = h.scheduler().list()[0].id;
 	schedule(h, id, 3 * 60_000);
 	const calls = h.statusCalls.length;
@@ -65,10 +65,11 @@ test("no loops means no status line at all", async () => {
 
 test("stopping a loop clears the footer", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	schedule(h, h.scheduler().list()[0].id, 3 * 60_000);
 	assert.ok(h.status("loop"));
-	await h.commands.get("loop").handler("stop", h.ctx);
+	const id = h.scheduler().list()[0].id;
+	await h.tools.get("cron_delete").execute("d", { id }, undefined, undefined, h.ctx);
 	assert.equal(h.status("loop"), undefined);
 	assert.deepEqual(h.statusCalls.at(-1), { key: "loop", text: undefined });
 });
@@ -78,7 +79,7 @@ test("/loop footer on|off turns the footer summary off for every pi-cc package",
 	process.env.PI_CC_CONFIG_FILE = configFile;
 	try {
 		const h = await start(makeHarness());
-		await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 		schedule(h, h.scheduler().list()[0].id, 3 * 60_000);
 
 		await h.commands.get("loop").handler("footer off", h.ctx);
@@ -102,7 +103,7 @@ test("PI_CC_FOOTER=0 starts with the footer off", async () => {
 	process.env.PI_CC_FOOTER = "0";
 	try {
 		const h = await start(makeHarness());
-		await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 		schedule(h, h.scheduler().list()[0].id, 3 * 60_000);
 		assert.equal(h.statusCalls.length, 0);
 	} finally {
@@ -115,7 +116,7 @@ test("a Pi without ctx.ui.setStatus is left alone", async () => {
 	const h = makeHarness();
 	delete h.ctx.ui.setStatus;
 	await start(h);
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	h.scheduler().tick();
 	assert.equal(h.notifications.filter((n) => n.level === "error").length, 0, "no error is raised");
 });

@@ -51,63 +51,11 @@ test("an impossible date never matches", () => {
 	assert.equal(cron.isUnreachable("0 0 * * *"), false);
 });
 
-test("intervalToCron uses step syntax when it divides evenly", () => {
-	assert.equal(cron.intervalToCron(300).cron, "*/5 * * * *");
-	assert.equal(cron.intervalToCron(300).human, "every 5 minutes");
-	assert.equal(cron.intervalToCron(3600).cron, "0 * * * *");
-	assert.equal(cron.intervalToCron(7200).cron, "0 */2 * * *");
-	assert.equal(cron.intervalToCron(86400).cron, "0 0 * * *");
-	assert.equal(cron.intervalToCron(86400 * 3).cron, "0 0 */3 * *");
-});
 
-test("intervalToCron rounds a sub-minute interval up to one minute", () => {
-	// Claude Code: "s -> ceil to nearest minute". The old code produced
-	// "0 * * * *", which is hourly, not every minute.
-	const thirty = cron.intervalToCron(30);
-	assert.equal(thirty.cron, "* * * * *");
-	assert.equal(thirty.seconds, 60);
-	assert.equal(thirty.adjusted, true);
-	assert.match(thirty.note, /rounded up to 1 minute/);
 
-	// The generated expression really does fire every minute.
-	const fields = cron.parseCron(thirty.cron);
-	const a = cron.nextFireAfter(fields, new Date("2026-10-21T10:02:30"));
-	const b = cron.nextFireAfter(fields, a);
-	assert.equal((b - a) / 60000, 1, "one minute apart");
-});
 
-test("intervalToCron rounds a non-dividing interval to the nearest clean one", () => {
-	// Claude Code: "If the interval doesn't cleanly divide its unit, round to
-	// the nearest clean interval and tell the user what you rounded to."
-	const seven = cron.intervalToCron(420);
-	assert.equal(seven.cron, "*/6 * * * *");
-	assert.equal(seven.adjusted, true);
-	assert.match(seven.note, /rounded to 6m/);
-});
 
-test("parseIntervalToken reads the duration units", () => {
-	assert.equal(cron.parseIntervalToken("5m"), 300);
-	assert.equal(cron.parseIntervalToken("30s"), 30);
-	assert.equal(cron.parseIntervalToken("2h"), 7200);
-	assert.equal(cron.parseIntervalToken("1d"), 86400);
-	assert.equal(cron.parseIntervalToken("5min"), null);
-	assert.equal(cron.parseIntervalToken("abc"), null);
-});
 
-test("parseEveryClause handles the trailing clause", () => {
-	const every = cron.parseEveryClause("check the deploy every 20m");
-	assert.equal(every.interval, 1200);
-	assert.equal(every.prompt, "check the deploy");
-
-	const words = cron.parseEveryClause("run tests every 5 minutes");
-	assert.equal(words.interval, 300);
-	assert.equal(words.prompt, "run tests");
-});
-
-test("'every PR' is not an interval", () => {
-	assert.equal(cron.parseEveryClause("check every PR"), null);
-	assert.equal(cron.parseEveryClause("review every 3 PRs"), null);
-});
 
 test("describeCron summarises the expression", () => {
 	assert.equal(cron.describeCron("*/5 * * * *"), "minute */5");
@@ -142,43 +90,5 @@ test("humanSchedule labels cron expressions like Claude Code", () => {
 	}
 });
 
-test("every interval /loop accepts gets a correct label", () => {
-	for (const [seconds, label] of [
-		[60, "Every minute"],
-		[300, "Every 5 minutes"],
-		[3600, "Every hour"],
-		[7200, "Every 2 hours"],
-		[86400, "Every day at 12:00 AM"],
-		[86400 * 3, "Every 3 days at 12:00 AM"],
-	]) {
-		assert.equal(cron.humanSchedule(cron.intervalToCron(seconds).cron), label, `${seconds}s`);
-	}
-});
 
-test("a Chinese interval is split like the English one", async () => {
-	const { parseChineseInterval, intervalToCron } = await loadModule("cron.ts");
-	const cases = [
-		["每2分钟输出一次hello pi", 120, "输出一次hello pi"],
-		["每隔2分钟输出一次", 120, "输出一次"],
-		["输出一次 hello pi 每2小时", 7200, "输出一次 hello pi"],
-		["每30秒 ping", 30, "ping"],
-		["每2个钟头检查", 7200, "检查"],
-		["每 15 分钟 看看 CI", 900, "看看 CI"],
-	];
-	for (const [input, seconds, prompt] of cases) {
-		assert.deepEqual(parseChineseInterval(input), { interval: seconds, prompt }, input);
-	}
-	// Prose stays prose: no digit, no schedule.
-	for (const input of ["每天都有一个测试失败", "每个文件输出一次", "每个 PR 都要看"]) {
-		assert.equal(parseChineseInterval(input), null, input);
-	}
-	assert.equal(intervalToCron(120)?.cron, "*/2 * * * *");
-});
 
-test("a standalone Chinese duration works as an interval token", async () => {
-	const { parseIntervalToken } = await loadModule("cron.ts");
-	const cases = [["2分钟", 120], ["30秒", 30], ["1小时", 3600], ["2个钟头", 7200], ["1天", 86400]];
-	for (const [token, seconds] of cases) assert.equal(parseIntervalToken(token), seconds, token);
-	assert.equal(parseIntervalToken("0分钟"), null);
-	assert.equal(parseIntervalToken("abc"), null);
-});

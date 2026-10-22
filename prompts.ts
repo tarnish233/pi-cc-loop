@@ -47,32 +47,49 @@ const DELAY_ADVICE = [
  * parse. Claude Code's /loop is a skill: the model reads the input and works
  * the schedule out itself, so an interval written in any language works.
  */
-const LOOP_SCHEDULE_RULES = [
-	"This is a `/loop` request. Its prompt is: {prompt}",
+/**
+ * The instructions for one `/loop` request. Claude Code's `/loop` is a skill:
+ * the command turns into a user message carrying these rules, and the model
+ * drives CronCreate / CronList / CronDelete / ScheduleWakeup itself. Nothing is
+ * created by code, so the conversation shows what was asked and what was done.
+ */
+const LOOP_FILE_SENTINEL_PLACEHOLDER = "__loop_md_sentinel__";
+
+const LOOP_COMMAND_GUIDELINES = [
+	"This is a `/loop` request from the user: {raw}",
 	"",
-	"Decide how it should repeat, then set it up.",
+	"## Read the input",
+	"- `[interval] <task>`: an interval was given (\"5m\", \"2h\", \"every 20m\", \"每2分钟\", \"每隔2小时\"). Use the fixed-interval mode below.",
+	"- `<task>` alone: no interval. Use the self-paced mode below and choose each delay yourself.",
+	"- An interval alone, or a bare `/loop`: the tasks come from loop.md (see the last section).",
+	"- `stop [id]` or `status`: see those sections.",
 	"",
-	"**If the prompt asks for a fixed interval** (\"every 30 seconds\", \"each 5 minutes\", \"every hour\",",
-	"\"\u6bcf30\u79d2\"): create a recurring job with the `cron_create` tool.",
-	"- `prompt`: the task without the interval wording, so every run does the task instead of scheduling it again.",
-	"- Convert the interval to a 5-field cron expression in local time (\"M H DoM Mon DoW\").",
-	"  `s` rounds up to the nearest minute (the scheduler's minimum granularity is 1 minute),",
-	"  `m` are minutes, `h` are hours, `d` are days. Examples: `5m` -> `*/5 * * * *`,",
-	"  `1h` -> `0 * * * *`, `1d` -> `0 0 * * *`. If the interval does not cleanly divide its",
-	"  unit, round to the nearest clean interval and tell the user what you rounded to.",
-	"- Then confirm to the user: what is scheduled, the cron expression, the human-readable",
-	"  cadence, the next run time from the tool result, that recurring jobs auto-expire after",
-	"  7 days (they run one final time, then are deleted), and the job id they can cancel with",
-	"  `cron_delete`.",
+	"## Fixed interval (an interval was given)",
+	"1. Call `cron_create` **once**, `recurring: true`, with a 5-field cron expression in local time and the task **without** the interval wording, so every run does the task instead of scheduling it again.",
+	"   - under a minute rounds up to `* * * * *`; 5 minutes is `*/5 * * * *`; every hour is `0 * * * *`; every day is `0 0 * * *`.",
+	"   - if the interval does not divide its unit cleanly, round to the nearest clean interval and say so.",
+	"2. **Then do the task now** \u2014 do not wait for the first fire.",
+	"3. Confirm briefly: what is scheduled, the cron expression, the cadence, the next run from the tool result, that a recurring job expires after 7 days (it fires once more, then is deleted), the job id, and that `/loop stop <id>` cancels it.",
+	"4. Never call `schedule_wakeup` for this loop: the cron fires its own ticks. Scheduling one would run the task twice.",
 	"",
-	"**Otherwise the interval is open-ended**: you pace the loop yourself.",
-	"- Do the task now, then write your update for the user.",
-	"- Then call the `schedule_wakeup` tool with `delaySeconds` (60-3600), a one-sentence `reason`,",
-	"  and `prompt` set to the same /loop prompt verbatim: {quoted}",
-	"  The turn ends as soon as `schedule_wakeup` returns, so call it last.",
-	DELAY_ADVICE,
-	"- If the task is complete or can no longer make progress, call `schedule_wakeup` with",
-	"  `stop: true` instead of scheduling another iteration.",
+	"## Self-paced (no interval)",
+	"1. Do the task now, then write your update for the user.",
+	"2. Then call `schedule_wakeup` with `delaySeconds` (60-3600), a one-sentence `reason`, and `prompt` set to the same `/loop` input verbatim ({quoted}). The turn ends as soon as it returns, so call it last.",
+	"{delayAdvice}",
+	"3. If the next iteration waits on an external event and no monitor is running for it, arm `Monitor` once with `loopPrompt` set to {quoted}; keep `delaySeconds` at 1200-1800 as the fallback heartbeat.",
+	"4. If the task is complete or cannot progress without the user, call `schedule_wakeup` with `stop: true` and say why.",
+	"",
+	"## status and stop",
+	"- `status`: call `cron_list` and report each job's id, cadence, next run and prompt, plus whether it is session-only or durable.",
+	"- `stop`: if the id is unknown, call `cron_list` first; then `cron_delete` for a scheduled job. A self-paced loop is ended with `schedule_wakeup` and `stop: true`.",
+	"",
+	"## Flags",
+	"- `--durable`: pass `durable: true` to `cron_create` so the job survives restarts.",
+	"- `--max N`: pass `maxFires: N`.",
+	"",
+	"## loop.md",
+	"When the request has no task of its own (bare `/loop`, or an interval alone), pass the literal sentinel " + LOOP_FILE_SENTINEL_PLACEHOLDER + " as the prompt: it expands at fire time to `.pi/loop.md`, or to the built-in maintenance pass when there is no loop.md.",
+	"For the run you do right now, read `.pi/loop.md` (or `~/.pi/loop.md`) yourself and do those tasks; the sentinel only expands on later fires.",
 ].join("\n");
 
 const LOOP_GUIDELINES = [
@@ -146,8 +163,13 @@ export function scheduledTaskProvenance(id: string, schedule: string): string {
 	return fill(SCHEDULED_TASK_PROVENANCE, { id, schedule });
 }
 
-export function scheduleRules(prompt: string): string {
-	return fill(LOOP_SCHEDULE_RULES, { prompt: describePrompt(prompt), quoted: quote(prompt) });
+export function loopCommandGuidelines(raw: string): string {
+	const quoted = quote(raw || LOOP_FILE_SENTINEL);
+	return fill(LOOP_COMMAND_GUIDELINES, {
+		raw: raw ? `${quote(raw)}` : "(empty: the loop.md tasks)",
+		quoted,
+		delayAdvice: DELAY_ADVICE,
+	}).replace(LOOP_FILE_SENTINEL_PLACEHOLDER, quote(LOOP_FILE_SENTINEL));
 }
 
 export function loopGuidelines(prompt: string): string {

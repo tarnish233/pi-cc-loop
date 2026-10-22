@@ -154,36 +154,7 @@ export function isUnreachable(expression: string): boolean {
 	return nextFireAfter(fields, new Date(), 366) === null;
 }
 
-export interface IntervalSpec {
-	/** Number of seconds the schedule actually uses. */
-	seconds: number;
-	/** Cron expression that implements the interval. */
-	cron: string;
-	/** Human readable cadence, e.g. "every 5 minutes". */
-	human: string;
-	/** True when the requested interval had to be adjusted. */
-	adjusted: boolean;
-	/** What the user asked for, in seconds. */
-	requestedSeconds: number;
-	/** Human readable explanation of the adjustment, for the user. */
-	note?: string;
-}
-
-const UNIT_SECONDS: Record<string, number> = {
-	s: 1,
-	m: 60,
-	h: 3600,
-	d: 86400,
-};
-
 /** The unit words Claude Code's /loop accepts in a trailing "every N <unit>" clause. */
-const UNIT_WORDS: Record<string, string[]> = {
-	s: ["s", "sec", "secs", "second", "seconds"],
-	m: ["m", "min", "mins", "minute", "minutes"],
-	h: ["h", "hr", "hrs", "hour", "hours"],
-	d: ["d", "day", "days"],
-};
-
 /**
  * The divisor of `total` closest to `n`.
  *
@@ -206,142 +177,15 @@ function nearestDivisor(n: number, total: number): number {
 }
 
 /**
- * Convert a duration into a cron expression, following Claude Code's rule:
- *
- *   "Supported suffixes: `s` -> ceil to nearest minute, `m` (minutes),
- *    `h` (hours), `d` (days). Examples: `5m` -> a 5 minute step, `1h` -> `0 * * * *`,
- *    `1d` -> `0 0 * * *`. If the interval doesn't cleanly divide its unit, round to the
- *    nearest clean interval and tell the user what you rounded to."
- */
-export function intervalToCron(seconds: number): IntervalSpec | null {
-	if (!Number.isFinite(seconds) || seconds <= 0) return null;
-
-	// Sub-minute: the scheduler's granularity is one minute, so round up.
-	if (seconds < 60) {
-		return {
-			seconds: 60,
-			cron: "* * * * *",
-			human: "every minute",
-			adjusted: true,
-			requestedSeconds: seconds,
-			note: `${seconds}s rounded up to 1 minute (the scheduler's minimum granularity is 1 minute)`,
-		};
-	}
-
-	// "Seconds are rounded up to the nearest minute since cron has one-minute
-	// granularity."
-	if (seconds < 3600 && Math.ceil(seconds / 60) < 60) {
-		const requested = Math.ceil(seconds / 60);
-		const minutes = nearestDivisor(requested, 60);
-		return {
-			seconds: minutes * 60,
-			cron: `*/${minutes} * * * *`,
-			human: `every ${minutes} minute${minutes === 1 ? "" : "s"}`,
-			adjusted: minutes !== requested,
-			requestedSeconds: seconds,
-			...(minutes !== requested
-				? { note: `${requested}m rounded to ${minutes}m, the nearest clean interval` }
-				: {}),
-		};
-	}
-
-	if (seconds < 86400) {
-		const requested = Math.max(1, Math.round(seconds / 3600));
-		const hours = nearestDivisor(requested, 24);
-		return {
-			seconds: hours * 3600,
-			cron: hours === 1 ? "0 * * * *" : `0 */${hours} * * *`,
-			human: `every ${hours} hour${hours === 1 ? "" : "s"}`,
-			adjusted: hours !== requested,
-			requestedSeconds: seconds,
-			...(hours !== requested
-				? { note: `${requested}h rounded to ${hours}h, the nearest clean interval` }
-				: {}),
-		};
-	}
-
-	const days = Math.max(1, Math.round(seconds / 86400));
-	return {
-		seconds: days * 86400,
-		cron: days === 1 ? "0 0 * * *" : `0 0 */${days} * *`,
-		human: days === 1 ? "every day" : `every ${days} days`,
-		adjusted: days * 86400 !== seconds,
-		requestedSeconds: seconds,
-	};
-}
-
-/** Chinese interval words, with a digit required so `每个文件` or `每天都有一个…` stay prose. */
-const CHINESE_UNITS: Record<string, number> = {
-	秒: 1,
-	秒钟: 1,
-	分: 60,
-	分钟: 60,
-	小时: 3600,
-	钟头: 3600,
-	天: 86400,
-	日: 86400,
-};
-
-/**
  * Parse `每2分钟输出一次` / `输出一次 每隔 2 小时`: an explicit interval written
  * in Chinese. The digit is required on purpose: `每天都有一个测试失败` is a
  * prompt, not a schedule, and Claude Code's own splitting is just as literal.
  */
-/** Parse a duration token such as `5m`, `30s`, `2h`, `1d`, or `2分钟`. */
-export function parseIntervalToken(token: string): number | null {
-	const trimmed = token.trim();
-	const m = /^(\d+)\s*([smhd])$/i.exec(trimmed);
-	if (m) {
-		const amount = Number(m[1]);
-		if (!Number.isFinite(amount) || amount <= 0) return null;
-		return amount * UNIT_SECONDS[m[2].toLowerCase()];
-	}
-	// A standalone Chinese duration token: `/loop 2分钟 输出一次`.
-	const chinese = /^(\d+)\s*个?\s*(秒钟|分钟|钟头|小时|秒|分|天|日)$/u.exec(trimmed);
-	if (!chinese) return null;
-	const amount = Number(chinese[1]);
-	const seconds = CHINESE_UNITS[chinese[2]];
-	if (!Number.isFinite(amount) || amount <= 0 || !seconds) return null;
-	return amount * seconds;
-}
-
 /**
  * Parse a trailing `every 20m` / `every 5 min` / `every 2 hours` clause, with
  * the unit words Claude Code accepts.
  */
-export function parseEveryClause(input: string): { interval: number; prompt: string } | null {
-	const m = /\bevery\s+(\d+)\s*([a-z]+)\s*$/i.exec(input.trim());
-	if (!m) return null;
-	const amount = Number(m[1]);
-	if (!(amount > 0)) return null;
-	const word = m[2].toLowerCase();
-	const unit = Object.keys(UNIT_WORDS).find((key) => UNIT_WORDS[key].includes(word));
-	if (!unit) return null;
-	const unitSeconds = UNIT_SECONDS[unit];
-	const prompt = input.trim().slice(0, m.index).trim();
-	return { interval: amount * unitSeconds, prompt };
-}
-
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-export function parseChineseInterval(input: string): { interval: number; prompt: string } | null {
-	const unit = "(秒钟|分钟|钟头|小时|秒|分|天|日)";
-	const prefix = new RegExp(`^每\\s*隔?\\s*(\\d+)\\s*个?\\s*${unit}\\s*`, "u").exec(input.trim());
-	if (prefix) {
-		const amount = Number(prefix[1]);
-		const seconds = CHINESE_UNITS[prefix[2]];
-		if (!(amount > 0) || !seconds) return null;
-		return { interval: amount * seconds, prompt: input.trim().slice(prefix[0].length).trim() };
-	}
-	const suffix = new RegExp(`\\s*每\\s*隔?\\s*(\\d+)\\s*个?\\s*${unit}\\s*$`, "u").exec(input.trim());
-	if (suffix) {
-		const amount = Number(suffix[1]);
-		const seconds = CHINESE_UNITS[suffix[2]];
-		if (!(amount > 0) || !seconds) return null;
-		return { interval: amount * seconds, prompt: input.trim().slice(0, suffix.index).trim() };
-	}
-	return null;
-}
 
 
 /**

@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
+	createCron,
 	guidelinesOf,
 	makeDue,
 	makeHarness,
@@ -16,6 +17,8 @@ import {
 	startSelfPaced,
 	stateEntries,
 } from "./harness.mjs";
+
+const LOOP_SENTINEL = "<<loop.md>>";
 
 const wakeup = (h, args) => h.tools.get("schedule_wakeup").execute("c", args, undefined, undefined, h.ctx);
 
@@ -61,7 +64,7 @@ test("Esc during a turn woken by the loop's monitor cancels that loop", async ()
 
 test("Esc on an unrelated turn keeps the loops; fixed-interval jobs are never stopped by Esc", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the build", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the build" });
 	const chain = await startSelfPaced(h, "watch CI", 1200);
 	await runTurn(h);
 	const scheduledFor = h.scheduler().get(chain.id).scheduledFor;
@@ -159,11 +162,13 @@ test("/loop 5m runs the loop.md tasks on a fixed schedule", async () => {
 	fs.mkdirSync(path.join(h.ctx.cwd, ".pi"), { recursive: true });
 	fs.writeFileSync(path.join(h.ctx.cwd, ".pi", "loop.md"), "check the release branch\n");
 
-	await h.commands.get("loop").handler("5m", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: LOOP_SENTINEL });
 	const job = h.scheduler().list()[0];
 	assert.equal(job.cron, "*/5 * * * *");
 	assert.equal(job.prompt, "<<loop.md>>", "the prompt is the sentinel, not the file text");
-	assert.ok(h.sent[0].message.content.includes("check the release branch"), "the first run gets the tasks");
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	assert.ok(h.sent.at(-1).content.includes("check the release branch"), "the first fire gets the tasks");
 });
 
 test("loop.md is read at fire time: edits apply, unchanged tasks are not resent", async () => {
@@ -171,14 +176,16 @@ test("loop.md is read at fire time: edits apply, unchanged tasks are not resent"
 	const file = path.join(h.ctx.cwd, ".pi", "loop.md");
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "task A\n");
-	await h.commands.get("loop").handler("10m", h.ctx);
+	await createCron(h, { cron: "*/10 * * * *", prompt: LOOP_SENTINEL });
 	const job = h.scheduler().list()[0];
 	const fire = () => {
 		makeDue(h, job.id);
 		h.scheduler().tick();
-		return h.sent.at(-1).message.content;
+		return h.sent.at(-1).content;
 	};
 
+	const first = fire();
+	assert.ok(first.includes("task A"), "the first fire carries the tasks");
 	const unchanged = fire();
 	assert.ok(!unchanged.includes("task A"), "unchanged tasks: a short reminder");
 	assert.match(unchanged, /established earlier in this conversation/);
@@ -195,13 +202,13 @@ test("a compaction makes the next tick resend the full loop.md tasks", async () 
 	const file = path.join(h.ctx.cwd, ".pi", "loop.md");
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "task A\n");
-	await h.commands.get("loop").handler("10m", h.ctx);
+	await createCron(h, { cron: "*/10 * * * *", prompt: LOOP_SENTINEL });
 	const job = h.scheduler().list()[0];
 
 	await h.handlers.get("session_compact")({}, h.ctx);
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	assert.ok(h.sent.at(-1).message.content.includes("task A"));
+	assert.ok(h.sent.at(-1).content.includes("task A"));
 });
 
 test("a long loop.md is truncated like Claude Code's", async () => {
@@ -209,26 +216,29 @@ test("a long loop.md is truncated like Claude Code's", async () => {
 	const file = path.join(h.ctx.cwd, ".pi", "loop.md");
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, `${"x".repeat(100)}\n`.repeat(400)); // 40,400 characters
-	await h.commands.get("loop").handler("", h.ctx);
-	const content = h.sent[0].message.content;
+	await createCron(h, { cron: "*/10 * * * *", prompt: LOOP_SENTINEL });
+	const job = h.scheduler().list()[0];
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	const content = h.sent.at(-1).content;
 	assert.ok(content.length < 26_000, `${content.length} characters`);
 	assert.match(content, /loop\.md was truncated to 25000 bytes/);
 });
 
-test("a bare /loop is self-paced and schedules with the sentinel", async () => {
+test("a bare /loop tells the model to run the loop.md tasks", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("", h.ctx);
 	const event = runEvent(h.sent[0]);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
 	const text = guidelinesOf(event);
-	assert.ok(text.includes("A self-paced `/loop` is running"), text);
 	assert.ok(text.includes('"<<loop.md>>"'), "the model passes the sentinel back");
-	assert.ok(!text.includes("Decide how it should repeat"), "no fixed-or-open-ended decision for a bare /loop");
+	assert.match(text, /Self-paced/);
+	assert.match(text, /loop\.md/);
 });
 
 test("a cron tick says the schedule fires on its own, and refuses a wakeup", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	const job = h.scheduler().byKind("cron")[0];
 	makeDue(h, job.id);
 	h.scheduler().tick();
@@ -251,7 +261,7 @@ test("a cron tick says the schedule fires on its own, and refuses a wakeup", asy
 
 test("after a cron tick, a turn the user starts may schedule again", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	const job = h.scheduler().byKind("cron")[0];
 	makeDue(h, job.id);
 	h.scheduler().tick();
@@ -343,34 +353,7 @@ test("cron_delete on a self-paced chain ends it like /loop stop", async () => {
 
 // -------------------------------------------------------------- scheduling
 
-test("a slow turn start does not send the same tick twice", async () => {
-	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m ping", h.ctx);
-	const job = h.scheduler().list()[0];
-	makeDue(h, job.id);
-	h.scheduler().tick(); // tick #2 goes out
-	h.state.idle = false; // the run is starting (a slow compaction)
-	h.scheduler().tick(Date.now() + 31_000);
-	h.state.idle = true;
-	await runTurn(h);
-	assert.equal(h.sent.length, 2, h.sent.map((entry) => entry.message.content.split("\n")[0]).join("\n"));
-});
 
-test("cron fires do not add session entries; structural changes do", async () => {
-	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("1m ping", h.ctx);
-	const before = h.appended.length;
-	const job = h.scheduler().list()[0];
-	for (let i = 0; i < 10; i++) {
-		makeDue(h, job.id);
-		h.scheduler().tick();
-		await runTurn(h);
-	}
-	assert.equal(h.appended.length, before, "ten fires, no new entries");
-
-	await h.commands.get("loop").handler(`stop ${job.id}`, h.ctx);
-	assert.equal(h.appended.length, before + 1, "removing the job is persisted");
-});
 
 test("the stopped-prompt memory is capped", async () => {
 	const h = await start(makeHarness());
@@ -410,32 +393,5 @@ test("two loops armed in the same run stay separate, and Esc cancels both", asyn
 	assert.equal(h.scheduler().byKind("wakeup").length, 0, "both belong to the interrupted run");
 });
 
-test("the first run of a fixed-interval /loop already says not to self-pace", async () => {
-	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
-	const event = runEvent(h.sent[0]);
-	await h.handlers.get("before_agent_start")(event, h.ctx);
-	const text = guidelinesOf(event);
-	assert.match(text, /A recurring \/loop job was created/);
-	assert.match(text, /do not call `schedule_wakeup` for this loop, now or on a later tick/);
-	assert.ok(!text.includes("Decide how it should repeat"), "no mode choice: the interval was given");
-});
 
-test("/loop 2分钟 输出一次 creates the job in code, no model round trip", async () => {
-	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("2分钟 输出一次 hello pi", h.ctx);
-	const job = h.lastState().jobs[0];
-	assert.equal(job.kind, "cron");
-	assert.equal(job.cron, "*/2 * * * *");
-	assert.equal(job.prompt, "输出一次 hello pi");
-	assert.equal(h.sent.length, 1);
-	assert.match(h.sent[0].message.content, /^\[scheduled task /);
-});
 
-test("/loop 每2分钟输出一次hello pi is split into interval and prompt", async () => {
-	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("每2分钟输出一次hello pi", h.ctx);
-	const job = h.lastState().jobs[0];
-	assert.equal(job.cron, "*/2 * * * *");
-	assert.equal(job.prompt, "输出一次hello pi");
-});

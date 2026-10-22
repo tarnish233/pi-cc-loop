@@ -14,98 +14,45 @@ pi install npm:pi-cc-loop
 
 安装后执行 `/reload`。
 
-## 功能
+## 工作方式
+
+`/loop` 和 CC 一样是一个**技能**，不是用代码直接排任务：你输入的内容会作为一条普通 user 消息进入对话，
+模型自己解析间隔并调用工具完成。所以对话里始终能看到你要求了什么、模型做了什么。
 
 | 功能 | 说明 | 入口 |
 | --- | --- | --- |
-| 固定间隔 | 5 字段 cron；`30s`、`5m`、`2h`、`1d`；秒向上取整到分钟。触发时按"定时任务"呈现（不叫 loop tick），和 CC 一致 | `/loop 5m <prompt>` |
-| 自选间隔 | 模型每轮用 `schedule_wakeup` 决定下次延迟（60–3600s）；在固定间隔的 tick 里调用会被当作多余请求忽略（不报错，只说明下一轮自己会来），避免同一 prompt 跑两份 | `/loop <prompt>` |
-| 自然语言间隔 | 命令层认不出时交给模型解析（中英文均可） | `/loop 每30秒 ...` |
-| loop.md | 不带 prompt 时运行 `.pi/loop.md`（每次触发重读，改了下一轮生效），没有则跑内置维护 prompt | `/loop`、`/loop 15m` |
-| 立即执行 | 创建后马上跑一次，不等首个 cron | 自动 |
+| 固定间隔 | 模型用 `cron_create` 建一个 cron（`5m` → `*/5 * * * *`），然后立即执行一次；触发时按"定时任务"呈现 | `/loop 5m <prompt>`、`/loop 每分钟 ...` |
+| 自选间隔 | 运行一次后用 `schedule_wakeup` 决定下次延迟（60–3600s） | `/loop <prompt>` |
+| loop.md | 请求本身没有任务时（裸 `/loop` 或只给间隔）由 `.pi/loop.md` 提供，每次触发重读；首轮由模型自己读文件 | `/loop`、`/loop 15m` |
+| 停止 / 查看 | 也走对话：模型用 `cron_list` / `cron_delete`（自选间隔用 `schedule_wakeup` + `stop: true`） | `/loop stop`、`/loop status` |
 | 漏跑合并 | agent 忙时到点只记一次 pending，空闲后发一条 | 自动 |
 | 兜底心跳 | 模型忘记调度时 arm 一次 20 分钟心跳，预算 1 次 | 自动 |
 | Esc 取消 | 打断属于某个自定步调 loop 的回合（它的 tick、它的 Monitor 唤醒的回合）时取消该 loop；无关回合、空闲时不受影响；固定间隔不受影响 | Esc |
 | 错峰 | 周期任务按 id 固定延后最多半个周期（≤30 分钟），间隔本身不变；`:00`/`:30` 的一次性任务最多提前 90 秒 | 自动 |
 | 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
-| 次数上限 | `--max N`，到顶自动删除 | 标志 |
-| 持久化 | `--durable` 写入 `.pi/scheduled_tasks.json`；同一项目只由一个 Pi 会话执行 | 标志 |
-| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，倒计时按分钟变化，无任务时不占位 | `/loop footer on\|off` |
-| 详细面板 | 输入框上方的逐任务详情（id、类型、绝对时间、prompt），默认关闭 | `/loop widget on\|off` |
+| 次数上限 | `maxFires`，到顶自动删除 | 模型传参 |
+| 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`；同一项目只由一个 Pi 会话执行 | 模型传参 |
+| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/loop footer on\|off` |
+| 界面设置 | 仍是本地命令，不进对话 | `/loop settings ...` |
 
 ## 命令
 
 ```text
-/loop [间隔] <prompt>     按间隔重复跑
-/loop <prompt>            间隔交给模型判断
-/loop [间隔]              运行 .pi/loop.md 或内置维护 prompt（不带间隔则自定步调）
-/loop status              列出当前 loop
-/loop stop [id]           停止一个或全部
-/loop footer on|off       底部摘要
-/loop widget on|off       输入框上方的详细面板
-/loop settings ...        界面设置
-/loop help                帮助
+/loop [间隔] <prompt>     交给模型：按间隔重复，或自选节奏
+/loop <prompt>            交给模型：自选间隔
+/loop [间隔]              交给模型：跑 .pi/loop.md 或内置维护 prompt
+/loop status              交给模型：列出当前 loop
+/loop stop [id]           交给模型：停止一个或全部
+/loop footer on|off       本地：底部摘要
+/loop settings ...        本地：界面设置
+/loop help                本地：帮助
 ```
 
-标志：`--durable` 写入 `.pi/scheduled_tasks.json`；`--max N` 触发 N 次后自动停止。
+前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用
+`cron_create`、`cron_list`、`cron_delete`、`schedule_wakeup`。后三个只改界面，不进对话。
 
-agent 忙时输入 `/loop`，会等当前回合结束再开始。
-
-间隔写法：
-
-- `30s`、`5m`、`2h`、`1d`
-- `check the deploy every 20m`、`every 5 min`、`every 2 hrs`
-- 中文：`2分钟 输出一次`、`每2分钟输出一次`、`每隔2小时检查`、`看看 CI 每 15 分钟`（要求带数字，避免把"每天都有一个测试失败"这类描述当成间隔）
-- 秒向上取整到分钟；不整除的间隔按 CC 规则取整并提示：`7m` → `*/6`，`30s` → 每分钟
-- 其他语言（如「每30秒」）交给模型解析
-
-## 工具
-
-| 工具 | 说明 |
-| --- | --- |
-| `cron_create` | 创建固定间隔任务；支持 `recurring`、`durable`、`maxFires` |
-| `cron_delete` | 按 id 取消 |
-| `cron_list` | 列出任务 |
-| `schedule_wakeup` | 自选间隔：安排下次唤醒，或 `stop: true` 结束 |
-
-`schedule_wakeup` 参数：
-
-- `delaySeconds`：60–3600，越界自动钳制
-- `reason`：一句原因
-- `prompt`：原样传回 `/loop` 的 prompt；裸 `/loop` 传 `<<loop.md>>`
-- `stop`：结束当前自选间隔 loop
-
-`schedule_wakeup` 调用后本回合结束（工具批次里只有它时），所以模型会先写进度再调用；
-延迟按你给的值使用（四舍五入到整秒），只有超出 60–3600 秒才会被 clamp 并提示。CC 会把 `*/5` 任务提前 15 秒、把 286–300 秒的延迟压到 285 秒来保温 5 分钟的 prompt 缓存，我们没有跟：现在的缓存能活几十分钟到几小时，这样改只会让间隔变成 4 分 45 秒。
-
-## 持久化与恢复
-
-- `--durable` / `durable: true` 的任务存在 `.pi/scheduled_tasks.json`，并自动加入 `.git/info/exclude`
-- 同一项目只有持有 `.pi/scheduled_tasks.lock` 的 Pi 会话执行它们；该会话退出（或 60 秒没有心跳）后由其他会话接管
-- Pi 没运行时错过的 durable 一次性任务会被移除，下一轮先问你要不要补跑
-- 从别的目录拷来的任务只列出、不执行；`.pi` 或任务文件是符号链接时拒绝写入
-- 恢复会话：会话内任务照常恢复，但过期的周期任务、已过时间的一次性任务除外，错过的运行不补跑；自定步调 loop 不恢复（需重新 `/loop`），`/reload` 时保留
-
-## 设置
-
-两个 pi-cc 扩展共享 `~/.pi/agent/pi-cc.json`：
-
-```jsonc
-{
-  "compactMessages": true,          // 两行 marker / 旧的带底色卡片
-}
-```
-
-用命令切换：
-
-```text
-/loop settings
-/loop settings messages on|off
-/loop settings footer on|off
-```
-
-- 已画出的旧行需要 `/reload` 才会换样式
-- 环境变量覆盖：`PI_CC_COMPACT_MESSAGES=0`、`PI_CC_FOOTER=0`
+间隔写法没有约束，模型自己解析：`30s`、`5m`、`2h`、`1d`、`check the deploy every 20m`、
+`每2分钟输出一次`、`每分钟打印一次hi` 都可以。小于一分钟会向上取整到每分钟。
 
 ## 底部摘要
 

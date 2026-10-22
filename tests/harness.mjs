@@ -161,7 +161,15 @@ export function makeDue(h, jobId) {
 
 /** The before_agent_start event of a run started by a message the extension sent. */
 export function runEvent(sent) {
+	// Our messages are ordinary user messages now; monitor events are not.
+	if (sent.kind === "user") return { messageType: "user", prompt: sent.content, systemPromptOptions: { promptGuidelines: [] } };
 	return { messageType: "custom", message: sent.message, systemPromptOptions: { promptGuidelines: [] } };
+}
+
+/** Create a scheduled job the way the model does, through the cron_create tool. */
+export async function createCron(h, args) {
+	const result = await h.tools.get("cron_create").execute("c", args, undefined, undefined, h.ctx);
+	return { ...result.details, result };
 }
 
 export function guidelinesOf(event) {
@@ -183,7 +191,6 @@ export async function runTurn(h, { aborted = false, start } = {}) {
  * creates the chain.
  */
 export async function startSelfPaced(h, prompt = "check the deploy", delaySeconds = 60) {
-	await h.commands.get("loop").handler(prompt, h.ctx);
 	await h.tools
 		.get("schedule_wakeup")
 		.execute("c", { delaySeconds, prompt }, undefined, undefined, h.ctx);

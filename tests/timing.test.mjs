@@ -117,25 +117,4 @@ test("a one-shot job does not expire, however far out it is", () => {
 	assert.equal(scheduler.get("once"), undefined, "and deletes itself afterwards");
 });
 
-test("intervals follow Claude Code: seconds round up to whole minutes", () => {
-	assert.equal(cron.intervalToCron(61).cron, "*/2 * * * *");
-	assert.equal(cron.intervalToCron(90).cron, "*/2 * * * *");
-	assert.equal(cron.intervalToCron(30).cron, "* * * * *");
-	assert.equal(cron.intervalToCron(3599).cron, "0 * * * *", "just under an hour is hourly, not */60");
-});
 
-test("the trailing every clause takes Claude Code's unit words", () => {
-	for (const [text, seconds] of [
-		["check the deploy every 5 min", 300],
-		["check the deploy every 2 hrs", 7200],
-		["check the deploy every 30 secs", 30],
-		["check the deploy every 1 day", 86400],
-		["check the deploy every 10 mins", 600],
-	]) {
-		const parsed = cron.parseEveryClause(text);
-		assert.ok(parsed, text);
-		assert.equal(parsed.interval, seconds, text);
-		assert.equal(parsed.prompt, "check the deploy");
-	}
-	assert.equal(cron.parseEveryClause("check every 0 min"), null);
-});

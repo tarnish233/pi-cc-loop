@@ -114,36 +114,7 @@ function resolveTool(h, name) {
 	return resolve(0);
 }
 
-test("the defaults are compact messages, no tool-row renderers", async () => {
-	const h = makeHarness();
-	await h.commands.get("loop").handler("settings", h.ctx);
-	const shown = h.notifications.at(-1)?.message ?? "";
-	assert.match(shown, /messages:\s+compact/);
 
-	const tick = renderTick(h);
-	assert.equal(tick.lines.length, 2, tick.text);
-	assert.equal(tick.bgCalls.count, 0);
-	assert.equal(resolveTool(h, "schedule_wakeup"), undefined, "tool rows are left to Pi");
-});
-
-test("settings messages off restores the legacy card and on restores the compact block", async () => {
-	const h = makeHarness();
-	const loop = h.commands.get("loop");
-
-	await loop.handler("settings messages off", h.ctx);
-	let tick = renderTick(h);
-	assert.ok(tick.lines.length > 2, tick.text);
-	assert.match(tick.text, /Ctrl\+O/, tick.text);
-	assert.ok(tick.bgCalls.count > 0);
-
-	await loop.handler("settings messages on", h.ctx);
-	tick = renderTick(h);
-	assert.equal(tick.lines.length, 2, tick.text);
-	assert.equal(tick.bgCalls.count, 0);
-
-	const saved = JSON.parse(fs.readFileSync(configFile, "utf8"));
-	assert.equal(saved.compactMessages, true);
-});
 
 
 

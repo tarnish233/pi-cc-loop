@@ -186,7 +186,9 @@ test("the runtime files are added to .git/info/exclude", () => {
 
 test("durable jobs live in the file, never in session entries", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("5m ping --durable", h.ctx);
+	await h.tools
+		.get("cron_create")
+		.execute("c", { cron: "*/5 * * * *", prompt: "ping", durable: true }, undefined, undefined, h.ctx);
 	const id = readFile(h.ctx.cwd)[0].id;
 	assert.ok(h.scheduler().get(id), "this session runs it");
 	assert.equal(h.lastState().jobs.length, 0, "a resumed session must not restore (and run) it a second time");
@@ -209,9 +211,9 @@ test("missed durable one-shots are surfaced to the model with an ask-first instr
 		}),
 	);
 	const h = await start(makeHarness(cwd));
-	const message = h.sent.find((entry) => entry.message.details?.missed);
-	assert.ok(message, "a message about the missed job");
-	assert.equal(message.options.deliverAs, "nextTurn", "attached to the next turn, not started at startup");
-	assert.match(message.message.content, /Do NOT execute this prompt yet\. First ask the user/);
-	assert.match(message.message.content, /push the release branch/);
+	const message = h.sent.find((entry) => entry.kind === "user" && /missed/.test(entry.content));
+	assert.ok(message, "a user message about the missed job");
+	assert.equal(message.options.deliverAs, "followUp", "attached to the next turn, not started at startup");
+	assert.match(message.content, /Do NOT execute this prompt yet\. First ask the user/);
+	assert.match(message.content, /push the release branch/);
 });

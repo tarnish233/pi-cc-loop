@@ -31,14 +31,9 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "typebox";
 import { configPath, invalidateConfig, loadConfig, saveConfig, type PiCcConfig } from "./config.ts";
 import {
-	describeCron,
 	humanSchedule,
-	intervalToCron,
 	isUnreachable,
 	parseCron,
-	parseEveryClause,
-	parseChineseInterval,
-	parseIntervalToken,
 } from "./cron.ts";
 import { DurableRuntime, type Placement } from "./durable.ts";
 import { displayPrompt, isLoopFileSentinel, LoopFileDelivery, type TickMode } from "./loopfile.ts";
@@ -58,9 +53,9 @@ import {
 	SCHEDULE_WAKEUP_DESCRIPTION,
 	scheduledTaskProvenance,
 	SCHEDULE_WAKEUP_SNIPPET,
-	scheduleRules,
+	loopCommandGuidelines,
 } from "./prompts.ts";
-import { formatClock, formatEta, renderTickMessage } from "./renderers.ts";
+import { formatClock, formatEta } from "./renderers.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -73,10 +68,8 @@ import {
 import { truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
-export const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
 /** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
 const MONITOR_EVENT_TYPE = "pi-cc-monitor-event";
-const WIDGET_KEY = "pi-cc-loop";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
 const CONFIG_CHANNEL = "pi-cc:config";
@@ -104,8 +97,6 @@ interface PersistedState {
 	jobs: LoopJob[];
 	/** Prompts whose chain was stopped and must not be rescheduled. */
 	stopped?: string[];
-	/** Whether the status widget is shown. Claude Code has no such widget. */
-	widget?: boolean;
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -158,41 +149,6 @@ export function getScheduler(): LoopScheduler | null {
 	return activeScheduler;
 }
 
-/**
- * Pull the `--durable` and `--max N` flags out of the command line.
- * Flags may appear anywhere; the remaining tokens are the prompt.
- */
-function extractFlags(raw: string): { body: string; durable: boolean; maxFires?: number } {
-	const tokens = raw.split(/\s+/).filter(Boolean);
-	const kept: string[] = [];
-	let durable = false;
-	let maxFires: number | undefined;
-
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
-		if (token.toLowerCase() === "--durable") {
-			durable = true;
-			continue;
-		}
-		const inline = /^--max=(\d+)$/i.exec(token);
-		if (inline) {
-			maxFires = Math.max(1, Number(inline[1]));
-			continue;
-		}
-		if (/^--max$/i.test(token)) {
-			const next = tokens[i + 1];
-			if (next && /^\d+$/.test(next)) {
-				maxFires = Math.max(1, Number(next));
-				i++;
-			}
-			continue;
-		}
-		kept.push(token);
-	}
-
-	return { body: kept.join(" "), durable, maxFires };
-}
-
 export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	/** Cached context for UI helpers. */
 	let lastCtx: ExtensionContext | undefined;
@@ -202,11 +158,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * woke up.
 	 */
 	const stoppedPrompts = new Set<string>();
-	/**
-	 * Whether the status widget is shown. Claude Code's main session shows no
-	 * loop status at all, so it is off by default; `/loop widget on` turns it on.
-	 */
-	let widgetEnabled = process.env.PI_LOOP_WIDGET === "1";
 	/** Signature of the last persisted state, to avoid redundant session entries. */
 	let lastPersistedSignature = "";
 	/**
@@ -231,7 +182,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		},
 		onChange: (jobs) => {
 			persist(jobs);
-			refreshWidget(jobs);
 			refreshStatus(jobs);
 		},
 		canDispatch: () => {
@@ -285,11 +235,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	function persist(jobs: LoopJob[]): void {
 		const kept = jobs.filter((job) => !job.durable).map(storedJob);
 		const stopped = [...stoppedPrompts];
-		const signature = JSON.stringify([kept.map(signatureOf), stopped, widgetEnabled]);
+		const signature = JSON.stringify([kept.map(signatureOf), stopped]);
 		if (signature === lastPersistedSignature) return;
 		lastPersistedSignature = signature;
 		try {
-			pi.appendEntry(STATE_ENTRY, { version: 1, jobs: kept, stopped, widget: widgetEnabled } satisfies PersistedState);
+			pi.appendEntry(STATE_ENTRY, { version: 1, jobs: kept, stopped } satisfies PersistedState);
 		} catch {
 			// session persistence is best effort
 		}
@@ -303,28 +253,28 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function refreshWidget(jobs: LoopJob[]): void {
-		const ctx = lastCtx;
-		if (!ctx || !ctx.hasUI) return;
-		if (!widgetEnabled) {
-			ctx.ui.setWidget(WIDGET_KEY, undefined);
-			return;
-		}
-		// Absolute times only: the widget is not redrawn every second.
-		const lines = jobs.map((job) => {
-			const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
-			const when = at ? `next ${formatClock(at)}` : job.kind === "wakeup" ? "awaiting reschedule" : "pending";
-			const kind = job.kind === "cron" ? `fixed ${job.cron}` : "self-paced";
-			return ctx.ui.theme.fg("accent", `loop ${job.id} \u00b7 ${kind} \u00b7 ${when} \u00b7 ${truncate(displayPrompt(job.prompt), 28)}`);
-		});
-		ctx.ui.setWidget(WIDGET_KEY, lines.length ? lines : undefined);
+	/**
+	 * Rules for a message we are about to send, keyed by its text. A user
+	 * message carries no details, so the run's guidelines and the loop it
+	 * belongs to wait here for before_agent_start to pick them up.
+	 */
+	const queuedRuns: Array<{ content: string; guidelines: string[]; chainId?: string; cronId?: string; tick?: number }> =
+		[];
+
+	function queueRun(run: (typeof queuedRuns)[number]): void {
+		queuedRuns.push(run);
+		if (queuedRuns.length > 8) queuedRuns.shift();
+	}
+
+	function takeQueuedRun(content: string): (typeof queuedRuns)[number] | undefined {
+		const index = queuedRuns.findIndex((run) => run.content === content);
+		return index < 0 ? undefined : queuedRuns.splice(index, 1)[0];
 	}
 
 	/**
 	 * One line in Pi's footer, the same place other extensions show status.
-	 * Claude Code has no loop status in its footer, but the alternative here is
-	 * a widget that needs its own row above the editor; a summary is enough for
-	 * the common case and `/loop widget on` still gives the detailed view.
+	 * Claude Code has no loop status in its footer; a one-line summary is enough
+	 * to know that something is armed and when it next fires.
 	 */
 	function statusText(jobs: LoopJob[]): string | undefined {
 		if (!jobs.length) return undefined;
@@ -438,15 +388,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		});
 		try {
 			// Attached to the next turn rather than starting one at startup.
-			pi.sendMessage(
-				{
-					customType: TICK_MESSAGE_TYPE,
-					content: missedJobsMessage(lines),
-					display: true,
-					details: { missed: true, jobIds: jobs.map((job) => job.id) },
-				},
-				{ deliverAs: "nextTurn" },
-			);
+			pi.sendUserMessage(missedJobsMessage(lines), { deliverAs: "followUp", expandPromptTemplates: false });
 		} catch {
 			// best effort
 		}
@@ -475,69 +417,29 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		tickCounters.set(job.prompt, tick);
 		job.tickCount = tick;
 		const body = resolvePrompt(job.prompt, job.kind === "cron" ? "cron" : "wakeup");
-		// before_agent_start finds the job through `details.jobId` and gives a
-		// self-paced tick its chain guidelines. A fixed-interval tick also says,
-		// right here, that it fires its own next tick.
+		// A fixed-interval tick is what it is - a scheduled task - and a
+		// self-paced tick keeps the loop framing. Both go in as ordinary user
+		// messages, and the rules for the run travel through `queueRun`.
 		const stamp =
 			job.kind === "cron"
 				? scheduledTaskProvenance(job.id, humanSchedule(job.cron ?? "* * * * *"))
 				: provenance(tick);
-		pi.sendMessage(
-			{
-				customType: TICK_MESSAGE_TYPE,
-				content: `${stamp}\n${body}`,
-				display: true,
-				details: { jobId: job.id, kind: job.kind, tickCount: tick, cron: job.cron, scheduledAt: Date.now() },
-			},
-			{ deliverAs: "followUp", triggerTurn: true },
-		);
+		const content = `${stamp}\n${body}`;
+		const guidelines = [job.kind === "cron" ? cronTickGuidelines(job.id, humanSchedule(job.cron ?? "* * * * *")) : loopGuidelines(job.prompt)];
+		if (job.kind === "wakeup" && monitorToolAvailable()) guidelines.push(monitorGuidelines(job.prompt));
+		queueRun({
+			content,
+			guidelines,
+			chainId: job.kind === "wakeup" ? job.id : undefined,
+			cronId: job.kind === "cron" ? job.id : undefined,
+			tick,
+		});
+		pi.sendUserMessage(content, { deliverAs: "followUp", expandPromptTemplates: false });
 
 		if (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires) {
 			const ctx = lastCtx;
 			if (ctx) notify(ctx, `loop ${job.id} reached its cap of ${job.maxFires} fires`, "info");
 		}
-	}
-
-	/**
-	 * Run the prompt right away, the way Claude Code's skill does ("Then
-	 * immediately execute the parsed prompt now").
-	 *
-	 * `guidelines` are the instructions for this one run. They travel on the
-	 * message (`details` never reaches the model) and before_agent_start adds
-	 * them to the run the message starts, so they cannot leak into another run.
-	 * The caller waits until the agent is idle, so the message starts its own run.
-	 */
-	function runNow(ctx: ExtensionContext, prompt: string, job: LoopJob | undefined, guidelines: string[]): void {
-		const tick = (tickCounters.get(prompt) ?? 0) + 1;
-		tickCounters.set(prompt, tick);
-		if (job && scheduler.get(job.id)) {
-			scheduler.update(job.id, { tickCount: tick, fireCount: (job.fireCount ?? 0) + 1, lastFiredAt: Date.now() });
-		}
-		const body = resolvePrompt(prompt, job?.kind === "cron" ? "cron" : "wakeup");
-		const stamp =
-			job?.kind === "cron"
-				? scheduledTaskProvenance(job.id, humanSchedule(job.cron ?? "* * * * *"))
-				: provenance(tick);
-		pi.sendMessage(
-			{
-				customType: TICK_MESSAGE_TYPE,
-				content: `${stamp}\n${body}`,
-				// The user's own `/loop ...` line is already in the transcript, so the
-				// run it starts gets no block of its own: Claude Code shows the typed
-				// command and then the turn. Scheduled fires do get one.
-				display: false,
-				details: {
-					jobId: job?.id,
-					kind: job?.kind,
-					tickCount: tick,
-					immediate: true,
-					scheduledAt: Date.now(),
-					guidelines,
-				},
-			},
-			{ deliverAs: "steer", triggerTurn: true },
-		);
-		lastCtx = ctx;
 	}
 
 	/** True when the pi-cc-monitor extension registered its Monitor tool. */
@@ -612,34 +514,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	// ---------------------------------------------------------------- command
 
 	pi.registerCommand("loop", {
-		description:
-			"Run a prompt repeatedly. Usage: /loop [interval] <prompt> | /loop <prompt> | /loop [interval] | /loop stop [id] | /loop status | /loop settings",
+		description: "Run a prompt repeatedly: /loop [interval] <prompt>, /loop <prompt>, /loop stop, /loop status.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			lastCtx = ctx;
 			const raw = args.trim();
-
 			const [head, ...rest] = raw.split(/\s+/);
+
+			// Settings configure the extension, not a loop: they stay in code.
 			switch ((head ?? "").toLowerCase()) {
-				case "stop":
-					await stopLoops(ctx, rest.join(" "));
-					return;
-				case "status":
-				case "list":
-				case "jobs":
-					showStatus(ctx);
-					return;
-				case "widget": {
-					const arg = (rest[0] ?? "").toLowerCase();
-					if (arg !== "on" && arg !== "off") {
-						notify(ctx, `Usage: /loop widget on|off (currently ${widgetEnabled ? "on" : "off"})`, "info");
-						return;
-					}
-					widgetEnabled = arg === "on";
-					persist(scheduler.list());
-					refreshWidget(scheduler.list());
-					notify(ctx, `Loop status widget ${widgetEnabled ? "enabled" : "disabled"}`, "info");
-					return;
-				}
 				case "footer":
 				case "statusline": {
 					const arg = (rest[0] ?? "").toLowerCase();
@@ -678,214 +560,21 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					break;
 			}
 
-			// Flags are stripped before parsing so they never interfere with the
-			// interval token.
-			const flags = extractFlags(raw);
-			const body = flags.body;
-
-			let intervalSeconds: number | null = null;
-			let prompt = body;
-
-			const intervalOnly = parseIntervalToken(body);
-			if (intervalOnly !== null) {
-				// "/loop 15m": the loop.md tasks (or maintenance) on a fixed schedule.
-				intervalSeconds = intervalOnly;
-				prompt = "";
-			} else {
-				// Rule 1: leading interval token, e.g. "5m check the deploy"
-				const leading = /^(\S+)\s+([\s\S]+)$/.exec(body);
-				if (leading) {
-					const parsed = parseIntervalToken(leading[1]);
-					if (parsed !== null) {
-						intervalSeconds = parsed;
-						prompt = leading[2].trim();
-					}
-				}
-				// Rule 2: trailing "every N units", e.g. "check the deploy every 20m"
-				if (intervalSeconds === null) {
-					const every = parseEveryClause(body);
-					if (every) {
-						intervalSeconds = every.interval;
-						prompt = every.prompt;
-					}
-				}
-				// Rule 2b: the same written in Chinese, e.g. "每2分钟输出一次"
-				if (intervalSeconds === null) {
-					const chinese = parseChineseInterval(body);
-					if (chinese) {
-						intervalSeconds = chinese.interval;
-						prompt = chinese.prompt;
-					}
-				}
-			}
-
-			// Rule 3: no interval -> the model decides (self-paced unless it asks for one)
-			await startLoop(ctx, intervalSeconds, prompt, flags.durable, flags.maxFires);
+			// Everything else becomes a normal user message, the way Claude Code's
+			// /loop skill does: the conversation keeps the request, and the model
+			// drives cron_create / cron_list / cron_delete / schedule_wakeup itself.
+			// The per-run rules travel with the run through before_agent_start.
+			const text = raw ? `/loop ${raw}` : "/loop";
+			queueRun({ content: text, guidelines: [loopCommandGuidelines(raw)] });
+			pi.sendUserMessage(text, { expandPromptTemplates: false });
 		},
 	});
-
-	async function startLoop(
-		ctx: ExtensionCommandContext,
-		intervalSeconds: number | null,
-		prompt: string,
-		durableFlag: boolean,
-		maxFires: number | undefined,
-	): Promise<void> {
-		// Claude Code queues a /loop typed while it is busy. Wait for the current
-		// turn rather than steering into it: the immediate run has to start its
-		// own turn, or its instructions would never reach the model.
-		if (!ctx.isIdle()) {
-			notify(ctx, "/loop starts when the current turn finishes", "info");
-			await ctx.waitForIdle();
-		}
-
-		// Without a prompt the loop runs the loop.md tasks, resolved at each fire.
-		const finalPrompt = prompt || LOOP_FILE_SENTINEL;
-		// Starting a chain again clears the stop marker: the user asked for it.
-		stoppedPrompts.delete(finalPrompt);
-		// A new loop starts by sending the full task list again.
-		if (isLoopFileSentinel(finalPrompt)) loopFile.reset();
-
-		if (intervalSeconds === null) {
-			let guidelines: string[];
-			if (!prompt) {
-				// A bare /loop is self-paced, like Claude Code's.
-				guidelines = [loopGuidelines(finalPrompt)];
-				if (monitorToolAvailable()) guidelines.push(monitorGuidelines(finalPrompt));
-			} else {
-				// The interval could not be parsed from the command line. Claude
-				// Code's /loop is a skill, so the model reads the input and works
-				// the schedule out itself; the rules below let it do the same here.
-				let rules = scheduleRules(finalPrompt);
-				if (durableFlag) {
-					rules += "\n- The user asked for the job to survive a restart: create it with `durable: true`.";
-				}
-				if (maxFires !== undefined) {
-					rules += `\n- The user asked for the job to stop after ${maxFires} fires: create it with \`maxFires: ${maxFires}\`.`;
-				}
-				guidelines = [rules];
-				if (monitorToolAvailable()) {
-					guidelines.push(`If you choose the open-ended mode:\n${monitorGuidelines(finalPrompt)}`);
-				}
-			}
-			runNow(ctx, finalPrompt, undefined, guidelines);
-			return;
-		}
-
-		const spec = intervalToCron(intervalSeconds);
-		if (!spec || !parseCron(spec.cron)) {
-			notify(ctx, `Invalid interval: ${intervalSeconds}s`, "error");
-			return;
-		}
-		if (scheduler.size >= MAX_JOBS) {
-			notify(ctx, `Too many scheduled jobs (max ${MAX_JOBS}). Cancel one first.`, "error");
-			return;
-		}
-
-		const job: LoopJob = {
-			id: generateId(),
-			kind: "cron",
-			cron: spec.cron,
-			prompt: finalPrompt,
-			recurring: true,
-			createdAt: Date.now(),
-			durable: durableFlag,
-			maxFires,
-			label: humanSchedule(spec.cron),
-			source: "loop_command",
-		};
-		let placement: Placement;
-		try {
-			placement = addJob(job);
-		} catch (error) {
-			notify(ctx, error instanceof Error ? error.message : String(error), "error");
-			return;
-		}
-		const nextAt = job.nextFireAt ?? nextRunTime(job, job.createdAt, timingConfig()) ?? undefined;
-
-		const days = maxAgeDays();
-		notify(
-			ctx,
-			`Scheduled ${job.id} (${job.label}, next run ${formatClock(nextAt)}) \u00b7 ${spec.cron} \u00b7 expires in ${days}d \u00b7 cancel with /loop stop ${job.id}` +
-				(spec.note ? ` \u00b7 ${spec.note}` : "") +
-				(placement.runsHere ? "" : ` \u00b7 runs in the Pi session holding the project lock (pid ${placement.holderPid ?? "?"})`),
-			"info",
-		);
-		// Claude Code's /loop skill has a fixed-interval mode whose instructions
-		// never mention ScheduleWakeup: create the job, confirm, run the prompt
-		// now. Saying it here keeps the model from reading the self-paced habit
-		// into the loop's first run.
-		const note =
-			`A recurring /loop job was created: id ${job.id}, cron \`${spec.cron}\` (${spec.human}), ` +
-			`next run ${formatClock(nextAt)}, auto-expires after ${days} days (it runs one final time, then it is deleted). ` +
-			`The job lives in this session only unless the user asked for a durable one. ` +
-			`The user cancels it with \`/loop stop ${job.id}\`. ` +
-			`The schedule fires every tick by itself: do not call \`schedule_wakeup\` for this loop, now or on a later tick.` +
-			(spec.note ? ` The requested interval was adjusted: ${spec.note}.` : "");
-
-		runNow(ctx, finalPrompt, job, [note]);
-	}
-
-	async function stopLoops(ctx: ExtensionContext, target: string): Promise<void> {
-		if (target) {
-			const job = scheduler.get(target);
-			if (job) {
-				if (job.kind === "wakeup") {
-					retireChain(job, "stopped by the user");
-				} else {
-					removeJob(job);
-					notify(ctx, `Cancelled loop ${target}`, "info");
-				}
-				return;
-			}
-			if (durable?.remove(target)) {
-				notify(ctx, `Cancelled durable job ${target}`, "info");
-				return;
-			}
-			notify(ctx, `No loop with id ${target}`, "warning");
-			return;
-		}
-		const jobs = scheduler.list();
-		if (!jobs.length) {
-			notify(ctx, "No active loops", "info");
-			return;
-		}
-		for (const job of jobs) {
-			// Retiring also tells pi-cc-monitor to stop the chain's monitors.
-			if (job.kind === "wakeup") retireChain(job, "stopped by the user");
-			else removeJob(job);
-		}
-		notify(ctx, `Cancelled ${jobs.length} loop${jobs.length === 1 ? "" : "s"}`, "info");
-	}
-
-	function showStatus(ctx: ExtensionContext): void {
-		const jobs = listJobs();
-		if (!jobs.length) {
-			notify(ctx, "No active loops", "info");
-			return;
-		}
-		const lines = jobs.map((job) => {
-			const prompt = truncate(displayPrompt(job.prompt), 60);
-			if (job.kind === "cron") {
-				const cap = job.maxFires !== undefined ? ` \u00b7 ${job.fireCount ?? 0}/${job.maxFires} fires` : "";
-				const label = job.label ?? describeCron(job.cron ?? "");
-				return `${job.id}  cron  ${job.cron}  (${label})  next ${formatClock(job.nextFireAt)}${cap}${job.durable ? "  durable" : ""}${foreignNote(job)}  ${prompt}`;
-			}
-			const at = job.scheduledFor;
-			const when = at && at > Date.now() ? `next ${formatClock(at)}` : "awaiting reschedule";
-			return `${job.id}  self-paced  ${when}  ${prompt}`;
-		});
-		notify(ctx, lines.join("\n"), "info");
-	}
 
 	function showHelp(ctx: ExtensionContext): void {
 		const help = [
 			"/loop [interval] <prompt>   run <prompt> every <interval> (e.g. 30s, 5m, 2h, 1d)",
 			"/loop <prompt>              self-paced: the agent picks the next delay",
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
-			"/loop stop [id]             cancel one loop, or all of them",
-			"/loop status                list the active loops",
-			"/loop widget on|off         show or hide the detailed panel above the editor",
 			"/loop footer on|off         show or hide the one-line summary in the footer",
 			"/loop settings              show UI settings",
 			"/loop settings messages on|off   compact two-line markers",
@@ -1239,7 +928,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerMessageRenderer(TICK_MESSAGE_TYPE, renderTickMessage);
 
 	// ----------------------------------------------------------------- events
 
@@ -1254,6 +942,18 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
 		currentRun = {};
+
+		// Our own messages are ordinary user messages now, so the instructions
+		// for the run and the loop it belongs to travel with the queued entry.
+		if (event.messageType === "user") {
+			const queued = takeQueuedRun(event.prompt);
+			if (!queued) return;
+			currentRun = { chainId: queued.chainId, cronId: queued.cronId, tick: queued.tick };
+			if (!queued.guidelines.length) return;
+			const options = event.systemPromptOptions;
+			options.promptGuidelines = [...(options.promptGuidelines ?? []), ...queued.guidelines];
+			return;
+		}
 		if (event.messageType !== "custom") return;
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {
@@ -1263,35 +963,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			if (chain) currentRun.chainId = chain.id;
 			return;
 		}
-		if (event.message.customType !== TICK_MESSAGE_TYPE) return;
-
-		const details = (event.message.details ?? {}) as {
-			jobId?: string;
-			guidelines?: unknown;
-			immediate?: boolean;
-			tickCount?: number;
-		};
-		const notes = Array.isArray(details.guidelines)
-			? details.guidelines.filter((note): note is string => typeof note === "string")
-			: [];
-		if (details.immediate && typeof details.tickCount === "number") currentRun.tick = details.tickCount;
-
-		const job = details.jobId ? scheduler.get(details.jobId) : undefined;
-		if (job?.kind === "wakeup") {
-			// A self-paced tick has to schedule the next iteration.
-			currentRun.chainId = job.id;
-			notes.push(loopGuidelines(job.prompt));
-			// Only mention the Monitor tool when it is actually installed.
-			if (monitorToolAvailable()) notes.push(monitorGuidelines(job.prompt));
-		} else if (job?.kind === "cron") {
-			// A fixed interval fires its own next tick; this run must not arm one.
-			currentRun.cronId = job.id;
-			notes.push(cronTickGuidelines(job.id, humanSchedule(job.cron ?? "* * * * *")));
-		}
-
-		if (!notes.length) return;
-		const options = event.systemPromptOptions;
-		options.promptGuidelines = [...(options.promptGuidelines ?? []), ...notes];
 	});
 
 	/**
@@ -1364,12 +1035,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			}
 		}
 		if (!data) {
-			refreshWidget(scheduler.list());
 			return;
 		}
 
 		for (const prompt of data.stopped ?? []) rememberStopped(prompt);
-		if (typeof data.widget === "boolean") widgetEnabled = data.widget;
 
 		const now = Date.now();
 		const limit = maxAgeMs();
