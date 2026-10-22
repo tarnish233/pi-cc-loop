@@ -132,3 +132,26 @@ test("long prompts are capped when collapsed and complete when expanded", () => 
 	assert.ok(expanded.text.includes("line five"), expanded.text);
 	assert.ok(!expanded.text.includes("more lines"), expanded.text);
 });
+
+test("a no-op wakeup renders as a quiet line, not a cross", async () => {
+	const { loopToolRenderers } = await loadModule("renderers.ts");
+	const { theme } = makeTheme();
+	const renderer = loopToolRenderers().schedule_wakeup;
+	assert.ok(renderer, "schedule_wakeup has a compact renderer");
+	const row = renderer.renderResult(
+		{ content: [{ type: "text", text: "No wakeup needed: ..." }], details: { suppressed: "fixed-interval" } },
+		{},
+		theme,
+		{ args: { delaySeconds: 1200 } },
+	);
+	const text = row.text;
+	assert.ok(!text.includes("\u2717"), `no cross: ${text}`);
+	assert.ok(!text.includes("\u2713"), `no tick: ${text}`);
+	assert.match(text, /No wakeup needed/);
+});
+
+test("the tool-rows error line keeps only the first sentence", async () => {
+	const { firstSentence } = await loadModule("tool-rows.ts");
+	assert.equal(firstSentence("Short. Second sentence."), "Short.");
+	assert.ok(firstSentence("x".repeat(400)).length <= 160);
+});

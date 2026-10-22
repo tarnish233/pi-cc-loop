@@ -1139,12 +1139,22 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			}
 
 			if (currentRun.cronId) {
+				// Not an error: the request is already satisfied by the schedule.
+				// Returning it as a result (instead of throwing) keeps the transcript
+				// calm and tells the model nothing is missing.
 				const cronJob = scheduler.get(currentRun.cronId);
-				throw new Error(
-					`Not scheduled: this tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
-						`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
-						`Use /loop stop ${currentRun.cronId} or cron_delete to end it.`,
-				);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`No wakeup needed: this tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
+								`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
+								`Nothing was scheduled. To end the loop, call cron_delete with id ${currentRun.cronId}.`,
+						},
+					],
+					details: { suppressed: "fixed-interval", id: currentRun.cronId, stopped: false },
+				};
 			}
 
 			// Claude Code rounds and clamps; only a change after rounding counts as clamped.

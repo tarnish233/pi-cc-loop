@@ -105,6 +105,8 @@ export function loopToolRenderers(): Record<string, ToolRenderers> {
 				[args.reason, d.scheduledFor ? `at ${formatClock(d.scheduledFor)}` : undefined]
 					.filter(Boolean)
 					.join(" \u00b7 ") || undefined,
+			// A fixed-interval loop already fires its own ticks: nothing to do, quietly.
+			quiet: (d) => (d.suppressed === "fixed-interval" ? "No wakeup needed \u00b7 the schedule fires the next tick" : undefined),
 		}),
 	};
 }

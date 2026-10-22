@@ -46,6 +46,11 @@ export interface CompactRow {
 	call: (args: any) => { label: string; detail?: string };
 	/** The one-line summary of a successful result. */
 	summary: (details: any, args: any) => string;
+	/**
+	 * A quiet, glyph-free line for a result that was a deliberate no-op, e.g.
+	 * "No wakeup needed". Not an error, so no cross and no tick.
+	 */
+	quiet?: (details: any) => string | undefined;
 	/** Extra lines shown when the row is expanded. */
 	detail?: (details: any, args: any) => string | undefined;
 }
@@ -83,6 +88,8 @@ export function compactRenderers(row: CompactRow): ToolRenderers {
 			}
 			const details = result?.details ?? {};
 			const args = context?.args ?? {};
+			const quiet = row.quiet?.(details);
+			if (quiet) return new Text(theme.fg("muted", `\u00b7 ${quiet}`), 0, 0);
 			const summary = row.summary(details, args) || resultText(result);
 			const line = `${theme.fg("success", "\u2713 ")}${theme.fg("toolOutput", summary)}`;
 			const detail = options?.expanded ? row.detail?.(details, args) : undefined;

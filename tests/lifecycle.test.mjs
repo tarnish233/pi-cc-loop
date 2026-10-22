@@ -240,12 +240,13 @@ test("a cron tick says the schedule fires on its own, and refuses a wakeup", asy
 	assert.match(text, /Do not call `schedule_wakeup`/);
 	assert.ok(text.includes(job.id), "the job id, so cron_delete can be named too");
 
-	// Following the habit anyway must not quietly start a second schedule.
-	await assert.rejects(
-		() => wakeup(h, { delaySeconds: 1200, prompt: "check the deploy" }),
-		/fixed-interval/,
-	);
-	assert.equal(h.scheduler().byKind("wakeup").length, 0);
+	// Following the habit anyway must not start a second schedule, and is not an
+	// error: the schedule already covers the next tick.
+	const result = await wakeup(h, { delaySeconds: 1200, prompt: "check the deploy" });
+	assert.equal(result.details.suppressed, "fixed-interval");
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no chain was created");
+	assert.match(result.content[0].text, /No wakeup needed/);
+	assert.match(result.content[0].text, /Nothing was scheduled/);
 });
 
 test("after a cron tick, a turn the user starts may schedule again", async () => {
