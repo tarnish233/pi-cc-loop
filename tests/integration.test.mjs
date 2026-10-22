@@ -128,7 +128,7 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 	await new Promise((resolve) => setTimeout(resolve, 500));
 	const afterStop = shared.sent
 		.slice(sentBeforeStop)
-		.filter((entry) => entry.message?.customType === "pi-cc-monitor-event");
+		.filter((entry) => entry.message?.customType === "Monitor");
 	assert.deepEqual(
 		afterStop.map((entry) => entry.message.content),
 		[],

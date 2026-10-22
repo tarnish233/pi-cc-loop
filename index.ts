@@ -69,7 +69,7 @@ import { truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 /** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
-const MONITOR_EVENT_TYPE = "pi-cc-monitor-event";
+const MONITOR_EVENT_TYPE = "Monitor";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
 const CONFIG_CHANNEL = "pi-cc:config";

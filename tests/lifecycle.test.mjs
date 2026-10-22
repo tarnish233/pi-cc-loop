@@ -59,7 +59,7 @@ test("Esc during a turn woken by the loop's monitor cancels that loop", async ()
 	const chain = await startSelfPaced(h, "watch CI", 1200);
 	await runTurn(h);
 	const monitorEvent = {
-		message: { customType: "pi-cc-monitor-event", content: "[monitor \u00b7 ci]\nFAILED", details: { loopPrompt: "watch CI" } },
+		message: { customType: "Monitor", content: "monitor abc \u00b7 ci\nFAILED", details: { loopPrompt: "watch CI" } },
 	};
 	await runTurn(h, { aborted: true, start: monitorEvent });
 	assert.equal(h.scheduler().get(chain.id), undefined);
@@ -80,7 +80,7 @@ test("Esc on an unrelated turn keeps the loops; fixed-interval jobs are never st
 	assert.ok(!h.notifications.some((n) => n.message.startsWith("Pending wakeup cancelled")));
 
 	// A monitor event of another loop is not this loop's turn either.
-	const otherMonitor = { message: { customType: "pi-cc-monitor-event", content: "x", details: { loopPrompt: "watch deploy" } } };
+	const otherMonitor = { message: { customType: "Monitor", content: "x", details: { loopPrompt: "watch deploy" } } };
 	await runTurn(h, { aborted: true, start: otherMonitor });
 	assert.ok(h.scheduler().get(chain.id));
 
