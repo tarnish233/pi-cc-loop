@@ -113,3 +113,44 @@ test("describeCron summarises the expression", () => {
 	assert.equal(cron.describeCron("*/5 * * * *"), "minute */5");
 	assert.equal(cron.describeCron("0 9 * * *"), "minute 0, hour 9");
 });
+
+test("humanSchedule labels cron expressions like Claude Code", () => {
+	const cases = {
+		"* * * * *": "Every minute",
+		"*/1 * * * *": "Every minute",
+		"*/5 * * * *": "Every 5 minutes",
+		"0 * * * *": "Every hour",
+		"7 * * * *": "Every hour at :07",
+		"0 */2 * * *": "Every 2 hours",
+		"15 */3 * * *": "Every 3 hours at :15",
+		"0 9 * * *": "Every day at 9:00 AM",
+		"0 0 * * *": "Every day at 12:00 AM",
+		"30 14 * * *": "Every day at 2:30 PM",
+		"5 4 * * 0": "Every Sunday at 4:05 AM",
+		"0 9 * * 7": "Every Sunday at 9:00 AM",
+		"0 9 * * 1-5": "Weekdays at 9:00 AM",
+		// Not in Claude Code (it shows the raw expression); /loop 3d produces it.
+		"0 0 */3 * *": "Every 3 days at 12:00 AM",
+		// Anything else is shown as written, never as a half-filled sentence.
+		"*/15 9-17 * * 1-5": "*/15 9-17 * * 1-5",
+		"0 9 1 * *": "0 9 1 * *",
+		"0 9 * * 1,3": "0 9 * * 1,3",
+		"not a cron": "not a cron",
+	};
+	for (const [expression, label] of Object.entries(cases)) {
+		assert.equal(cron.humanSchedule(expression), label, expression);
+	}
+});
+
+test("every interval /loop accepts gets a correct label", () => {
+	for (const [seconds, label] of [
+		[60, "Every minute"],
+		[300, "Every 5 minutes"],
+		[3600, "Every hour"],
+		[7200, "Every 2 hours"],
+		[86400, "Every day at 12:00 AM"],
+		[86400 * 3, "Every 3 days at 12:00 AM"],
+	]) {
+		assert.equal(cron.humanSchedule(cron.intervalToCron(seconds).cron), label, `${seconds}s`);
+	}
+});

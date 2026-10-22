@@ -72,12 +72,6 @@ const LOOP_TOOL_NAMES = ["cron_create", "cron_delete", "cron_list", "schedule_wa
 const ALL_PI_CC_TOOLS = [...LOOP_TOOL_NAMES, "Monitor", "monitor_stop", "monitor_list"];
 
 /**
- * The event channel pi-cc-monitor publishes on. When a monitor names a loop
- * chain, its events supersede that chain's fallback heartbeat.
- */
-const MONITOR_WAKE_CHANNEL = "monitor:wake";
-
-/**
  * The event channel this extension publishes on when a chain ends. pi-cc-monitor
  * listens to it and stops any monitor that belongs to the chain, the way
  * Claude Code requires ("call ScheduleWakeup with stop: true and TaskStop any
@@ -147,14 +141,44 @@ const LOOP_GUIDELINES = [
 	"`stop: true` instead of scheduling another iteration.",
 ].join("\n");
 
+/**
+ * How a self-paced loop uses the Monitor tool, after Claude Code's /loop
+ * skill: arm a monitor only when the next iteration waits on an event, arm it
+ * once, and keep the wakeup as a long fallback heartbeat. A monitor event
+ * does not cancel that heartbeat.
+ */
 const MONITOR_GUIDELINES = [
-	"This iteration is waiting on an external event.",
-	"Arm the `Monitor` tool with `loopPrompt` set to {quoted} so the event wakes this chain",
-	"immediately instead of waiting for the next heartbeat. Keep the `schedule_wakeup` call too:",
-	"its delay is then only the fallback heartbeat for the case where no event ever arrives.",
+	"If the next iteration is gated on an external event (a CI run finishing, a PR comment, a log line) and no",
+	"monitor is already running for it, arm one with the `Monitor` tool and set `loopPrompt` to {quoted}, so the",
+	"event wakes you as soon as it happens. Arm it once: on later iterations call `monitor_list` first and skip",
+	"this step while a monitor for it is still running.",
+	"While a monitor is armed, keep `delaySeconds` at 1200-1800: the monitor is the wake signal and the",
+	"`schedule_wakeup` delay is only the fallback heartbeat. When a monitor event wakes you, handle the event,",
+	"then decide whether the loop continues.",
 ].join("\n");
 
 const PROVENANCE = "[loop tick #{n} · scheduled by /loop, not typed by the user]";
+
+/**
+ * Fill `{name}` placeholders. A replacer function is used so that `$&` or
+ * `$1` in a prompt are inserted literally.
+ */
+function fill(template: string, values: Record<string, string>): string {
+	return template.replace(/\{(\w+)\}/g, (match, key: string) => values[key] ?? match);
+}
+
+/** The prompt as a JSON string: unambiguous even with quotes or newlines. */
+function quote(prompt: string): string {
+	return JSON.stringify(prompt);
+}
+
+function loopGuidelines(prompt: string): string {
+	return fill(LOOP_GUIDELINES, { prompt, quoted: quote(prompt) });
+}
+
+function monitorGuidelines(prompt: string): string {
+	return fill(MONITOR_GUIDELINES, { quoted: quote(prompt) });
+}
 
 interface PersistedState {
 	version: 1;
@@ -356,15 +380,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 	activeScheduler = scheduler;
 
-	/** Chain that the current run belongs to, injected as a system guideline. */
-	let runChainId: string | undefined;
-	/**
-	 * Rules for a loop whose interval the command line did not contain. The
-	 * model applies them itself, the way Claude Code's /loop skill does.
-	 */
-	let pendingScheduleRules: string | undefined;
-	/** One-off note attached to the next run. */
-	let pendingNote: string | undefined;
 	/** Cached context for UI helpers. */
 	let lastCtx: ExtensionContext | undefined;
 	/**
@@ -529,10 +544,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		const tick = Math.max(tickCounters.get(job.prompt) ?? 0, job.tickCount ?? 0) + 1;
 		tickCounters.set(job.prompt, tick);
 		scheduler.update(job.id, { tickCount: tick, lastTickAt: Date.now() });
-		const content = `${PROVENANCE.replace("{n}", String(tick))}\n${job.prompt}`;
-		// A self-paced tick needs the chain guidelines too, so the model knows
-		// it has to schedule the next iteration.
-		runChainId = job.kind === "wakeup" ? job.id : undefined;
+		const content = `${fill(PROVENANCE, { n: String(tick) })}\n${job.prompt}`;
+		// before_agent_start finds the job through `details.jobId` and gives a
+		// self-paced tick its chain guidelines.
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
@@ -551,14 +565,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Run the prompt right away, the way Claude Code's skill does
-	 * ("Then immediately execute the parsed prompt now").
-	 *
-	 * `steer` is the right lane here: it lands in the current turn when the
-	 * agent is already working, which is what executing the prompt inside the
-	 * skill turn means.
-	 */
-	/**
 	 * How many times each prompt has been run as a loop tick.
 	 *
 	 * The immediate run of `/loop` and the first fire of the job the model
@@ -566,7 +572,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	const tickCounters = new Map<string, number>();
 
-	function runNow(ctx: ExtensionContext, prompt: string, job?: LoopJob): void {
+	/**
+	 * Run the prompt right away, the way Claude Code's skill does
+	 * ("Then immediately execute the parsed prompt now").
+	 *
+	 * `guidelines` are the instructions for this one run. They travel on the
+	 * message (`details` never reaches the model) and before_agent_start adds
+	 * them to the run the message starts, so they cannot leak into another
+	 * run. The caller waits until the agent is idle, so the message always
+	 * starts its own run.
+	 */
+	function runNow(ctx: ExtensionContext, prompt: string, job: LoopJob | undefined, guidelines: string[]): void {
 		const tick = (tickCounters.get(prompt) ?? 0) + 1;
 		tickCounters.set(prompt, tick);
 		if (job) {
@@ -576,20 +592,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				lastTickAt: Date.now(),
 			});
 		}
-		runChainId = job?.kind === "wakeup" ? job.id : undefined;
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
-				content: `${PROVENANCE.replace("{n}", String(tick))}\n${prompt}`,
+				content: `${fill(PROVENANCE, { n: String(tick) })}\n${prompt}`,
 				display: true,
-				details: { jobId: job?.id, tickCount: tick, immediate: true, scheduledAt: Date.now() },
+				details: { jobId: job?.id, tickCount: tick, immediate: true, scheduledAt: Date.now(), guidelines },
 			},
 			{ deliverAs: "steer", triggerTurn: true },
 		);
-	}
-
-	function scheduleNote(text: string): void {
-		pendingNote = text;
 	}
 
 	/** True when the pi-cc-monitor extension registered its Monitor tool. */
@@ -709,6 +720,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		durable: boolean,
 		maxFires: number | undefined,
 	): Promise<void> {
+		// Claude Code queues a /loop typed while it is busy. Wait for the current
+		// turn rather than steering into it: the immediate run has to start its
+		// own turn, or its instructions would never reach the model.
+		if (!ctx.isIdle()) {
+			notify(ctx, "/loop starts when the current turn finishes", "info");
+			await ctx.waitForIdle();
+		}
+
 		expireOldJobs(ctx);
 
 		// Starting a chain again clears the stop marker: the user asked for it.
@@ -731,10 +750,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// out itself; the rules below let it do the same here. No chain is
 			// created up front: the model picks cron_create (fixed interval) or
 			// schedule_wakeup (open ended), and schedule_wakeup creates the chain.
-			let rules = LOOP_SCHEDULE_RULES.replace("{prompt}", finalPrompt).replace(
-				"{quoted}",
-				`"${finalPrompt}"`,
-			);
+			let rules = fill(LOOP_SCHEDULE_RULES, { prompt: finalPrompt, quoted: quote(finalPrompt) });
 			if (durable) {
 				rules +=
 					"\n- The user asked for the job to survive a restart: create it with `durable: true`.";
@@ -743,8 +759,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				rules +=
 					`\n- The user asked for the job to stop after ${maxFires} fires: create it with \`maxFires: ${maxFires}\`.`;
 			}
-			pendingScheduleRules = rules;
-			runNow(ctx, finalPrompt);
+			const guidelines = [rules];
+			// Only mention the Monitor tool when it is actually installed.
+			if (monitorToolAvailable()) {
+				guidelines.push(`If you choose the open-ended mode:\n${monitorGuidelines(finalPrompt)}`);
+			}
+			runNow(ctx, finalPrompt, undefined, guidelines);
 			return;
 		}
 
@@ -782,14 +802,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				(spec.note ? ` · ${spec.note}` : ""),
 			"info",
 		);
-		scheduleNote(
+		const note =
 			`A recurring /loop job was created: id ${job.id}, cron \`${spec.cron}\` (${spec.human}), ` +
-				`next run ${formatClock(job.nextFireAt)}, auto-expires after ${expiryDays} days. ` +
-				`The user cancels it with \`/loop stop ${job.id}\`.` +
-				(spec.note ? ` The requested interval was adjusted: ${spec.note}.` : ""),
-		);
+			`next run ${formatClock(job.nextFireAt)}, auto-expires after ${expiryDays} days. ` +
+			`The user cancels it with \`/loop stop ${job.id}\`.` +
+			(spec.note ? ` The requested interval was adjusted: ${spec.note}.` : "");
 
-		runNow(ctx, finalPrompt, job);
+		runNow(ctx, finalPrompt, job, [note]);
 	}
 
 	async function stopLoops(ctx: ExtensionContext, target: string): Promise<void> {
@@ -1363,50 +1382,27 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	/**
-	 * A monitor event supersedes the chain's pending fallback heartbeat.
+	 * Give a run the instructions of the loop message that started it.
 	 *
-	 * The handler is deliberately synchronous: pi-cc-monitor emits the bus
-	 * event before it sends the notification, so this must land before the
-	 * woken turn starts. Otherwise the turn would end, find no reschedule, and
-	 * arm a keepalive on top of the event that just arrived.
+	 * A monitor event does not touch the chain: like Claude Code, the pending
+	 * wakeup stays armed as the fallback heartbeat, and the model re-arms it if
+	 * it wants a different time.
 	 */
-	pi.events.on(MONITOR_WAKE_CHANNEL, (data) => {
-		const wake = data as { loopPrompt?: string } | undefined;
-		if (!wake?.loopPrompt) return;
-		const chain = scheduler.findChain(wake.loopPrompt);
-		if (!chain) return;
-		scheduler.update(chain.id, { scheduledFor: undefined, awaitingReschedule: true });
-	});
-
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
-		const notes: string[] = [];
+		if (event.messageType !== "custom" || event.message.customType !== TICK_MESSAGE_TYPE) return;
 
-		if (pendingNote) {
-			notes.push(pendingNote);
-			pendingNote = undefined;
-		}
+		const details = (event.message.details ?? {}) as { jobId?: string; guidelines?: unknown };
+		const notes = Array.isArray(details.guidelines)
+			? details.guidelines.filter((note): note is string => typeof note === "string")
+			: [];
 
-		const chainId = runChainId;
-		runChainId = undefined;
-		if (chainId) {
-			const chain = scheduler.get(chainId);
-			if (chain) {
-				notes.push(LOOP_GUIDELINES.replace("{prompt}", chain.prompt).replace("{quoted}", `"${chain.prompt}"`));
-				// Self-paced chains can be woken by an event instead of the timer.
-				// Only mention the Monitor tool when it is actually installed.
-				if (chain.kind === "wakeup" && monitorToolAvailable()) {
-					notes.push(MONITOR_GUIDELINES.replace("{quoted}", `"${chain.prompt}"`));
-				}
-			}
-		}
-
-		if (pendingScheduleRules) {
-			notes.push(pendingScheduleRules);
-			pendingScheduleRules = undefined;
-			if (monitorToolAvailable()) {
-				notes.push(MONITOR_GUIDELINES.replace("{quoted}", `"the /loop prompt"`));
-			}
+		// A self-paced tick has to schedule the next iteration.
+		const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
+		if (chain?.kind === "wakeup") {
+			notes.push(loopGuidelines(chain.prompt));
+			// Only mention the Monitor tool when it is actually installed.
+			if (monitorToolAvailable()) notes.push(monitorGuidelines(chain.prompt));
 		}
 
 		if (!notes.length) return;

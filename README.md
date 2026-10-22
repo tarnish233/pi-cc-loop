@@ -43,6 +43,8 @@ pi install npm:pi-cc-loop
 
 标志：`--durable` 写入 `.pi/scheduled_tasks.json`；`--max N` 触发 N 次后自动停止。
 
+agent 忙时输入 `/loop`，会等当前回合结束再开始。
+
 间隔写法：
 
 - `30s`、`5m`、`2h`、`1d`
@@ -119,7 +121,8 @@ npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
 - 行为对齐 Claude Code v2.1.306 的 `/loop`，用 Pi 扩展 API 实现。
 - `/loop stop` 代替 CC 的 Esc；状态条默认关闭，和 CC 主会话一致。
 - `cron_create` 的 `maxFires` 是额外加固；CC 没有次数上限。
-- `/loop stop` 会连带停掉该 chain 绑定的 Monitor。
+- `/loop stop` 会连带静默停掉该 chain 绑定的 Monitor。
+- Monitor 事件不会取消待触发的 wakeup，它始终是兜底心跳（与 CC 一致）。
 
 ## 许可证
 

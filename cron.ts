@@ -302,46 +302,59 @@ export function parseEveryClause(input: string): { interval: number; prompt: str
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /**
- * A human readable cadence for a cron expression, the way Claude Code
- * reports it ("Every minute", "Every 5 minutes", "Daily at 9:00 AM").
+ * A human readable cadence for a cron expression, with Claude Code's labels:
+ * "Every minute", "Every 5 minutes", "Every hour at :07", "Every 2 hours",
+ * "Every day at 9:00 AM", "Every Sunday at 9:00 AM", "Weekdays at 9:00 AM".
+ *
+ * Like Claude Code, anything else is shown as written rather than as a
+ * half-filled sentence. The one addition is "Every N days at ...", which
+ * `/loop Nd` produces.
  */
 export function humanSchedule(expression: string): string {
-	const fields = parseCron(expression);
-	if (!fields) return expression;
-	const [minute, hour, dom, month, dow] = expression.trim().split(/\s+/);
-	const everyMinute = minute === "*" && hour === "*" && dom === "*" && month === "*" && dow === "*";
-	if (everyMinute) return "Every minute";
+	const fields = expression.trim().split(/\s+/);
+	if (fields.length !== CRON_FIELD_COUNT || !parseCron(expression)) return expression;
+	const [minute, hour, dom, month, dow] = fields;
+	const isNumber = (value: string) => /^\d+$/.test(value);
+	const step = (value: string) => {
+		const match = /^\*\/(\d+)$/.exec(value);
+		return match ? Number(match[1]) : undefined;
+	};
+	const atMinute = (value: number) => `:${String(value).padStart(2, "0")}`;
+	const everyDay = dom === "*" && month === "*" && dow === "*";
 
-	const step = /^\*\/(\d+)$/.exec(minute);
-	if (step && hour === "*" && dom === "*" && month === "*" && dow === "*") {
-		const n = Number(step[1]);
-		return n === 1 ? "Every minute" : `Every ${n} minutes`;
+	if (hour === "*" && everyDay) {
+		if (minute === "*") return "Every minute";
+		const n = step(minute);
+		if (n !== undefined) return n === 1 ? "Every minute" : `Every ${n} minutes`;
+		if (isNumber(minute)) return Number(minute) === 0 ? "Every hour" : `Every hour at ${atMinute(Number(minute))}`;
+		return expression;
 	}
 
-	const clock = clockText(minute, hour);
-	if (dom === "*" && month === "*" && dow === "*") {
-		if (hour === "*") return `Every hour at :${minute.padStart(2, "0")}`;
-		if (minute === "0") return `Hourly`;
-		return `Daily at ${clock}`;
+	const hours = step(hour);
+	if (isNumber(minute) && hours !== undefined && everyDay) {
+		const at = Number(minute) === 0 ? "" : ` at ${atMinute(Number(minute))}`;
+		return hours === 1 ? `Every hour${at}` : `Every ${hours} hours${at}`;
 	}
-	if (month === "*" && dow === "*") return `On day ${dom} at ${clock}`;
-	if (month === "*") {
-		const days = dow
-			.split(",")
-			.map((d) => DAY_NAMES[Number(d) % 7])
-			.join(", ");
-		return `Every ${days} at ${clock}`;
+
+	if (!isNumber(minute) || !isNumber(hour)) return expression;
+	const clock = clockText(Number(minute), Number(hour));
+	if (everyDay) return `Every day at ${clock}`;
+	if (dom === "*" && month === "*") {
+		if (/^\d$/.test(dow)) return `Every ${DAY_NAMES[Number(dow) % 7]} at ${clock}`;
+		if (dow === "1-5") return `Weekdays at ${clock}`;
+	}
+	const days = step(dom);
+	if (days !== undefined && month === "*" && dow === "*") {
+		return days === 1 ? `Every day at ${clock}` : `Every ${days} days at ${clock}`;
 	}
 	return expression;
 }
 
-/** "9:05 AM" style time for the minute and hour fields. */
-function clockText(minute: string, hour: string): string {
-	if (hour === "*") return `:${minute.padStart(2, "0")}`;
-	const h = Number(hour);
-	const suffix = h < 12 ? "AM" : "PM";
-	const display = h % 12 === 0 ? 12 : h % 12;
-	return `${display}:${minute.padStart(2, "0")} ${suffix}`;
+/** "9:05 AM" style time. */
+function clockText(minute: number, hour: number): string {
+	const suffix = hour < 12 ? "AM" : "PM";
+	const display = hour % 12 === 0 ? 12 : hour % 12;
+	return `${display}:${String(minute).padStart(2, "0")} ${suffix}`;
 }
 
 /** Human readable summary of a cron expression. */

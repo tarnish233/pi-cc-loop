@@ -110,6 +110,7 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 		.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
 
 	// 4. the user runs /loop stop
+	const sentBeforeStop = shared.sent.length;
 	await commands.get("loop").handler("stop", ctx);
 
 	// 5. the monitor that belonged to the chain is stopped too
@@ -119,6 +120,17 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 		list.details.monitors[0].status,
 		"stopped",
 		"the monitor must go down with the loop, otherwise it keeps waking the agent",
+	);
+
+	// 5b. silently: nothing wakes the agent right after the user stopped the loop
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	const afterStop = shared.sent
+		.slice(sentBeforeStop)
+		.filter((entry) => entry.message?.customType === "pi-cc-monitor-event");
+	assert.deepEqual(
+		afterStop.map((entry) => entry.message.content),
+		[],
+		"the stopped loop's monitor sends no closing notice",
 	);
 
 	// 6. a late schedule_wakeup cannot resurrect the chain

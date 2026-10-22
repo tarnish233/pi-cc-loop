@@ -68,7 +68,7 @@ function makeHarness() {
 	};
 
 	// The agent starts idle; tests flip these to simulate a busy agent.
-	const state = { idle: true, pending: false };
+	const state = { idle: true, pending: false, waited: 0 };
 
 	const ctx = {
 		ui: {
@@ -85,6 +85,11 @@ function makeHarness() {
 		isIdle: () => state.idle,
 		hasPendingMessages: () => state.pending,
 		abort: () => {},
+		// Command contexts can wait for the current turn to finish.
+		waitForIdle: async () => {
+			state.waited += 1;
+			state.idle = true;
+		},
 	};
 
 	const lastState = () =>
@@ -130,6 +135,15 @@ function makeDue(h, jobId) {
 	assert.ok(job, "job exists");
 	if (job.kind === "cron") job.nextFireAt = Date.now() - 1;
 	else job.scheduledFor = Date.now() - 1;
+}
+
+/** The before_agent_start event of a run started by a message the extension sent. */
+function runEvent(sent) {
+	return { messageType: "custom", message: sent.message, systemPromptOptions: { promptGuidelines: [] } };
+}
+
+function guidelinesOf(event) {
+	return event.systemPromptOptions.promptGuidelines.join("\n");
 }
 
 /** Mark a turn as started and finished, the way pi would. */
@@ -284,9 +298,9 @@ test("the schedule rules are injected when the interval could not be parsed", as
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("每30秒输出一次hello world", h.ctx);
 
-	const event = { systemPromptOptions: { promptGuidelines: [] } };
+	const event = runEvent(h.sent[0]);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
-	const guidelines = event.systemPromptOptions.promptGuidelines.join("\n");
+	const guidelines = guidelinesOf(event);
 	assert.ok(guidelines.includes("cron_create"), "the model is told how to make a fixed interval job");
 	assert.ok(guidelines.includes("schedule_wakeup"), "and how to self-pace");
 	assert.ok(guidelines.includes("minimum granularity is 1 minute"), "including the rounding rule");
@@ -471,31 +485,40 @@ test("the trailing 'every N units' form schedules a cron job", async () => {
 	assert.equal(job.prompt, "check the deploy");
 });
 
-test("a monitor event supersedes the chain's fallback heartbeat", async () => {
+test("a turn woken by a monitor event keeps the fallback heartbeat", async () => {
 	const h = await start(makeHarness());
-	await startSelfPaced(h);
+	// 600s, so the 1200s keepalive could not be mistaken for it.
+	const chain = await startSelfPaced(h, "check the deploy", 600);
+	await runTurn(h); // the /loop run ends; the model scheduled the next wakeup
+	const armed = h.scheduler().get(chain.id).scheduledFor;
+	assert.ok(armed > Date.now());
 
-	// The model does not reschedule: a keepalive is armed.
-	await h.handlers.get("agent_end")({}, h.ctx);
-	let chain = h.lastState().jobs.find((j) => j.kind === "wakeup");
-	assert.ok(chain.scheduledFor > Date.now(), "the keepalive is pending");
+	// Claude Code leaves the pending wakeup alone when a Monitor event wakes
+	// the agent: the model re-arms it if it wants a different time.
+	h.handlers.get("bus:monitor:wake")?.({ loopPrompt: "check the deploy" }, h.ctx);
+	await runTurn(h);
 
-	// A monitor event for this chain arrives.
-	await h.handlers.get("bus:monitor:wake")({ loopPrompt: "check the deploy" }, h.ctx);
-	chain = h.lastState().jobs.find((j) => j.kind === "wakeup");
-	assert.equal(chain.scheduledFor, undefined, "the fallback heartbeat was superseded");
-	assert.equal(chain.awaitingReschedule, true, "the model now owes a reschedule");
+	assert.equal(h.scheduler().get(chain.id).scheduledFor, armed, "the heartbeat is still armed");
 });
 
-test("a monitor event for another chain changes nothing", async () => {
+test("after its keepalive a chain still ends instead of getting stuck", async () => {
 	const h = await start(makeHarness());
-	await startSelfPaced(h);
-	await h.handlers.get("agent_end")({}, h.ctx);
-	const before = h.lastState().jobs.find((j) => j.kind === "wakeup");
+	const chain = await startSelfPaced(h);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await runTurn(h); // the model did not reschedule: the keepalive is armed
+	assert.equal(h.scheduler().get(chain.id).keepaliveUsed, true);
 
-	await h.handlers.get("bus:monitor:wake")({ loopPrompt: "some other task" }, h.ctx);
-	const after = h.lastState().jobs.find((j) => j.kind === "wakeup");
-	assert.equal(after.scheduledFor, before.scheduledFor);
+	// A monitor event wakes the agent, and the model still does not reschedule.
+	h.handlers.get("bus:monitor:wake")?.({ loopPrompt: "check the deploy" }, h.ctx);
+	await runTurn(h);
+	assert.ok(h.scheduler().get(chain.id)?.scheduledFor > Date.now(), "the keepalive is still pending");
+
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await runTurn(h); // the keepalive turn was the model's last chance
+	assert.equal(h.scheduler().get(chain.id), undefined, "the chain ended");
 });
 
 test("/loop stop tells the monitor extension to stop the chain's monitors", async () => {
@@ -512,13 +535,13 @@ test("/loop stop tells the monitor extension to stop the chain's monitors", asyn
 	assert.ok(chain, "the chain existed before the stop");
 });
 
-test("stopping a chain stops the monitors it armed", async () => {
+test("a stopped chain stays stopped through later turns", async () => {
 	const h = await start(makeHarness());
 	await startSelfPaced(h);
 	await h.commands.get("loop").handler("stop", h.ctx);
 
-	// A monitor event for the stopped chain must not revive it.
-	await h.handlers.get("bus:monitor:wake")({ loopPrompt: "check the deploy" }, h.ctx);
+	// A turn woken by a late monitor event must not revive it.
+	await runTurn(h);
 	assert.equal(h.lastState().jobs.length, 0);
 });
 
@@ -616,17 +639,49 @@ test("the Monitor tool is only mentioned when it is installed", async () => {
 	const h = await start(makeHarness());
 	await startSelfPaced(h);
 
-	const without = { systemPromptOptions: { promptGuidelines: [] } };
+	const without = runEvent(h.sent[0]);
 	await h.handlers.get("before_agent_start")(without, h.ctx);
-	assert.ok(!without.systemPromptOptions.promptGuidelines.some((g) => g.includes("Monitor")));
+	assert.ok(!guidelinesOf(without).includes("Monitor"));
 
-	// Re-arm the chain so the next run picks up the guidelines again.
+	// Start it again so the next run picks up the guidelines again.
 	h.setRegisteredTools(["Monitor"]);
 	await startSelfPaced(h);
-	const with_ = { systemPromptOptions: { promptGuidelines: [] } };
+	const with_ = runEvent(h.sent[1]);
 	await h.handlers.get("before_agent_start")(with_, h.ctx);
-	assert.ok(with_.systemPromptOptions.promptGuidelines.some((g) => g.includes("Monitor")));
-	assert.ok(with_.systemPromptOptions.promptGuidelines.some((g) => g.includes("loopPrompt")));
+	assert.ok(guidelinesOf(with_).includes("Monitor"));
+	assert.ok(guidelinesOf(with_).includes("loopPrompt"));
+});
+
+test("/loop typed while the agent is busy waits for the turn and leaks nothing", async () => {
+	const h = await start(makeHarness());
+	h.state.idle = false; // the agent is in the middle of a turn
+	await h.commands.get("loop").handler("check the deploy", h.ctx);
+	assert.equal(h.state.waited, 1, "the command waited for the current turn to finish");
+	assert.equal(h.sent.length, 1);
+
+	// Another run (say, the user's next prompt) must not pick up the loop's rules.
+	const unrelated = { messageType: "user", prompt: "what time is it?", systemPromptOptions: { promptGuidelines: [] } };
+	await h.handlers.get("before_agent_start")(unrelated, h.ctx);
+	assert.deepEqual(unrelated.systemPromptOptions.promptGuidelines, [], "nothing leaks into an unrelated run");
+
+	// The loop's own run gets them.
+	const own = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(own, h.ctx);
+	assert.ok(guidelinesOf(own).includes("This is a `/loop` request"), guidelinesOf(own));
+});
+
+test("the Monitor guidance names the real loop prompt and is a condition", async () => {
+	const h = await start(makeHarness());
+	h.setRegisteredTools(["Monitor"]);
+	await h.commands.get("loop").handler("check the deploy", h.ctx);
+	const event = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	const text = guidelinesOf(event);
+
+	assert.ok(text.includes('`loopPrompt` to "check the deploy"'), text);
+	assert.ok(!text.includes('the /loop prompt"'), "no placeholder in place of the prompt");
+	assert.ok(!text.includes("This iteration is waiting on an external event"), "the event gate is a condition, not a claim");
+	assert.ok(text.includes("monitor_list"), "arm once: check for a running monitor first");
 });
 
 test("a scheduled tick of a self-paced chain gets the chain guidelines", async () => {
@@ -642,10 +697,20 @@ test("a scheduled tick of a self-paced chain gets the chain guidelines", async (
 	h.scheduler().tick();
 	assert.equal(h.sent.length, 2, "the chain ticked");
 
-	const event = { systemPromptOptions: { promptGuidelines: [] } };
+	const event = runEvent(h.sent[1]);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
-	assert.ok(
-		event.systemPromptOptions.promptGuidelines.some((g) => g.includes("schedule_wakeup")),
-		"the tick's turn is told to schedule the next iteration",
-	);
+	assert.ok(guidelinesOf(event).includes("schedule_wakeup"), "the tick's turn is told to schedule the next iteration");
+	assert.ok(guidelinesOf(event).includes('"check the deploy"'), "with the chain's prompt");
+});
+
+test("a cron tick's turn gets no self-paced guidelines", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	const job = h.lastState().jobs[0];
+	makeDue(h, job.id);
+	h.scheduler().tick();
+
+	const event = runEvent(h.sent[1]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	assert.ok(!guidelinesOf(event).includes("schedule_wakeup"), guidelinesOf(event));
 });
