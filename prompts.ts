@@ -1,0 +1,201 @@
+/**
+ * Model-facing text for pi-cc-loop: the per-run guidelines, the built-in
+ * maintenance prompt and the tool descriptions.
+ *
+ * The tool descriptions follow Claude Code's (v2.1.302) closely. The
+ * differences are Pi's: lowercase tool names, `.pi/` instead of `.claude/`,
+ * and a provider-neutral note about prompt caching.
+ */
+
+/** A bare `/loop` stores this as its prompt; it expands to loop.md (or the maintenance pass) at fire time. */
+export const LOOP_FILE_SENTINEL = "<<loop.md>>";
+
+/** Claude Code's built-in maintenance prompt, used when there is no loop.md. */
+export const MAINTENANCE_PROMPT = [
+	"You are running a scheduled maintenance pass.",
+	"Work through the following, in order:",
+	"1. Continue any unfinished work from the conversation.",
+	"2. Tend to the current branch's pull request: review comments, failed CI runs, merge conflicts.",
+	"3. Run cleanup passes such as bug hunts or simplification when nothing else is pending.",
+	"Do not start new initiatives outside that scope, and only perform irreversible actions",
+	"(push, delete) that continue something the transcript already authorized.",
+	"If nothing needs doing, say so in one line.",
+].join("\n");
+
+export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed by the user]";
+
+const DELAY_ADVICE = [
+	"- Pick the delay from what you are waiting for. For idle ticks with nothing specific to watch, use 1200-1800s.",
+	"  When actively polling external state nothing notifies you about (a CI run, a deploy), match how fast it",
+	"  changes; under 300s prefer 270s, which stays inside the usual 5-minute prompt cache, and avoid exactly 300s.",
+	"- Do not poll for work Pi will report anyway (a monitor event, a command you are running): use a long",
+	"  fallback (1200s+) instead.",
+].join("\n");
+
+/**
+ * The rules for a `/loop <prompt>` whose interval the command layer could not
+ * parse. Claude Code's /loop is a skill: the model reads the input and works
+ * the schedule out itself, so an interval written in any language works.
+ */
+const LOOP_SCHEDULE_RULES = [
+	"This is a `/loop` request. Its prompt is: {prompt}",
+	"",
+	"Decide how it should repeat, then set it up.",
+	"",
+	"**If the prompt asks for a fixed interval** (\"every 30 seconds\", \"each 5 minutes\", \"every hour\",",
+	"\"\u6bcf30\u79d2\"): create a recurring job with the `cron_create` tool.",
+	"- `prompt`: the task without the interval wording, so every run does the task instead of scheduling it again.",
+	"- Convert the interval to a 5-field cron expression in local time (\"M H DoM Mon DoW\").",
+	"  `s` rounds up to the nearest minute (the scheduler's minimum granularity is 1 minute),",
+	"  `m` are minutes, `h` are hours, `d` are days. Examples: `5m` -> `*/5 * * * *`,",
+	"  `1h` -> `0 * * * *`, `1d` -> `0 0 * * *`. If the interval does not cleanly divide its",
+	"  unit, round to the nearest clean interval and tell the user what you rounded to.",
+	"- Then confirm to the user: what is scheduled, the cron expression, the human-readable",
+	"  cadence, the next run time from the tool result, that recurring jobs auto-expire after",
+	"  7 days (they run one final time, then are deleted), and the job id they can cancel with",
+	"  `cron_delete`.",
+	"",
+	"**Otherwise the interval is open-ended**: you pace the loop yourself.",
+	"- Do the task now, then write your update for the user.",
+	"- Then call the `schedule_wakeup` tool with `delaySeconds` (60-3600), a one-sentence `reason`,",
+	"  and `prompt` set to the same /loop prompt verbatim: {quoted}",
+	"  The turn ends as soon as `schedule_wakeup` returns, so call it last.",
+	DELAY_ADVICE,
+	"- If the task is complete or can no longer make progress, call `schedule_wakeup` with",
+	"  `stop: true` instead of scheduling another iteration.",
+].join("\n");
+
+const LOOP_GUIDELINES = [
+	"A self-paced `/loop` is running. Its prompt is: {prompt}",
+	"After this iteration, decide whether the loop continues:",
+	"- To continue, call the `schedule_wakeup` tool with `delaySeconds` (60-3600), a one-sentence `reason`,",
+	"  and `prompt` set to the same /loop prompt verbatim: {quoted}",
+	"- Write your update for the user before you call `schedule_wakeup`: the turn ends as soon as it returns.",
+	DELAY_ADVICE,
+	"- If the task is complete, or the loop cannot move further without the user, call `schedule_wakeup`",
+	"  with `stop: true` instead and say why.",
+].join("\n");
+
+/**
+ * How a self-paced loop uses the Monitor tool, after Claude Code's /loop
+ * skill: arm a monitor only when the next iteration waits on an event, arm it
+ * once, and keep the wakeup as a long fallback heartbeat. A monitor event
+ * does not cancel that heartbeat.
+ */
+const MONITOR_GUIDELINES = [
+	"If the next iteration is gated on an external event (a CI run finishing, a PR comment, a log line) and no",
+	"monitor is already running for it, arm one with the `Monitor` tool and set `loopPrompt` to {quoted}, so the",
+	"event wakes you as soon as it happens. Arm it once: on later iterations call `monitor_list` first and skip",
+	"this step while a monitor for it is still running.",
+	"While a monitor is armed, keep `delaySeconds` at 1200-1800: the monitor is the wake signal and the",
+	"`schedule_wakeup` delay is only the fallback heartbeat. When a monitor event wakes you, handle the event,",
+	"then decide whether the loop continues.",
+].join("\n");
+
+/**
+ * Fill `{name}` placeholders. A replacer function is used so that `$&` or
+ * `$1` in a prompt are inserted literally.
+ */
+export function fill(template: string, values: Record<string, string>): string {
+	return template.replace(/\{(\w+)\}/g, (match, key: string) => values[key] ?? match);
+}
+
+/** The prompt as a JSON string: unambiguous even with quotes or newlines. */
+export function quote(prompt: string): string {
+	return JSON.stringify(prompt);
+}
+
+/** How a prompt is described to the model; the loop.md sentinel gets an explanation. */
+function describePrompt(prompt: string): string {
+	if (prompt !== LOOP_FILE_SENTINEL) return prompt;
+	return (
+		"the loop tasks in the message above (pass the literal sentinel " +
+		`${quote(LOOP_FILE_SENTINEL)} as \`prompt\`: it expands to the current loop.md tasks, or the built-in ` +
+		"maintenance pass when there is no loop.md, every time it fires)"
+	);
+}
+
+export function provenance(tick: number): string {
+	return fill(PROVENANCE, { n: String(tick) });
+}
+
+export function scheduleRules(prompt: string): string {
+	return fill(LOOP_SCHEDULE_RULES, { prompt: describePrompt(prompt), quoted: quote(prompt) });
+}
+
+export function loopGuidelines(prompt: string): string {
+	return fill(LOOP_GUIDELINES, { prompt: describePrompt(prompt), quoted: quote(prompt) });
+}
+
+export function monitorGuidelines(prompt: string): string {
+	return fill(MONITOR_GUIDELINES, { quoted: quote(prompt) });
+}
+
+/** Claude Code's notice for durable one-shot jobs that came due while nobody was running them. */
+export function missedJobsMessage(lines: string[]): string {
+	const one = lines.length === 1;
+	return [
+		"[missed scheduled jobs \u00b7 reported by /loop, not typed by the user]",
+		`The following one-shot scheduled task${one ? " was" : "s were"} missed while Pi was not running. ` +
+			`${one ? "It has" : "They have"} already been removed from .pi/scheduled_tasks.json.`,
+		`Do NOT execute ${one ? "this prompt" : "these prompts"} yet. First ask the user whether to run ` +
+			`${one ? "it" : "each one"} now. Only execute if the user confirms.`,
+		...lines,
+	].join("\n");
+}
+
+// ---------------------------------------------------------------- tools
+
+export const CRON_CREATE_DESCRIPTION = `Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.
+Uses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. "0 9 * * *" means 9am local \u2014 no timezone conversion needed.
+
+## One-shot tasks (recurring: false)
+For "remind me at X" or "at <time>, do Y" requests \u2014 fire once then auto-delete.
+Pin minute/hour/day-of-month/month to specific values:
+  "remind me at 2:30pm today to check the deploy" \u2192 cron: "30 14 <today_dom> <today_month> *", recurring: false
+  "tomorrow morning, run the smoke test" \u2192 cron: "57 8 <tomorrow_dom> <tomorrow_month> *", recurring: false
+
+## Recurring jobs (recurring: true, the default)
+For "every N minutes" / "every hour" / "weekdays at 9am" requests:
+  "*/5 * * * *" (every 5 min), "0 * * * *" (hourly), "0 9 * * 1-5" (weekdays at 9am local)
+
+## Avoid the :00 and :30 minute marks when the task allows it
+When the user's request is approximate, pick a minute that is NOT 0 or 30:
+  "every morning around 9" \u2192 "57 8 * * *" or "3 9 * * *" (not "0 9 * * *")
+  "hourly" \u2192 "7 * * * *" (not "0 * * * *")
+  "in an hour or so, remind me to..." \u2192 pick whatever minute you land on, don't round
+Only use minute 0 or 30 when the user names that exact time and clearly means it ("at 9:00 sharp", "at half past").
+
+## Durability
+By default (durable: false) the job belongs to this Pi session: it is restored if the session is resumed and gone otherwise. Pass durable: true to write it to .pi/scheduled_tasks.json so it survives restarts; one Pi session per project runs the durable jobs. Only use durable: true when the user explicitly asks for the task to persist ("keep doing this every day", "set this up permanently").
+
+## Not for live watching
+cron_create re-runs a prompt at fixed wall-clock intervals. To watch a log file, process, or command output and be told the moment something changes, use the Monitor tool instead when it is available \u2014 it streams events as they happen; cron polls on a schedule.
+
+## Runtime behavior
+Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: a recurring job runs up to half its period late (max 30 min), a "*/5 * * * *" job runs every 4m45s so the 5-minute prompt cache stays warm, and a one-shot job landing on :00 or :30 runs up to 90 s early. The result of this tool and of cron_list gives each job's actual next run time: when you tell the user when a job will run, give that time, not the minute in the cron expression.
+Recurring jobs auto-expire after 7 days \u2014 they fire one final time, then are deleted. Tell the user about the 7-day limit when scheduling recurring jobs.
+Returns a job ID you can pass to cron_delete.`;
+
+export const CRON_DELETE_DESCRIPTION =
+	"Cancel a job scheduled with cron_create, or end a self-paced /loop, by its id. Removes it from .pi/scheduled_tasks.json (durable jobs) or from this session (session-only jobs).";
+
+export const CRON_LIST_DESCRIPTION =
+	"List the scheduled jobs, both durable (.pi/scheduled_tasks.json) and session-only, with their ids, schedules, actual next run times and prompts.";
+
+export const SCHEDULE_WAKEUP_DESCRIPTION = `Schedule when to resume work in a self-paced /loop \u2014 the user invoked /loop without an interval, asking you to self-pace iterations of a task. Call it as the last thing in the turn to keep the loop alive: the turn ends as soon as it returns, so write your update for the user first. To end the loop, call it with stop: true (omit every other field).
+
+Pass the same /loop prompt back via \`prompt\` each turn so the next firing repeats the task. For a bare /loop (no prompt), pass the literal sentinel "${LOOP_FILE_SENTINEL}": it expands at fire time to the current loop.md tasks, or to the built-in maintenance pass when there is no loop.md.
+
+Do not schedule a short wakeup to poll for work Pi will tell you about anyway (a monitor event, a command you are running): schedule a long fallback (1200s+) so the loop survives if that never arrives. For external work nothing notifies you about (a CI run, a deploy, a remote queue), pick a delay matched to how fast that state actually changes.
+
+## Picking delaySeconds
+Most model providers cache the conversation prefix for about 5 minutes. Under 300s (60-270s) the next wakeup reads the context cached; past that it is read uncached \u2014 slower and more expensive. When actively polling, prefer 270s over 300s (300s pays the cache miss without amortizing it), and commit to 1200s+ rather than repeated ~300s waits. For idle ticks with no specific signal to watch, default to 1200-1800s (20-30 min). The runtime clamps to [60, 3600].
+
+## The reason field
+One short sentence on what you chose and why. It is shown to the user: "watching CI run" beats "waiting".`;
+
+export const CRON_CREATE_SNIPPET = "Schedule a prompt on a 5-field cron expression, recurring or one-shot";
+export const CRON_DELETE_SNIPPET = "Cancel a scheduled job or a self-paced /loop by id";
+export const CRON_LIST_SNIPPET = "List scheduled jobs with their actual next run times";
+export const SCHEDULE_WAKEUP_SNIPPET = "Pick when a self-paced /loop runs next, or stop it";

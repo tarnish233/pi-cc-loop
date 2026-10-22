@@ -21,11 +21,15 @@ pi install npm:pi-cc-loop
 | 固定间隔 | 5 字段 cron；`30s`、`5m`、`2h`、`1d`；秒向上取整到分钟 | `/loop 5m <prompt>` |
 | 自选间隔 | 模型每轮用 `schedule_wakeup` 决定下次延迟（60–3600s） | `/loop <prompt>` |
 | 自然语言间隔 | 命令层认不出时交给模型解析（中英文均可） | `/loop 每30秒 ...` |
+| loop.md | 不带 prompt 时运行 `.pi/loop.md`（每次触发重读，改了下一轮生效），没有则跑内置维护 prompt | `/loop`、`/loop 15m` |
 | 立即执行 | 创建后马上跑一次，不等首个 cron | 自动 |
 | 漏跑合并 | agent 忙时到点只记一次 pending，空闲后发一条 | 自动 |
 | 兜底心跳 | 模型忘记调度时 arm 一次 20 分钟心跳，预算 1 次 | 自动 |
+| Esc 取消 | 回合中按 Esc 取消所有自定步调 loop；固定间隔不受影响 | Esc |
+| 错峰 | 周期任务按 id 固定延后最多半个周期（≤30 分钟）；`*/5` 每 4 分 45 秒一次以保持缓存；`:00`/`:30` 的一次性任务最多提前 90 秒 | 自动 |
+| 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
 | 次数上限 | `--max N`，到顶自动删除 | 标志 |
-| 持久化 | `--durable` 写入 `.pi/scheduled_tasks.json` | 标志 |
+| 持久化 | `--durable` 写入 `.pi/scheduled_tasks.json`；同一项目只由一个 Pi 会话执行 | 标志 |
 | 状态条 | 输入框上方状态行，默认关闭 | `/loop widget on\|off` |
 
 ## 命令
@@ -33,7 +37,7 @@ pi install npm:pi-cc-loop
 ```text
 /loop [间隔] <prompt>     按间隔重复跑
 /loop <prompt>            间隔交给模型判断
-/loop                     使用 .pi/loop.md 或内置维护 prompt
+/loop [间隔]              运行 .pi/loop.md 或内置维护 prompt（不带间隔则自定步调）
 /loop status              列出当前 loop
 /loop stop [id]           停止一个或全部
 /loop widget on|off       状态条
@@ -48,8 +52,8 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 间隔写法：
 
 - `30s`、`5m`、`2h`、`1d`
-- `check the deploy every 20m`
-- 不整除的间隔按 CC 规则取整并提示：`7m` → `*/6`，`30s` → 每分钟
+- `check the deploy every 20m`、`every 5 min`、`every 2 hrs`
+- 秒向上取整到分钟；不整除的间隔按 CC 规则取整并提示：`7m` → `*/6`，`30s` → 每分钟
 - 其他语言（如「每30秒」）交给模型解析
 
 ## 工具
@@ -65,8 +69,19 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 
 - `delaySeconds`：60–3600，越界自动钳制
 - `reason`：一句原因
-- `prompt`：原样传回 `/loop` 的 prompt
+- `prompt`：原样传回 `/loop` 的 prompt；裸 `/loop` 传 `<<loop.md>>`
 - `stop`：结束当前自选间隔 loop
+
+`schedule_wakeup` 调用后本回合结束（工具批次里只有它时），所以模型会先写进度再调用；
+延迟在 286–300 秒之间会被拉到 285 秒，留在 5 分钟的 prompt 缓存内。
+
+## 持久化与恢复
+
+- `--durable` / `durable: true` 的任务存在 `.pi/scheduled_tasks.json`，并自动加入 `.git/info/exclude`
+- 同一项目只有持有 `.pi/scheduled_tasks.lock` 的 Pi 会话执行它们；该会话退出（或 60 秒没有心跳）后由其他会话接管
+- Pi 没运行时错过的 durable 一次性任务会被移除，下一轮先问你要不要补跑
+- 从别的目录拷来的任务只列出、不执行；`.pi` 或任务文件是符号链接时拒绝写入
+- 恢复会话：会话内任务照常恢复，但过期的周期任务、已过时间的一次性任务除外，错过的运行不补跑；自定步调 loop 不恢复（需重新 `/loop`），`/reload` 时保留
 
 ## 设置
 
@@ -100,7 +115,8 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 | --- | --- | --- |
 | `PI_LOOP_MAX_AGE_DAYS` | `7` | 任务最长存活天数，`0` 不过期 |
 | `PI_LOOP_KEEPALIVE_SECONDS` | `1200` | 兜底心跳；`0` 禁用 |
-| `PI_LOOP_JITTER` | `0` | 抖动比例 0–1 |
+| `PI_LOOP_JITTER` | `0.5` | 周期任务最多延后的周期比例；`0` 关闭错峰 |
+| `PI_LOOP_CACHE_LEAD_SECONDS` | `15` | `*/5` 任务提前的秒数；`0` 关闭 |
 | `PI_LOOP_SCAN_MS` | `1000` | 调度扫描间隔 |
 
 ## 兼容性
@@ -119,7 +135,8 @@ npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
 ## 说明
 
 - 行为对齐 Claude Code v2.1.306 的 `/loop`，用 Pi 扩展 API 实现。
-- `/loop stop` 代替 CC 的 Esc；状态条默认关闭，和 CC 主会话一致。
+- Esc 打断回合时取消自定步调 loop；空闲时用 `/loop stop`（CC 空闲时按 Esc 也会取消）。
+- 状态条默认关闭，和 CC 主会话一致。
 - `cron_create` 的 `maxFires` 是额外加固；CC 没有次数上限。
 - `/loop stop` 会连带静默停掉该 chain 绑定的 Monitor。
 - Monitor 事件不会取消待触发的 wakeup，它始终是兜底心跳（与 CC 一致）。

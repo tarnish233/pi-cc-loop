@@ -22,11 +22,7 @@
 		"url": "https://github.com/tarnish233/pi-cc-loop/issues"
 	},
 	"files": [
-		"index.ts",
-		"cron.ts",
-		"schedule.ts",
-		"render.ts",
-		"config.ts",
+		"*.ts",
 		"README.md",
 		"LICENSE"
 	],

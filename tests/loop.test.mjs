@@ -1,170 +1,16 @@
 import assert from "node:assert";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadModule } from "./helpers.mjs";
-
-const mod = await loadModule("index.ts");
-const factory = mod.default;
-
-/** A fake ExtensionAPI + ExtensionContext so the extension can be driven in isolation. */
-function makeHarness() {
-	// Every harness gets its own working directory so durable state never leaks
-	// between test cases.
-	const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-loop-t-"));
-	process.chdir(workdir);
-
-	const commands = new Map();
-	const tools = new Map();
-	const renderers = new Map();
-	const toolRenderers = [];
-	const handlers = new Map();
-	const busEvents = [];
-	const sent = [];
-	const appended = [];
-	const notifications = [];
-	let widgets = [];
-	let registeredToolNames = [];
-
-	const pi = {
-		registerCommand(name, options) {
-			commands.set(name, options);
-		},
-		registerTool(tool) {
-			tools.set(tool.name, tool);
-		},
-		registerMessageRenderer(customType, renderer) {
-			renderers.set(customType, renderer);
-		},
-		registerToolRenderer(resolver) {
-			toolRenderers.push(resolver);
-		},
-		on(event, handler) {
-			handlers.set(event, handler);
-			return () => handlers.delete(event);
-		},
-		appendEntry(customType, data) {
-			appended.push({ customType, data });
-		},
-		sendUserMessage(content, options) {
-			sent.push({ kind: "user", content, options });
-		},
-		sendMessage(message, options) {
-			sent.push({ kind: "custom", message, options });
-		},
-		events: {
-			emit(channel, data) {
-				busEvents.push({ channel, data });
-			},
-			on(channel, handler) {
-				handlers.set(`bus:${channel}`, handler);
-				return () => handlers.delete(`bus:${channel}`);
-			},
-		},
-		getAllTools() {
-			return registeredToolNames.map((name) => ({ name }));
-		},
-	};
-
-	// The agent starts idle; tests flip these to simulate a busy agent.
-	const state = { idle: true, pending: false, waited: 0 };
-
-	const ctx = {
-		ui: {
-			notify: (message, level) => notifications.push({ message, level }),
-			setWidget: (_key, content) => {
-				widgets = content ?? [];
-			},
-			theme: { fg: (_color, text) => text },
-		},
-		hasUI: true,
-		mode: "tui",
-		cwd: workdir,
-		sessionManager: { getEntries: () => [] },
-		isIdle: () => state.idle,
-		hasPendingMessages: () => state.pending,
-		abort: () => {},
-		// Command contexts can wait for the current turn to finish.
-		waitForIdle: async () => {
-			state.waited += 1;
-			state.idle = true;
-		},
-	};
-
-	const lastState = () =>
-		appended.filter((e) => e.customType === "pi-cc-loop-state").pop()?.data ?? { jobs: [] };
-
-	return {
-		pi,
-		toolRenderers,
-		ctx,
-		state,
-		commands,
-		tools,
-		renderers,
-		handlers,
-		sent,
-		appended,
-		notifications,
-		busEvents,
-		lastState,
-		/** Pretend another extension registered a tool. */
-		setRegisteredTools(names) {
-			registeredToolNames = names;
-		},
-		/** The scheduler the extension just created. */
-		scheduler: () => mod.getScheduler(),
-		get widgets() {
-			return widgets;
-		},
-	};
-}
-
-/** Create the extension and run session_start, with the scan loop disabled. */
-async function start(h) {
-	process.env.PI_LOOP_SCAN_MS = "600000";
-	factory(h.pi);
-	await h.handlers.get("session_start")({}, h.ctx);
-	return h;
-}
-
-/** Make every job due right now. */
-function makeDue(h, jobId) {
-	const job = h.scheduler().get(jobId);
-	assert.ok(job, "job exists");
-	if (job.kind === "cron") job.nextFireAt = Date.now() - 1;
-	else job.scheduledFor = Date.now() - 1;
-}
-
-/** The before_agent_start event of a run started by a message the extension sent. */
-function runEvent(sent) {
-	return { messageType: "custom", message: sent.message, systemPromptOptions: { promptGuidelines: [] } };
-}
-
-function guidelinesOf(event) {
-	return event.systemPromptOptions.promptGuidelines.join("\n");
-}
-
-/** Mark a turn as started and finished, the way pi would. */
-async function runTurn(h) {
-	await h.handlers.get("agent_start")({}, h.ctx);
-	await h.handlers.get("agent_end")({}, h.ctx);
-	await h.handlers.get("agent_settled")({}, h.ctx);
-}
-
-/**
- * Start a self-paced loop the way it now works: `/loop` hands the prompt to
- * the model, the model decides the cadence and calls `schedule_wakeup`, which
- * creates the chain.
- */
-async function startSelfPaced(h, prompt = "check the deploy", delaySeconds = 60) {
-	await h.commands.get("loop").handler(prompt, h.ctx);
-	await h.tools
-		.get("schedule_wakeup")
-		.execute("c", { delaySeconds, prompt }, undefined, undefined, h.ctx);
-	return h.lastState().jobs.find((j) => j.kind === "wakeup");
-}
+import {
+	guidelinesOf,
+	makeDue,
+	makeHarness,
+	runEvent,
+	runTurn,
+	start,
+	startSelfPaced,
+} from "./harness.mjs";
 
 test("registers the /loop command and the four tools", async () => {
 	const h = await start(makeHarness());
@@ -172,7 +18,7 @@ test("registers the /loop command and the four tools", async () => {
 	for (const name of ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"]) {
 		assert.ok(h.tools.has(name), `${name} tool registered`);
 	}
-	for (const event of ["session_start", "agent_end", "agent_settled", "before_agent_start", "session_shutdown"]) {
+	for (const event of ["session_start", "agent_settled", "before_agent_start", "session_shutdown"]) {
 		assert.ok(h.handlers.has(event), `${event} handler registered`);
 	}
 });
@@ -264,7 +110,7 @@ test("a tick waits until the agent is idle", async () => {
 test("missed intervals coalesce into a single tick", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("1m check the deploy", h.ctx);
-	const job = h.lastState().jobs[0];
+	const job = h.scheduler().get(h.lastState().jobs[0].id);
 
 	// The agent stays busy for ten minutes on a one minute cadence.
 	h.state.idle = false;
@@ -319,7 +165,7 @@ test("schedule_wakeup clamps the delay to [60, 3600]", async () => {
 	const high = await tool.execute("c2", { delaySeconds: 99999, prompt: "check the deploy" }, undefined, undefined, h.ctx);
 	assert.equal(high.details.clampedDelaySeconds, 3600);
 
-	const job = h.lastState().jobs.find((j) => j.kind === "wakeup");
+	const job = h.scheduler().byKind("wakeup")[0];
 	assert.ok(job.scheduledFor > Date.now());
 	assert.equal(job.keepaliveUsed, false);
 	assert.equal(job.awaitingReschedule, false, "the model rescheduled, so no keepalive is owed");
@@ -363,11 +209,11 @@ test("the keepalive turn is the model's last chance", async () => {
 test("an explicit reschedule resets the keepalive budget", async () => {
 	const h = await start(makeHarness());
 	await startSelfPaced(h);
-	await h.handlers.get("agent_end")({}, h.ctx);
+	await runTurn(h);
 	await h.tools
 		.get("schedule_wakeup")
 		.execute("c", { delaySeconds: 300, prompt: "check the deploy" }, undefined, undefined, h.ctx);
-	await h.handlers.get("agent_end")({}, h.ctx);
+	await runTurn(h);
 
 	const job = h.lastState().jobs.find((j) => j.kind === "wakeup");
 	assert.ok(job, "the chain is still alive");

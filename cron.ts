@@ -176,11 +176,12 @@ const UNIT_SECONDS: Record<string, number> = {
 	d: 86400,
 };
 
-const UNIT_NAMES: Record<string, [string, string]> = {
-	s: ["second", "seconds"],
-	m: ["minute", "minutes"],
-	h: ["hour", "hours"],
-	d: ["day", "days"],
+/** The unit words Claude Code's /loop accepts in a trailing "every N <unit>" clause. */
+const UNIT_WORDS: Record<string, string[]> = {
+	s: ["s", "sec", "secs", "second", "seconds"],
+	m: ["m", "min", "mins", "minute", "minutes"],
+	h: ["h", "hr", "hrs", "hour", "hours"],
+	d: ["d", "day", "days"],
 };
 
 /**
@@ -227,8 +228,10 @@ export function intervalToCron(seconds: number): IntervalSpec | null {
 		};
 	}
 
-	if (seconds < 3600) {
-		const requested = Math.round(seconds / 60);
+	// "Seconds are rounded up to the nearest minute since cron has one-minute
+	// granularity."
+	if (seconds < 3600 && Math.ceil(seconds / 60) < 60) {
+		const requested = Math.ceil(seconds / 60);
 		const minutes = nearestDivisor(requested, 60);
 		return {
 			seconds: minutes * 60,
@@ -243,7 +246,7 @@ export function intervalToCron(seconds: number): IntervalSpec | null {
 	}
 
 	if (seconds < 86400) {
-		const requested = Math.round(seconds / 3600);
+		const requested = Math.max(1, Math.round(seconds / 3600));
 		const hours = nearestDivisor(requested, 24);
 		return {
 			seconds: hours * 3600,
@@ -277,24 +280,19 @@ export function parseIntervalToken(token: string): number | null {
 	return amount * UNIT_SECONDS[unit];
 }
 
-/** Parse `every 20m` / `every 5 minutes` / `every 2 hours` style clauses. */
+/**
+ * Parse a trailing `every 20m` / `every 5 min` / `every 2 hours` clause, with
+ * the unit words Claude Code accepts.
+ */
 export function parseEveryClause(input: string): { interval: number; prompt: string } | null {
 	const m = /\bevery\s+(\d+)\s*([a-z]+)\s*$/i.exec(input.trim());
 	if (!m) return null;
 	const amount = Number(m[1]);
+	if (!(amount > 0)) return null;
 	const word = m[2].toLowerCase();
-	let unitSeconds: number | undefined;
-	for (const [key, names] of Object.entries(UNIT_NAMES)) {
-		if (names[0] === word || names[1] === word) {
-			unitSeconds = UNIT_SECONDS[key];
-			break;
-		}
-	}
-	// Single letter units, e.g. "every 20m".
-	if (unitSeconds === undefined && word.length === 1 && word in UNIT_SECONDS) {
-		unitSeconds = UNIT_SECONDS[word];
-	}
-	if (unitSeconds === undefined) return null;
+	const unit = Object.keys(UNIT_WORDS).find((key) => UNIT_WORDS[key].includes(word));
+	if (!unit) return null;
+	const unitSeconds = UNIT_SECONDS[unit];
 	const prompt = input.trim().slice(0, m.index).trim();
 	return { interval: amount * unitSeconds, prompt };
 }

@@ -1,18 +1,21 @@
 /**
- * Rendering helpers for the pi-cc-loop custom messages.
+ * Rendering helpers for the pi-cc custom messages (loop ticks, monitor events).
  *
- * Pi renders a custom message with the raw `customType` as its title
- * (`[pi-cc-loop-tick]`), which reads like a machine name. A custom renderer
- * replaces that with either a quiet two-line block (the default) or the
- * legacy padded card, depending on `compactMessages`.
+ * Pi renders a custom message with its raw `customType` as the title, which
+ * reads like a machine name. A custom renderer replaces that with either a
+ * quiet block (the default) or the legacy padded card, depending on
+ * `compactMessages`.
  *
  * The quiet block is modelled on Claude Code's `scheduled_task_fire` marker:
- * a timestamped header plus the prompt. No icon and no background; the
- * accent-coloured label carries the meaning, and the timestamp makes a
- * minute-by-minute loop easy to scan.
+ * a timestamped header plus the text, with no icon and no background. Long
+ * text is capped to a few lines while collapsed; expanding shows all of it and
+ * the metadata.
  *
  * The renderer only affects the display. The message content the model sees is
  * unchanged.
+ *
+ * This file is identical in pi-cc-loop and pi-cc-monitor; tests/shared.test.mjs
+ * fails when the two copies drift apart.
  */
 
 import { keyHint, type Theme } from "@earendil-works/pi-coding-agent";

@@ -1,7 +1,7 @@
 /**
  * Job store and dispatch scheduler for the pi-cc-loop extension.
  *
- * Modelled on Claude Code's scheduler (v2.1.306):
+ * Modelled on Claude Code's scheduler:
  *
  *   - "The scheduler checks every second for due tasks and enqueues them at low
  *     priority."  -> one scan per second, not one timer per job.
@@ -10,9 +10,18 @@
  *   - "If a task's scheduled time passes while Claude is busy on a long-running
  *     request, it fires once when Claude becomes idle, not once per missed
  *     interval."  -> at most one pending tick per job, no backlog.
+ *   - "Recurring tasks automatically expire 7 days after creation. The task
+ *     fires one final time, then deletes itself."  -> a recurring job past its
+ *     maximum age is deleted right after its next fire. One-shot jobs do not
+ *     expire.
+ *   - Run times carry Claude Code's fixed per-job offset (see nextRunTime).
+ *
+ * There is no delivery confirmation or retry: Pi marks the session busy as
+ * soon as a tick starts a turn, so the idle check alone keeps ticks one at a
+ * time, and a tick that fails to start is dropped (Claude Code drops it too).
  */
 
-import { nextFireAfter, parseCron, type CronFields } from "./cron.ts";
+import { nextFireAfter, parseCron } from "./cron.ts";
 
 export type JobKind = "cron" | "wakeup";
 
@@ -25,79 +34,156 @@ export interface LoopJob {
 	prompt: string;
 	recurring: boolean;
 	createdAt: number;
-	/** Epoch ms of the next cron slot. */
+	/** Epoch ms of the next cron run, offset included. */
 	nextFireAt?: number;
-	/** Epoch ms of the next dynamic wakeup. */
+	/** Epoch ms of the next self-paced wakeup. */
 	scheduledFor?: number;
-	/** Epoch ms when the dynamic chain started; used for the age-out check. */
+	/** Epoch ms when the self-paced chain started; used for the 7-day limit. */
 	chainStartedAt?: number;
 	/** True once the keepalive fallback has been used for this chain. */
 	keepaliveUsed?: boolean;
 	/** True while the current turn is the keepalive turn (the model's last chance). */
 	keepaliveTurn?: boolean;
-	/** True after a tick was dispatched, until the model reschedules. */
+	/** True after a wakeup fired, until the model reschedules. */
 	awaitingReschedule?: boolean;
 	/** True when the job is due and waiting for the agent to go idle. */
 	pending?: boolean;
 	/** Epoch ms when the job became pending. */
 	dueAt?: number;
-	/** Epoch ms when the job was last dispatched. */
-	dispatchedAt?: number;
-	/** Turn sequence number at dispatch; set once a turn confirms delivery. */
-	dispatchedTurnSeq?: number;
 	/** How many times the job has fired. */
 	fireCount?: number;
 	/** How many ticks the model has seen. */
 	tickCount?: number;
 	/** Epoch ms of the last fire. */
-	lastTickAt?: number;
+	lastFiredAt?: number;
 	/** Optional cap on the number of fires. */
 	maxFires?: number;
-	/** True when the job is written to disk and survives a restart. */
+	/** True when the job lives in .pi/scheduled_tasks.json and survives restarts. */
 	durable: boolean;
+	/** The project folder a durable job was created in; it only runs there. */
+	createdInProject?: string;
 	/** Free-form label shown in `/loop status`. */
 	label?: string;
-	/** Why the delay was chosen (dynamic jobs). */
+	/** Why the delay was chosen (self-paced chains). */
 	reason?: string;
 	/** Where the job came from: `loop_command`, `cron_create`, `schedule_wakeup`. */
 	source: string;
 }
 
+/** Fields that only mean something while the job lives in this process. */
+const TRANSIENT_FIELDS = ["pending", "dueAt", "awaitingReschedule", "keepaliveTurn"] as const;
+
+/** A copy of the job without its in-process state, for persisting. */
+export function storedJob(job: LoopJob): LoopJob {
+	const copy = { ...job };
+	for (const field of TRANSIENT_FIELDS) delete copy[field];
+	return copy;
+}
+
+/**
+ * Claude Code's offsets (v2.1.302 defaults, also in its docs): "a recurring
+ * task starts each run late by up to half the gap to the next run, and by at
+ * most 30 minutes"; "a task written `*\/5 * * * *` isn't delayed ... each run
+ * starts 15 seconds sooner" so the 5 minute prompt cache is still warm; "a
+ * one-shot task scheduled for :00 or :30 runs up to 90 seconds early".
+ */
+export interface TimingConfig {
+	recurringFrac: number;
+	recurringCapMs: number;
+	oneShotMaxMs: number;
+	oneShotMinuteMod: number;
+	cacheLeadMs: number;
+}
+
+export const DEFAULT_TIMING: TimingConfig = {
+	recurringFrac: 0.5,
+	recurringCapMs: 30 * 60_000,
+	oneShotMaxMs: 90_000,
+	oneShotMinuteMod: 30,
+	cacheLeadMs: 15_000,
+};
+
+/** The prompt cache lifetime the cache lead is aimed at. */
+const CACHE_TTL_MS = 300_000;
+const MINUTE_STEP = /^\*\/\d+ \* \* \* \*$/;
+
+/** A fraction in [0, 1) derived from the job id, so a job always gets the same offset. */
+export function idFraction(id: string): number {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < id.length; i++) {
+		hash ^= id.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash / 4294967296;
+}
+
+/**
+ * When a cron job runs next, measured from `from`, with Claude Code's
+ * offsets. Recurring jobs measure from their last fire (or creation); a
+ * one-shot measures from its creation, so its run time never moves.
+ */
+export function nextRunTime(
+	job: Pick<LoopJob, "id" | "cron" | "recurring">,
+	from: number,
+	timing: TimingConfig = DEFAULT_TIMING,
+): number | null {
+	if (!job.cron) return null;
+	const fields = parseCron(job.cron);
+	if (!fields) return null;
+	const first = nextFireAfter(fields, new Date(from));
+	if (!first) return null;
+	const slot = first.getTime();
+
+	if (!job.recurring) {
+		if (new Date(slot).getMinutes() % timing.oneShotMinuteMod !== 0) return slot;
+		return Math.max(slot - idFraction(job.id) * timing.oneShotMaxMs, from);
+	}
+
+	const second = nextFireAfter(fields, first);
+	if (!second) return slot;
+	const period = second.getTime() - slot;
+	const lead = timing.cacheLeadMs;
+	if (
+		MINUTE_STEP.test(job.cron.trim()) &&
+		lead > 0 &&
+		lead < period &&
+		period >= CACHE_TTL_MS &&
+		period - lead < CACHE_TTL_MS
+	) {
+		return from + period - lead;
+	}
+	return slot + Math.min(idFraction(job.id) * timing.recurringFrac * period, timing.recurringCapMs);
+}
+
 export interface SchedulerHooks {
 	/** Deliver the job's prompt to the agent. */
 	dispatch: (job: LoopJob) => void;
+	/** Called after a fire; `finished` when the job was deleted (one-shot, cap, final run). */
+	afterDispatch?: (job: LoopJob, finished: boolean) => void;
 	/** Called whenever the job set changes, so state can be persisted. */
 	onChange?: (jobs: LoopJob[]) => void;
-	/** Max age of a recurring job in ms; 0 disables the check. */
-	maxAgeMs?: () => number;
-	/** Fraction of its period a recurring job may be delayed by; 0 disables jitter. */
-	jitterFraction?: () => number;
-	/** Upper bound for the jitter delay in ms. */
-	jitterCapMs?: () => number;
 	/** True when the agent is idle and has nothing queued: a tick may go out. */
 	canDispatch?: () => boolean;
-	/** Called when a job passes its maximum age and is dropped. */
+	/** The offsets to apply to run times. */
+	timing?: () => TimingConfig;
+	/** Max age of a recurring job in ms; 0 disables the limit. */
+	maxAgeMs?: () => number;
+	/** A recurring job ran its final time and was deleted. */
 	onExpire?: (job: LoopJob) => void;
+	/** Runs at the start of every scan (housekeeping such as durable jobs). */
+	onScan?: (now: number) => void;
 }
 
 /** Claude Code checks for due tasks once a second. */
 export const SCAN_INTERVAL_MS = 1000;
 
-/**
- * The scan interval can be raised for tests, where the scan is driven by hand.
- */
+/** The scan interval can be raised for tests, where the scan is driven by hand. */
 export function scanIntervalMs(): number {
 	const raw = process.env.PI_LOOP_SCAN_MS;
 	if (raw === undefined) return SCAN_INTERVAL_MS;
 	const value = Number(raw);
 	return Number.isFinite(value) && value > 0 ? value : SCAN_INTERVAL_MS;
 }
-
-/**
- * How long a dispatched tick may sit without a turn starting before it is
- * treated as undelivered and requeued.
- */
-export const DISPATCH_CONFIRM_MS = 30_000;
 
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -112,13 +198,8 @@ export function generateId(length = 8): string {
 export class LoopScheduler {
 	private jobs = new Map<string, LoopJob>();
 	private scanTimer: ReturnType<typeof setInterval> | null = null;
-	private hooks: SchedulerHooks;
-	private inFlightId: string | null = null;
-	private turnSeq = 0;
 
-	constructor(hooks: SchedulerHooks) {
-		this.hooks = hooks;
-	}
+	constructor(private readonly hooks: SchedulerHooks) {}
 
 	get size(): number {
 		return this.jobs.size;
@@ -136,7 +217,7 @@ export class LoopScheduler {
 		return this.list().filter((job) => job.kind === kind);
 	}
 
-	/** The dynamic chain that owns the given wakeup prompt, if any. */
+	/** The self-paced chain that owns the given prompt, if any. */
 	findChain(prompt: string): LoopJob | undefined {
 		return this.list().find((job) => job.kind === "wakeup" && job.prompt === prompt);
 	}
@@ -148,39 +229,44 @@ export class LoopScheduler {
 		return job;
 	}
 
+	/** Update a job in place, so references held elsewhere stay current. */
 	update(id: string, patch: Partial<LoopJob>): LoopJob | undefined {
 		const job = this.jobs.get(id);
 		if (!job) return undefined;
-		const updated = { ...job, ...patch };
-		this.jobs.set(id, updated);
+		Object.assign(job, patch);
 		this.changed();
-		return updated;
+		return job;
 	}
 
 	remove(id: string): boolean {
 		const existed = this.jobs.delete(id);
-		if (existed && this.inFlightId === id) this.inFlightId = null;
 		if (existed) this.changed();
 		return existed;
 	}
 
-	/** Remove every job of a kind (used by `/loop stop`). */
-	removeKind(kind: JobKind): number {
-		const ids = this.byKind(kind).map((job) => job.id);
-		for (const id of ids) this.jobs.delete(id);
-		if (ids.length) this.changed();
-		return ids.length;
-	}
-
 	clear(notify = true): void {
 		this.jobs.clear();
-		this.inFlightId = null;
 		if (notify) this.changed();
 	}
 
-	/** Restore a job without arming it (used while loading persisted state). */
+	/** Put a job back without arming it or announcing a change. */
 	restore(job: LoopJob): void {
 		this.jobs.set(job.id, job);
+	}
+
+	/** Announce the current job set (after a series of restores). */
+	refresh(): void {
+		this.changed();
+	}
+
+	/**
+	 * Compute a cron job's next run. Recurring jobs measure from `from`
+	 * (default now); a one-shot always measures from its creation.
+	 */
+	arm(job: LoopJob, from = Date.now()): void {
+		if (job.kind !== "cron") return;
+		const next = nextRunTime(job, job.recurring ? from : job.createdAt, this.timing());
+		job.nextFireAt = next ?? undefined;
 	}
 
 	// ------------------------------------------------------------- lifecycle
@@ -200,44 +286,18 @@ export class LoopScheduler {
 		}
 	}
 
-	/** Compute the first fire time of a cron job. */
-	arm(job: LoopJob, from = Date.now()): void {
-		if (job.kind !== "cron" || !job.cron) return;
-		const fields = parseCron(job.cron);
-		if (!fields) return;
-		const next = nextFireAfter(fields, new Date(from));
-		if (!next) return;
-		job.nextFireAt = next.getTime() + this.jitterFor(job, fields, next);
-	}
-
 	// ------------------------------------------------------------- dispatch
 
-	/**
-	 * Run one scan: expire old jobs, requeue unconfirmed ticks, mark due jobs
-	 * pending, and dispatch the oldest pending job when the agent is idle.
-	 */
+	/** Run one scan: housekeeping, mark due jobs pending, dispatch the oldest when idle. */
 	tick(now = Date.now()): void {
-		this.expire(now);
-		this.retryUnconfirmed(now);
+		this.hooks.onScan?.(now);
 		this.markDue(now);
 		this.tryDispatch(now);
 	}
 
-	/**
-	 * The agent settled: a dispatched tick has finished its turn, so the next
-	 * pending job may go out.
-	 */
+	/** The agent settled: a pending tick may go out now. */
 	notifyIdle(): void {
-		this.releaseInFlight();
 		this.tick();
-	}
-
-	/** A turn started: any dispatched tick is confirmed delivered. */
-	noteTurnStarted(): void {
-		this.turnSeq += 1;
-		if (!this.inFlightId) return;
-		const job = this.jobs.get(this.inFlightId);
-		if (job) job.dispatchedTurnSeq = this.turnSeq;
 	}
 
 	/**
@@ -261,112 +321,43 @@ export class LoopScheduler {
 		if (changed) this.changed();
 	}
 
-	/** Dispatch the oldest pending job when nothing is in flight and the agent is idle. */
-	private tryDispatch(now: number): boolean {
-		if (this.inFlightId) return false;
-		const job = this.oldestPending();
-		if (!job) return false;
-		if (this.hooks.canDispatch && !this.hooks.canDispatch()) return false;
+	/** Dispatch the oldest pending job when the agent is idle. */
+	private tryDispatch(now: number): void {
+		const job = this.list()
+			.filter((candidate) => candidate.pending)
+			.sort((a, b) => (a.dueAt ?? 0) - (b.dueAt ?? 0))[0];
+		if (!job) return;
+		if (this.hooks.canDispatch && !this.hooks.canDispatch()) return;
 
 		job.pending = false;
 		job.dueAt = undefined;
-		job.dispatchedAt = now;
-		job.dispatchedTurnSeq = undefined;
 		job.fireCount = (job.fireCount ?? 0) + 1;
-		job.lastTickAt = now;
+		job.lastFiredAt = now;
 
-		this.inFlightId = job.id;
-
+		let finished = false;
+		let expired = false;
 		if (job.kind === "wakeup") {
 			// A wakeup that fired from the keepalive is the model's last chance.
 			if (job.keepaliveUsed) job.keepaliveTurn = true;
 			job.awaitingReschedule = true;
 		} else {
-			this.advanceCron(job, now);
+			const capped = job.maxFires !== undefined && job.fireCount >= job.maxFires;
+			const maxAge = this.hooks.maxAgeMs?.() ?? 0;
+			expired = job.recurring && maxAge > 0 && now - job.createdAt >= maxAge;
+			const next = job.recurring && !capped && !expired ? nextRunTime(job, now, this.timing()) : null;
+			job.nextFireAt = next ?? undefined;
+			finished = next === null;
 		}
-		this.changed();
 
 		this.hooks.dispatch(job);
-
-		// A one-shot cron job and a capped cron job are done after their last
-		// fire. A wakeup chain is never deleted here: the model re-arms it.
-		if (job.kind === "cron" && (!job.recurring || (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires))) {
-			this.jobs.delete(job.id);
-			this.inFlightId = null;
-			this.changed();
-		}
-		return true;
-	}
-
-	/** Recompute the next cron slot after a fire. */
-	private advanceCron(job: LoopJob, now: number): void {
-		if (!job.cron) return;
-		const fields = parseCron(job.cron);
-		if (!fields) return;
-		const next = nextFireAfter(fields, new Date(now));
-		if (!next) return;
-		job.nextFireAt = next.getTime() + this.jitterFor(job, fields, next);
-	}
-
-	/**
-	 * A tick that was dispatched but never started a turn is treated as
-	 * undelivered: the job goes back to pending so it fires again.
-	 */
-	private retryUnconfirmed(now: number): void {
-		if (!this.inFlightId) return;
-		const job = this.jobs.get(this.inFlightId);
-		if (!job) {
-			this.inFlightId = null;
-			return;
-		}
-		if (job.dispatchedTurnSeq !== undefined) return;
-		if (now - (job.dispatchedAt ?? 0) < DISPATCH_CONFIRM_MS) return;
-		job.pending = true;
-		job.dueAt = now;
-		this.inFlightId = null;
+		if (finished) this.jobs.delete(job.id);
+		this.hooks.afterDispatch?.(job, finished);
+		if (expired) this.hooks.onExpire?.(job);
 		this.changed();
 	}
 
-	/** Called when the agent settles: the in-flight tick has finished its turn. */
-	releaseInFlight(): void {
-		this.inFlightId = null;
-	}
-
-	private oldestPending(): LoopJob | undefined {
-		return this.list()
-			.filter((job) => job.pending)
-			.sort((a, b) => (a.dueAt ?? 0) - (b.dueAt ?? 0))[0];
-	}
-
-	// --------------------------------------------------------------- expiry
-
-	private expire(now: number): void {
-		const limit = this.hooks.maxAgeMs?.() ?? 0;
-		if (limit <= 0) return;
-		let changed = false;
-		for (const job of this.list()) {
-			if (now - job.createdAt < limit) continue;
-			this.jobs.delete(job.id);
-			if (this.inFlightId === job.id) this.inFlightId = null;
-			changed = true;
-			this.hooks.onExpire?.(job);
-		}
-		if (changed) this.changed();
-	}
-
-	/**
-	 * Randomised delay for recurring jobs, so many sessions polling the same
-	 * target do not all fire on the same second.
-	 */
-	private jitterFor(job: LoopJob, fields: CronFields, next: Date): number {
-		if (!job.recurring) return 0;
-		const fraction = this.hooks.jitterFraction?.() ?? 0;
-		if (!(fraction > 0)) return 0;
-		const following = nextFireAfter(fields, next);
-		if (!following) return 0;
-		const period = following.getTime() - next.getTime();
-		const cap = this.hooks.jitterCapMs?.() ?? 30 * 60 * 1000;
-		return Math.round(Math.random() * Math.min(fraction * period, cap));
+	private timing(): TimingConfig {
+		return this.hooks.timing?.() ?? DEFAULT_TIMING;
 	}
 
 	private changed(): void {
