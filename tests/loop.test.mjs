@@ -39,9 +39,10 @@ test("/loop 5m creates a cron job and runs the prompt immediately", async () => 
 	assert.equal(h.sent[0].kind, "custom");
 	assert.equal(h.sent[0].options.deliverAs, "steer", "the immediate run lands in the current turn");
 	assert.ok(h.sent[0].message.content.includes("check the deploy"));
-	assert.ok(
-		h.sent[0].message.content.includes("scheduled by /loop, not typed by the user"),
-		"the tick carries a provenance header",
+	assert.match(
+		h.sent[0].message.content,
+		/^\[loop tick #1 \u00b7 fixed interval Every 5 minutes .* do not call schedule_wakeup\]/,
+		"the tick says in the message itself that it fires its own next tick",
 	);
 	assert.ok(h.notifications.some((n) => n.message.includes(job.id)));
 });

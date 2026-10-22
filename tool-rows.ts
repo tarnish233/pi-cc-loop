@@ -55,6 +55,14 @@ export interface CompactRow {
  * `✓ Scheduled hu2389lz · Every minute · next 04:55 PM`. Errors show the first
  * line of the error text.
  */
+/** The first sentence of an error message, so a failed row stays on one line. */
+export function firstSentence(text: string, max = 160): string {
+	const trimmed = text.replace(/\s+/g, " ").trim();
+	const end = trimmed.indexOf(". ");
+	if (end > 0 && end < max) return trimmed.slice(0, end + 1);
+	return trimmed.length > max ? `${trimmed.slice(0, max - 1)}\u2026` : trimmed;
+}
+
 export function compactRenderers(row: CompactRow): ToolRenderers {
 	return {
 		renderCall(args: any, theme: Theme, context: any) {
@@ -66,7 +74,12 @@ export function compactRenderers(row: CompactRow): ToolRenderers {
 		renderResult(result: any, options: any, theme: Theme, context: any) {
 			if (options?.isPartial) return new Text(theme.fg("warning", "Working\u2026"), 0, 0);
 			if (context?.isError) {
-				return new Text(`${theme.fg("error", "\u2717 ")}${theme.fg("error", resultText(result) || "Failed")}`, 0, 0);
+				// A refusal explains itself in one sentence; keep the row to one line.
+				return new Text(
+					`${theme.fg("error", "\u2717 ")}${theme.fg("error", firstSentence(resultText(result))) || "Failed"}`,
+					0,
+					0,
+				);
 			}
 			const details = result?.details ?? {};
 			const args = context?.args ?? {};

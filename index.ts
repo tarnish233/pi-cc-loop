@@ -476,11 +476,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		job.tickCount = tick;
 		const body = resolvePrompt(job.prompt, job.kind === "cron" ? "cron" : "wakeup");
 		// before_agent_start finds the job through `details.jobId` and gives a
-		// self-paced tick its chain guidelines.
+		// self-paced tick its chain guidelines. A fixed-interval tick also says,
+		// right here, that it fires its own next tick.
+		const stamp = job.kind === "cron" ? provenance(tick, humanSchedule(job.cron ?? "* * * * *")) : provenance(tick);
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
-				content: `${provenance(tick)}\n${body}`,
+				content: `${stamp}\n${body}`,
 				display: true,
 				details: { jobId: job.id, tickCount: tick, cron: job.cron, scheduledAt: Date.now() },
 			},
@@ -509,10 +511,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			scheduler.update(job.id, { tickCount: tick, fireCount: (job.fireCount ?? 0) + 1, lastFiredAt: Date.now() });
 		}
 		const body = resolvePrompt(prompt, job?.kind === "cron" ? "cron" : "wakeup");
+		const stamp =
+			job?.kind === "cron" ? provenance(tick, humanSchedule(job.cron ?? "* * * * *")) : provenance(tick);
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
-				content: `${provenance(tick)}\n${body}`,
+				content: `${stamp}\n${body}`,
 				display: true,
 				details: { jobId: job?.id, tickCount: tick, immediate: true, scheduledAt: Date.now(), guidelines },
 			},
@@ -1132,10 +1136,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			if (currentRun.cronId) {
 				const cronJob = scheduler.get(currentRun.cronId);
 				throw new Error(
-					`This tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
+					`Not scheduled: this tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
 						`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
-						"Do not call schedule_wakeup from it: that would run the same prompt twice. " +
-						`To stop the loop, call cron_delete with id ${currentRun.cronId}.`,
+						`Use /loop stop ${currentRun.cronId} or cron_delete to end it.`,
 				);
 			}
 

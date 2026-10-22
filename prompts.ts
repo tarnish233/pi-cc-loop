@@ -23,6 +23,14 @@ export const MAINTENANCE_PROMPT = [
 ].join("\n");
 
 export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed by the user]";
+/**
+ * Fixed-interval ticks say it here, next to the prompt, because a model that
+ * only saw it in the system prompt still tried to schedule a wakeup. Claude
+ * Code's tick says the same: "The recurring cron will fire the next tick
+ * automatically - do not call ScheduleWakeup from this tick."
+ */
+export const CRON_PROVENANCE =
+	"[loop tick #{n} \u00b7 fixed interval {schedule} \u00b7 fires its next tick by itself, do not call schedule_wakeup]";
 
 const DELAY_ADVICE = [
 	"- Pick the delay from what you are waiting for. For idle ticks with nothing specific to watch, use 1200-1800s.",
@@ -126,8 +134,9 @@ function describePrompt(prompt: string): string {
 	);
 }
 
-export function provenance(tick: number): string {
-	return fill(PROVENANCE, { n: String(tick) });
+export function provenance(tick: number, schedule?: string): string {
+	if (schedule === undefined) return fill(PROVENANCE, { n: String(tick) });
+	return fill(CRON_PROVENANCE, { n: String(tick), schedule });
 }
 
 export function scheduleRules(prompt: string): string {
