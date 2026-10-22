@@ -796,10 +796,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				(placement.runsHere ? "" : ` \u00b7 runs in the Pi session holding the project lock (pid ${placement.holderPid ?? "?"})`),
 			"info",
 		);
+		// Claude Code's /loop skill has a fixed-interval mode whose instructions
+		// never mention ScheduleWakeup: create the job, confirm, run the prompt
+		// now. Saying it here keeps the model from reading the self-paced habit
+		// into the loop's first run.
 		const note =
 			`A recurring /loop job was created: id ${job.id}, cron \`${spec.cron}\` (${spec.human}), ` +
 			`next run ${formatClock(nextAt)}, auto-expires after ${days} days (it runs one final time, then it is deleted). ` +
-			`The user cancels it with \`/loop stop ${job.id}\`.` +
+			`The user cancels it with \`/loop stop ${job.id}\`. ` +
+			`The schedule fires every tick by itself: do not call \`schedule_wakeup\` for this loop, now or on a later tick.` +
 			(spec.note ? ` The requested interval was adjusted: ${spec.note}.` : "");
 
 		runNow(ctx, finalPrompt, job, [note]);

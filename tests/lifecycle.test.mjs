@@ -408,3 +408,14 @@ test("two loops armed in the same run stay separate, and Esc cancels both", asyn
 	await runTurn(h, { aborted: true });
 	assert.equal(h.scheduler().byKind("wakeup").length, 0, "both belong to the interrupted run");
 });
+
+test("the first run of a fixed-interval /loop already says not to self-pace", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	const event = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	const text = guidelinesOf(event);
+	assert.match(text, /A recurring \/loop job was created/);
+	assert.match(text, /do not call `schedule_wakeup` for this loop, now or on a later tick/);
+	assert.ok(!text.includes("Decide how it should repeat"), "no mode choice: the interval was given");
+});
