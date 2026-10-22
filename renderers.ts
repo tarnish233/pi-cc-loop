@@ -23,6 +23,20 @@ export function formatClock(epochMs: number | undefined): string {
 	return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * A countdown for the footer: "3m", "<1m", "2h 15m". Rounded up and coarse on
+ * purpose, so the shared footer line is repainted at most once a minute.
+ */
+export function formatEta(ms: number): string {
+	const seconds = ms / 1000;
+	if (seconds < 60) return "<1m";
+	const minutes = Math.ceil(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const rest = minutes % 60;
+	return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
 export function formatDelay(seconds: number | undefined): string {
 	if (seconds === undefined) return "unknown";
 	if (seconds < 60) return `${seconds}s`;

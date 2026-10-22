@@ -1,6 +1,6 @@
 # pi-cc-loop
 
-> 在 Pi 里复刻 Claude Code 的 `/loop`：固定间隔 cron、自选间隔、兜底心跳和可选状态条。
+> 在 Pi 里复刻 Claude Code 的 `/loop`：固定间隔 cron、自选间隔、兜底心跳和底部状态摘要。
 
 ## 快速开始
 
@@ -30,7 +30,8 @@ pi install npm:pi-cc-loop
 | 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
 | 次数上限 | `--max N`，到顶自动删除 | 标志 |
 | 持久化 | `--durable` 写入 `.pi/scheduled_tasks.json`；同一项目只由一个 Pi 会话执行 | 标志 |
-| 状态条 | 输入框上方状态行，默认关闭 | `/loop widget on\|off` |
+| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，倒计时按分钟变化，无任务时不占位 | `/loop footer on\|off` |
+| 详细面板 | 输入框上方的逐任务详情（id、类型、绝对时间、prompt），默认关闭 | `/loop widget on\|off` |
 
 ## 命令
 
@@ -40,7 +41,8 @@ pi install npm:pi-cc-loop
 /loop [间隔]              运行 .pi/loop.md 或内置维护 prompt（不带间隔则自定步调）
 /loop status              列出当前 loop
 /loop stop [id]           停止一个或全部
-/loop widget on|off       状态条
+/loop footer on|off       底部摘要
+/loop widget on|off       输入框上方的详细面板
 /loop settings ...        界面设置
 /loop help                帮助
 ```
@@ -101,10 +103,26 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 /loop settings
 /loop settings messages on|off
 /loop settings tools on|off
+/loop settings footer on|off
 ```
 
 - 已画出的旧行需要 `/reload` 才会换样式
-- 环境变量覆盖：`PI_CC_COMPACT_MESSAGES=0`、`PI_CC_COMPACT_TOOL_ROWS=0`、`PI_CC_MANAGE_CCSTYLE=0`
+- 环境变量覆盖：`PI_CC_COMPACT_MESSAGES=0`、`PI_CC_COMPACT_TOOL_ROWS=0`、`PI_CC_MANAGE_CCSTYLE=0`、`PI_CC_FOOTER=0`
+
+## 底部摘要
+
+`ctx.ui.setStatus("loop", …)` 是 Pi 核心 API，不依赖任何其他扩展：
+
+| 场景 | 显示 |
+| --- | --- |
+| 没有任务 | 不设置状态，footer 不会被多占一行 |
+| 有任务 | `loop 3 · next 4m`（数量 + 最近一次触发） |
+| 一分钟内 | `loop 1 · next <1m` |
+| 超过一小时 | `loop 1 · next 2h 15m` |
+
+- 倒计时取整到分钟，配合"文本相同就不调用"的去重，最多每分钟重绘一次（Pi 每次 `setStatus` 都会触发重绘）
+- 装了 `pi-cc-extensions`：这一行会作为它的一个 chip 出现在第 2 行，可在它的配置面板里移动或隐藏；它会把 ANSI 去掉，所以这里只用纯文本
+- 没装 `pi-cc-extensions`：Pi 内置 footer 会把它和其他扩展的状态拼成一行，加在用量行下面，只在有任务时出现
 
 > 如果装了 `pi-cc-extensions`，`tools on` 会把本扩展的工具名加入它的 `excludeRenderers`；
 > `tools off` 只移除自己加过的名字。它只在启动时读配置，切换后需要 `/reload`。
@@ -117,6 +135,7 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 | `PI_LOOP_KEEPALIVE_SECONDS` | `1200` | 兜底心跳；`0` 禁用 |
 | `PI_LOOP_JITTER` | `0.5` | 周期任务最多延后的周期比例；`0` 关闭错峰 |
 | `PI_LOOP_SCAN_MS` | `1000` | 调度扫描间隔 |
+| `PI_CC_FOOTER` | `1` | 底部摘要；`0` 关闭（两个 pi-cc 包共用） |
 
 ## 兼容性
 
@@ -135,7 +154,7 @@ npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
 
 - 行为对齐 Claude Code v2.1.306 的 `/loop`，用 Pi 扩展 API 实现。
 - Esc 只取消被打断回合所属的自定步调 loop；CC 在任何时候按 Esc（包括空闲、打断无关回合）都会取消所有自定步调 loop。其他情况用 `/loop stop`。
-- 状态条默认关闭，和 CC 主会话一致。
+- 底部摘要默认开启，是 CC 没有的（CC 主会话不显示 loop 状态）；详细面板默认关闭。
 - `cron_create` 的 `maxFires` 是额外加固；CC 没有次数上限。
 - `/loop stop` 会连带静默停掉该 chain 绑定的 Monitor。
 - Monitor 事件不会取消待触发的 wakeup，它始终是兜底心跳（与 CC 一致）。

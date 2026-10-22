@@ -8,13 +8,15 @@
  *   ~/.pi/agent/pi-cc.json
  *   {
  *     "compactMessages": true,
- *     "compactToolRows": true
+ *     "compactToolRows": true,
+ *     "footer": true
  *   }
  *
  * Environment overrides (useful for tests and quick experiments):
  *   PI_CC_CONFIG_FILE=/path/to/pi-cc.json
  *   PI_CC_COMPACT_MESSAGES=0|1
  *   PI_CC_COMPACT_TOOL_ROWS=0|1
+ *   PI_CC_FOOTER=0|1
  */
 
 import fs from "node:fs";
@@ -32,6 +34,11 @@ export interface PiCcConfig {
 	 * removed again when the setting is turned off.
 	 */
 	managePiCcExtensions: boolean;
+	/**
+	 * Show a one-line summary in Pi's footer (loops armed, monitors running).
+	 * Shared so one switch silences both packages.
+	 */
+	footer: boolean;
 	/** Internal: names this extension added to pi-cc-extensions.json. */
 	managedExcludes?: string[];
 }
@@ -39,6 +46,7 @@ export interface PiCcConfig {
 export const DEFAULT_CONFIG: PiCcConfig = {
 	compactMessages: true,
 	compactToolRows: true,
+	footer: true,
 	managePiCcExtensions: true,
 };
 
@@ -72,6 +80,8 @@ function readConfig(): PiCcConfig {
 		compactToolRows:
 			envBool("PI_CC_COMPACT_TOOL_ROWS") ??
 			(typeof file.compactToolRows === "boolean" ? file.compactToolRows : DEFAULT_CONFIG.compactToolRows),
+		footer:
+			envBool("PI_CC_FOOTER") ?? (typeof file.footer === "boolean" ? file.footer : DEFAULT_CONFIG.footer),
 		managePiCcExtensions:
 			envBool("PI_CC_MANAGE_CCSTYLE") ??
 			(typeof file.managePiCcExtensions === "boolean"

@@ -57,7 +57,7 @@ import {
 	SCHEDULE_WAKEUP_SNIPPET,
 	scheduleRules,
 } from "./prompts.ts";
-import { formatClock, loopToolRenderers, renderTickMessage } from "./renderers.ts";
+import { formatClock, formatEta, loopToolRenderers, renderTickMessage } from "./renderers.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -74,6 +74,8 @@ export const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
 /** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
 const MONITOR_EVENT_TYPE = "pi-cc-monitor-event";
 const WIDGET_KEY = "pi-cc-loop";
+/** Footer status key, shared with every other extension's status line. */
+const STATUS_KEY = "loop";
 const CONFIG_CHANNEL = "pi-cc:config";
 const LOOP_TOOL_NAMES = ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"];
 const ALL_PI_CC_TOOLS = [...LOOP_TOOL_NAMES, "Monitor", "monitor_stop", "monitor_list"];
@@ -228,6 +230,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		onChange: (jobs) => {
 			persist(jobs);
 			refreshWidget(jobs);
+			refreshStatus(jobs);
 		},
 		canDispatch: () => {
 			const ctx = lastCtx;
@@ -244,7 +247,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const ctx = lastCtx;
 			if (ctx) notify(ctx, `loop ${job.id} ran its final time: recurring jobs expire after ${maxAgeDays()} days`);
 		},
-		onScan: (now) => durable?.maintain(now),
+		onScan: (now) => {
+			durable?.maintain(now);
+			// The countdown is coarse, so this is a string compare most seconds.
+			refreshStatus();
+		},
 	});
 	activeScheduler = scheduler;
 
@@ -309,6 +316,45 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			return ctx.ui.theme.fg("accent", `loop ${job.id} \u00b7 ${kind} \u00b7 ${when} \u00b7 ${truncate(displayPrompt(job.prompt), 28)}`);
 		});
 		ctx.ui.setWidget(WIDGET_KEY, lines.length ? lines : undefined);
+	}
+
+	/**
+	 * One line in Pi's footer, the same place other extensions show status.
+	 * Claude Code has no loop status in its footer, but the alternative here is
+	 * a widget that needs its own row above the editor; a summary is enough for
+	 * the common case and `/loop widget on` still gives the detailed view.
+	 */
+	function statusText(jobs: LoopJob[]): string | undefined {
+		if (!jobs.length) return undefined;
+		const now = Date.now();
+		const next = Math.min(
+			...jobs.map((job) => {
+				if (job.pending) return now;
+				const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
+				return at ?? now;
+			}),
+		);
+		return `loop ${jobs.length} \u00b7 next ${formatEta(Math.max(0, next - now))}`;
+	}
+
+	let lastStatusText: string | undefined;
+	let statusSet = false;
+
+	function refreshStatus(jobs: LoopJob[] = scheduler.list()): void {
+		const ctx = lastCtx;
+		if (!ctx || !ctx.hasUI) return;
+		try {
+			// Older Pi versions have no footer status API.
+			if (typeof ctx.ui.setStatus !== "function") return;
+			const text = loadConfig().footer ? statusText(jobs) : undefined;
+			// Every call repaints, even with the same text, so speak only on change.
+			if (text === lastStatusText && (text !== undefined || !statusSet)) return;
+			lastStatusText = text;
+			statusSet = text !== undefined;
+			ctx.ui.setStatus(STATUS_KEY, text);
+		} catch {
+			// a stale context must never break the loop
+		}
 	}
 
 	function rememberStopped(prompt: string): void {
@@ -577,6 +623,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					notify(ctx, `Loop status widget ${widgetEnabled ? "enabled" : "disabled"}`, "info");
 					return;
 				}
+				case "footer":
+				case "statusline": {
+					const arg = (rest[0] ?? "").toLowerCase();
+					if (!arg) {
+						notify(ctx, `Usage: /loop footer on|off (currently ${loadConfig().footer ? "on" : "off"})`, "info");
+						return;
+					}
+					setSetting(ctx, "footer", arg);
+					return;
+				}
 				case "settings":
 				case "config": {
 					const [key, value] = rest;
@@ -593,7 +649,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 						setSetting(ctx, "tools", value);
 						return;
 					}
-					notify(ctx, "Usage: /loop settings [messages|tools] [on|off]", "info");
+					if (name === "footer" || name === "status") {
+						setSetting(ctx, "footer", value);
+						return;
+					}
+					notify(ctx, "Usage: /loop settings [messages|tools|footer] [on|off]", "info");
 					return;
 				}
 				case "help":
@@ -798,7 +858,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
 			"/loop stop [id]             cancel one loop, or all of them",
 			"/loop status                list the active loops",
-			"/loop widget on|off         show or hide the status line above the editor",
+			"/loop widget on|off         show or hide the detailed panel above the editor",
+			"/loop footer on|off         show or hide the one-line summary in the footer",
 			"/loop settings              show UI settings",
 			"/loop settings messages on|off   compact two-line markers",
 			"/loop settings tools on|off      one-line tool results",
@@ -816,14 +877,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			`pi-cc settings \u00b7 ${configPath()}`,
 			`  messages:  ${config.compactMessages ? "compact" : "card"}`,
 			`  tool rows: ${config.compactToolRows ? "compact" : "default"}`,
+			`  footer:    ${config.footer ? "summary" : "hidden"}`,
 			"",
 			"Usage: /loop settings messages on|off",
 			"       /loop settings tools on|off",
+			"       /loop settings footer on|off",
 		];
 		notify(ctx, lines.join("\n"), "info");
 	}
 
-	function setSetting(ctx: ExtensionContext, key: "messages" | "tools", raw: string | undefined): void {
+	function setSetting(ctx: ExtensionContext, key: "messages" | "tools" | "footer", raw: string | undefined): void {
 		const value = (raw ?? "").toLowerCase();
 		const on = value === "on" || value === "true" || value === "1";
 		const off = value === "off" || value === "false" || value === "0";
@@ -831,7 +894,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			showSettings(ctx);
 			return;
 		}
-		const patch: Partial<PiCcConfig> = key === "messages" ? { compactMessages: on } : { compactToolRows: on };
+		const patch: Partial<PiCcConfig> =
+			key === "messages" ? { compactMessages: on } : key === "tools" ? { compactToolRows: on } : { footer: on };
 		const next = saveConfig(patch);
 		let compatChanged = false;
 		if (key === "tools") {
@@ -842,7 +906,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		} catch {
 			// another extension must not break the command
 		}
-		notify(ctx, `${key === "messages" ? "Compact message style" : "Compact tool rows"} ${on ? "enabled" : "disabled"}`, "info");
+		const label = key === "messages" ? "Compact message style" : key === "tools" ? "Compact tool rows" : "Footer summary";
+		notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
+		if (key === "footer") refreshStatus();
 		if (compatChanged) {
 			notify(ctx, "pi-cc-extensions excludeRenderers updated \u00b7 /reload to apply", "info");
 		}
@@ -1231,6 +1297,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		// Pi clears extension statuses when it unloads, but a reload should not
+		// leave a stale count behind until then.
+		try {
+			lastCtx?.ui?.setStatus?.(STATUS_KEY, undefined);
+		} catch {
+			// the context may already be invalid
+		}
 		scheduler.stop();
 		durable?.stop();
 		durable = undefined;

@@ -26,6 +26,8 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 	const appended = [];
 	const notifications = [];
 	let widgets = [];
+	const statuses = new Map();
+	const statusCalls = [];
 	let registeredToolNames = [];
 
 	const pi = {
@@ -77,6 +79,11 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 			setWidget: (_key, content) => {
 				widgets = content ?? [];
 			},
+			setStatus: (key, text) => {
+				statusCalls.push({ key, text });
+				if (text === undefined) statuses.delete(key);
+				else statuses.set(key, text);
+			},
 			theme: { fg: (_color, text) => text },
 		},
 		hasUI: true,
@@ -116,6 +123,9 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 		},
 		/** The scheduler the extension just created. */
 		scheduler: () => mod.getScheduler(),
+		/** Footer status text set through ctx.ui.setStatus. */
+		status: (key) => statuses.get(key),
+		statusCalls,
 		get widgets() {
 			return widgets;
 		},
