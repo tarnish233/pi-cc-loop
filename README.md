@@ -18,7 +18,7 @@ pi install npm:pi-cc-loop
 
 | 功能 | 说明 | 入口 |
 | --- | --- | --- |
-| 固定间隔 | 5 字段 cron；`30s`、`5m`、`2h`、`1d`；秒向上取整到分钟 | `/loop 5m <prompt>` |
+| 固定间隔 | 5 字段 cron；`30s`、`5m`、`2h`、`1d`；秒向上取整到分钟。触发时按"定时任务"呈现（不叫 loop tick），和 CC 一致 | `/loop 5m <prompt>` |
 | 自选间隔 | 模型每轮用 `schedule_wakeup` 决定下次延迟（60–3600s）；在固定间隔的 tick 里调用会被当作多余请求忽略（不报错，只说明下一轮自己会来），避免同一 prompt 跑两份 | `/loop <prompt>` |
 | 自然语言间隔 | 命令层认不出时交给模型解析（中英文均可） | `/loop 每30秒 ...` |
 | loop.md | 不带 prompt 时运行 `.pi/loop.md`（每次触发重读，改了下一轮生效），没有则跑内置维护 prompt | `/loop`、`/loop 15m` |

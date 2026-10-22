@@ -55,6 +55,7 @@ import {
 	monitorGuidelines,
 	provenance,
 	SCHEDULE_WAKEUP_DESCRIPTION,
+	scheduledTaskProvenance,
 	SCHEDULE_WAKEUP_SNIPPET,
 	scheduleRules,
 } from "./prompts.ts";
@@ -478,13 +479,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		// before_agent_start finds the job through `details.jobId` and gives a
 		// self-paced tick its chain guidelines. A fixed-interval tick also says,
 		// right here, that it fires its own next tick.
-		const stamp = job.kind === "cron" ? provenance(tick, humanSchedule(job.cron ?? "* * * * *")) : provenance(tick);
+		const stamp =
+			job.kind === "cron"
+				? scheduledTaskProvenance(job.id, humanSchedule(job.cron ?? "* * * * *"))
+				: provenance(tick);
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
 				content: `${stamp}\n${body}`,
 				display: true,
-				details: { jobId: job.id, tickCount: tick, cron: job.cron, scheduledAt: Date.now() },
+				details: { jobId: job.id, kind: job.kind, tickCount: tick, cron: job.cron, scheduledAt: Date.now() },
 			},
 			{ deliverAs: "followUp", triggerTurn: true },
 		);
@@ -512,13 +516,22 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 		const body = resolvePrompt(prompt, job?.kind === "cron" ? "cron" : "wakeup");
 		const stamp =
-			job?.kind === "cron" ? provenance(tick, humanSchedule(job.cron ?? "* * * * *")) : provenance(tick);
+			job?.kind === "cron"
+				? scheduledTaskProvenance(job.id, humanSchedule(job.cron ?? "* * * * *"))
+				: provenance(tick);
 		pi.sendMessage(
 			{
 				customType: TICK_MESSAGE_TYPE,
 				content: `${stamp}\n${body}`,
 				display: true,
-				details: { jobId: job?.id, tickCount: tick, immediate: true, scheduledAt: Date.now(), guidelines },
+				details: {
+					jobId: job?.id,
+					kind: job?.kind,
+					tickCount: tick,
+					immediate: true,
+					scheduledAt: Date.now(),
+					guidelines,
+				},
 			},
 			{ deliverAs: "steer", triggerTurn: true },
 		);

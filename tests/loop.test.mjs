@@ -41,8 +41,8 @@ test("/loop 5m creates a cron job and runs the prompt immediately", async () => 
 	assert.ok(h.sent[0].message.content.includes("check the deploy"));
 	assert.match(
 		h.sent[0].message.content,
-		/^\[loop tick #1 \u00b7 fixed interval Every 5 minutes .* do not call schedule_wakeup\]/,
-		"the tick says in the message itself that it fires its own next tick",
+		/^\[scheduled task \w+ \u00b7 Every 5 minutes \u00b7 started by the schedule.*do not call schedule_wakeup\]/,
+		"a fixed-interval fire is framed as a scheduled task, not a loop iteration",
 	);
 	assert.ok(h.notifications.some((n) => n.message.includes(job.id)));
 });
@@ -57,21 +57,26 @@ test("a scheduled tick is delivered low priority, between turns", async () => {
 
 	assert.equal(h.sent.length, 2, "one more message");
 	assert.equal(h.sent[1].options.deliverAs, "followUp", "scheduled ticks use the low priority lane");
-	assert.ok(h.sent[1].message.content.includes("loop tick #2"));
+	assert.ok(h.sent[1].message.content.includes(`[scheduled task ${job.id}`), "no loop framing");
 });
 
-test("the tick number continues from the immediate run to the first job fire", async () => {
+test("every run of a fixed-interval /loop is a scheduled task, never a loop tick", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
 	const job = h.lastState().jobs[0];
-	assert.ok(h.sent[0].message.content.includes("loop tick #1"), "the immediate run is tick #1");
+	assert.match(h.sent[0].message.content, /^\[scheduled task /, "even the immediate run");
+	assert.equal(h.sent[0].message.details.immediate, true);
 
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	assert.ok(
-		h.sent[1].message.content.includes("loop tick #2"),
-		`the first job fire continues the numbering: ${h.sent[1].message.content}`,
-	);
+	assert.equal(h.sent[1].message.details.tickCount, 2, "the counter still advances");
+	assert.match(h.sent[1].message.content, /^\[scheduled task /);
+
+	// A self-paced chain is the one that keeps the loop framing.
+	const chain = await startSelfPaced(h, "watch the deploy", 600);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	assert.match(h.sent.at(-1).message.content, /^\[loop tick #/);
 });
 
 test("the tick number continues when the model creates the job itself", async () => {
@@ -87,10 +92,8 @@ test("the tick number continues when the model creates the job itself", async ()
 
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	assert.ok(
-		h.sent[1].message.content.includes("loop tick #2"),
-		`the first job fire continues the numbering: ${h.sent[1].message.content}`,
-	);
+	assert.equal(h.sent[1].message.details.tickCount, 2, "the counter continues");
+	assert.match(h.sent[1].message.content, /^\[scheduled task /, "but the fire is a scheduled task");
 });
 
 test("a tick waits until the agent is idle", async () => {

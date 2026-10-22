@@ -119,17 +119,26 @@ export function renderTickMessage(message: any, options: any, theme: Theme): any
 	const details = (message.details ?? {}) as {
 		tickCount?: number;
 		jobId?: string;
+		kind?: string;
 		cron?: string;
 		immediate?: boolean;
 		missed?: boolean;
 	};
 	const text = contentText(message.content);
 	const prompt = stripProvenance(text, /^\[[^\]]*\]\n?/);
+	// A fixed-interval fire reads as a scheduled job, like Claude Code's
+	// "started automatically by a schedule"; only a self-paced tick is a loop.
+	// The immediate run of /loop 5m belongs to the /loop the user just typed.
+	const scheduled = details.kind === "cron" && !details.immediate;
 	const label = details.missed
 		? "loop \u00b7 missed jobs"
-		: details.tickCount !== undefined
-			? `loop #${details.tickCount}`
-			: "loop";
+		: scheduled
+			? details.jobId
+				? `job ${details.jobId}`
+				: "scheduled job"
+			: details.tickCount !== undefined
+				? `loop #${details.tickCount}`
+				: "loop";
 
 	if (!loadConfig().compactMessages) {
 		const summary = firstLine(prompt);

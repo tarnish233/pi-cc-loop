@@ -24,13 +24,16 @@ export const MAINTENANCE_PROMPT = [
 
 export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed by the user]";
 /**
- * Fixed-interval ticks say it here, next to the prompt, because a model that
- * only saw it in the system prompt still tried to schedule a wakeup. Claude
- * Code's tick says the same: "The recurring cron will fire the next tick
- * automatically - do not call ScheduleWakeup from this tick."
+ * A fixed-interval fire is framed as what it is - a scheduled task, not a
+ * loop iteration. Claude Code does the same: "This turn was started
+ * automatically by a schedule, not typed live by the user. The content below is
+ * the stored prompt of a scheduled task ... Treat it as this session's assigned
+ * task and carry it out." It never calls a cron fire a "loop tick"; that word
+ * belongs to dynamic pacing, where the model has to keep the loop alive. Naming
+ * it "loop" here is what made the model try to reschedule.
  */
-export const CRON_PROVENANCE =
-	"[loop tick #{n} \u00b7 fixed interval {schedule} \u00b7 fires its next tick by itself, do not call schedule_wakeup]";
+export const SCHEDULED_TASK_PROVENANCE =
+	"[scheduled task {id} \u00b7 {schedule} \u00b7 started by the schedule, not typed by the user; it fires the next tick on its own, so do not call schedule_wakeup]";
 
 const DELAY_ADVICE = [
 	"- Pick the delay from what you are waiting for. For idle ticks with nothing specific to watch, use 1200-1800s.",
@@ -134,9 +137,13 @@ function describePrompt(prompt: string): string {
 	);
 }
 
-export function provenance(tick: number, schedule?: string): string {
-	if (schedule === undefined) return fill(PROVENANCE, { n: String(tick) });
-	return fill(CRON_PROVENANCE, { n: String(tick), schedule });
+export function provenance(tick: number): string {
+	return fill(PROVENANCE, { n: String(tick) });
+}
+
+/** The header of a fixed-interval fire: a scheduled task, not a loop tick. */
+export function scheduledTaskProvenance(id: string, schedule: string): string {
+	return fill(SCHEDULED_TASK_PROVENANCE, { id, schedule });
 }
 
 export function scheduleRules(prompt: string): string {
