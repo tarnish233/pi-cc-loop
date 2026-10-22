@@ -154,3 +154,31 @@ test("every interval /loop accepts gets a correct label", () => {
 		assert.equal(cron.humanSchedule(cron.intervalToCron(seconds).cron), label, `${seconds}s`);
 	}
 });
+
+test("a Chinese interval is split like the English one", async () => {
+	const { parseChineseInterval, intervalToCron } = await loadModule("cron.ts");
+	const cases = [
+		["每2分钟输出一次hello pi", 120, "输出一次hello pi"],
+		["每隔2分钟输出一次", 120, "输出一次"],
+		["输出一次 hello pi 每2小时", 7200, "输出一次 hello pi"],
+		["每30秒 ping", 30, "ping"],
+		["每2个钟头检查", 7200, "检查"],
+		["每 15 分钟 看看 CI", 900, "看看 CI"],
+	];
+	for (const [input, seconds, prompt] of cases) {
+		assert.deepEqual(parseChineseInterval(input), { interval: seconds, prompt }, input);
+	}
+	// Prose stays prose: no digit, no schedule.
+	for (const input of ["每天都有一个测试失败", "每个文件输出一次", "每个 PR 都要看"]) {
+		assert.equal(parseChineseInterval(input), null, input);
+	}
+	assert.equal(intervalToCron(120)?.cron, "*/2 * * * *");
+});
+
+test("a standalone Chinese duration works as an interval token", async () => {
+	const { parseIntervalToken } = await loadModule("cron.ts");
+	const cases = [["2分钟", 120], ["30秒", 30], ["1小时", 3600], ["2个钟头", 7200], ["1天", 86400]];
+	for (const [token, seconds] of cases) assert.equal(parseIntervalToken(token), seconds, token);
+	assert.equal(parseIntervalToken("0分钟"), null);
+	assert.equal(parseIntervalToken("abc"), null);
+});

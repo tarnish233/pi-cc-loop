@@ -37,6 +37,7 @@ import {
 	isUnreachable,
 	parseCron,
 	parseEveryClause,
+	parseChineseInterval,
 	parseIntervalToken,
 } from "./cron.ts";
 import { DurableRuntime, type Placement } from "./durable.ts";
@@ -521,7 +522,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			{
 				customType: TICK_MESSAGE_TYPE,
 				content: `${stamp}\n${body}`,
-				display: true,
+				// The user's own `/loop ...` line is already in the transcript, so the
+				// run it starts gets no block of its own: Claude Code shows the typed
+				// command and then the turn. Scheduled fires do get one.
+				display: false,
 				details: {
 					jobId: job?.id,
 					kind: job?.kind,
@@ -703,6 +707,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					if (every) {
 						intervalSeconds = every.interval;
 						prompt = every.prompt;
+					}
+				}
+				// Rule 2b: the same written in Chinese, e.g. "每2分钟输出一次"
+				if (intervalSeconds === null) {
+					const chinese = parseChineseInterval(body);
+					if (chinese) {
+						intervalSeconds = chinese.interval;
+						prompt = chinese.prompt;
 					}
 				}
 			}

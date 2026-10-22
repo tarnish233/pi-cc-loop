@@ -420,3 +420,22 @@ test("the first run of a fixed-interval /loop already says not to self-pace", as
 	assert.match(text, /do not call `schedule_wakeup` for this loop, now or on a later tick/);
 	assert.ok(!text.includes("Decide how it should repeat"), "no mode choice: the interval was given");
 });
+
+test("/loop 2分钟 输出一次 creates the job in code, no model round trip", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("2分钟 输出一次 hello pi", h.ctx);
+	const job = h.lastState().jobs[0];
+	assert.equal(job.kind, "cron");
+	assert.equal(job.cron, "*/2 * * * *");
+	assert.equal(job.prompt, "输出一次 hello pi");
+	assert.equal(h.sent.length, 1);
+	assert.match(h.sent[0].message.content, /^\[scheduled task /);
+});
+
+test("/loop 每2分钟输出一次hello pi is split into interval and prompt", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("每2分钟输出一次hello pi", h.ctx);
+	const job = h.lastState().jobs[0];
+	assert.equal(job.cron, "*/2 * * * *");
+	assert.equal(job.prompt, "输出一次hello pi");
+});

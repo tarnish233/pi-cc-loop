@@ -81,13 +81,13 @@ test("every run of a fixed-interval /loop is a scheduled task, never a loop tick
 
 test("the tick number continues when the model creates the job itself", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("每30秒输出一次hello world", h.ctx);
+	await h.commands.get("loop").handler("时不时输出一次hello world", h.ctx);
 	assert.ok(h.sent[0].message.content.includes("loop tick #1"));
 
 	await h.tools
 		.get("cron_create")
-		.execute("c", { cron: "* * * * *", prompt: "每30秒输出一次hello world" }, undefined, undefined, h.ctx);
-	const job = h.lastState().jobs.find((j) => j.prompt.includes("每30秒"));
+		.execute("c", { cron: "* * * * *", prompt: "时不时输出一次hello world" }, undefined, undefined, h.ctx);
+	const job = h.lastState().jobs.find((j) => j.prompt.includes("时不时"));
 	assert.equal(job.tickCount, 1, "the job starts after the immediate run");
 
 	makeDue(h, job.id);
@@ -146,7 +146,7 @@ test("/loop without an interval leaves the schedule to the model", async () => {
 
 test("the schedule rules are injected when the interval could not be parsed", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("loop").handler("每30秒输出一次hello world", h.ctx);
+	await h.commands.get("loop").handler("时不时输出一次hello world", h.ctx);
 
 	const event = runEvent(h.sent[0]);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
@@ -154,7 +154,7 @@ test("the schedule rules are injected when the interval could not be parsed", as
 	assert.ok(guidelines.includes("cron_create"), "the model is told how to make a fixed interval job");
 	assert.ok(guidelines.includes("schedule_wakeup"), "and how to self-pace");
 	assert.ok(guidelines.includes("minimum granularity is 1 minute"), "including the rounding rule");
-	assert.ok(guidelines.includes("每30秒输出一次hello world"), "and the original prompt");
+	assert.ok(guidelines.includes("时不时输出一次hello world"), "and the original prompt");
 });
 
 test("schedule_wakeup clamps the delay to [60, 3600]", async () => {
@@ -565,4 +565,16 @@ test("a cron tick's turn is told the schedule fires on its own", async () => {
 	const text = guidelinesOf(event);
 	assert.ok(!text.includes("A self-paced `/loop` is running"), "it is not a self-paced chain");
 	assert.match(text, /fixed-interval \/loop .* the schedule fires the next tick on its own/);
+});
+
+test("the run started by /loop is not drawn as a block: the typed command is the record", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	assert.equal(h.sent[0].message.display, false, "no block for the immediate run");
+	assert.ok(h.sent[0].message.content.includes("check the deploy"), "the model still gets the prompt");
+
+	const job = h.lastState().jobs[0];
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	assert.equal(h.sent[1].message.display, true, "a scheduled fire is a transcript entry");
 });

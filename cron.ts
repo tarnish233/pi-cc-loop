@@ -270,14 +270,39 @@ export function intervalToCron(seconds: number): IntervalSpec | null {
 	};
 }
 
-/** Parse a duration token such as `5m`, `30s`, `2h`, `1d`. */
+/** Chinese interval words, with a digit required so `每个文件` or `每天都有一个…` stay prose. */
+const CHINESE_UNITS: Record<string, number> = {
+	秒: 1,
+	秒钟: 1,
+	分: 60,
+	分钟: 60,
+	小时: 3600,
+	钟头: 3600,
+	天: 86400,
+	日: 86400,
+};
+
+/**
+ * Parse `每2分钟输出一次` / `输出一次 每隔 2 小时`: an explicit interval written
+ * in Chinese. The digit is required on purpose: `每天都有一个测试失败` is a
+ * prompt, not a schedule, and Claude Code's own splitting is just as literal.
+ */
+/** Parse a duration token such as `5m`, `30s`, `2h`, `1d`, or `2分钟`. */
 export function parseIntervalToken(token: string): number | null {
-	const m = /^(\d+)\s*([smhd])$/i.exec(token.trim());
-	if (!m) return null;
-	const unit = m[2].toLowerCase();
-	const amount = Number(m[1]);
-	if (!Number.isFinite(amount) || amount <= 0) return null;
-	return amount * UNIT_SECONDS[unit];
+	const trimmed = token.trim();
+	const m = /^(\d+)\s*([smhd])$/i.exec(trimmed);
+	if (m) {
+		const amount = Number(m[1]);
+		if (!Number.isFinite(amount) || amount <= 0) return null;
+		return amount * UNIT_SECONDS[m[2].toLowerCase()];
+	}
+	// A standalone Chinese duration token: `/loop 2分钟 输出一次`.
+	const chinese = /^(\d+)\s*个?\s*(秒钟|分钟|钟头|小时|秒|分|天|日)$/u.exec(trimmed);
+	if (!chinese) return null;
+	const amount = Number(chinese[1]);
+	const seconds = CHINESE_UNITS[chinese[2]];
+	if (!Number.isFinite(amount) || amount <= 0 || !seconds) return null;
+	return amount * seconds;
 }
 
 /**
@@ -298,6 +323,26 @@ export function parseEveryClause(input: string): { interval: number; prompt: str
 }
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+export function parseChineseInterval(input: string): { interval: number; prompt: string } | null {
+	const unit = "(秒钟|分钟|钟头|小时|秒|分|天|日)";
+	const prefix = new RegExp(`^每\\s*隔?\\s*(\\d+)\\s*个?\\s*${unit}\\s*`, "u").exec(input.trim());
+	if (prefix) {
+		const amount = Number(prefix[1]);
+		const seconds = CHINESE_UNITS[prefix[2]];
+		if (!(amount > 0) || !seconds) return null;
+		return { interval: amount * seconds, prompt: input.trim().slice(prefix[0].length).trim() };
+	}
+	const suffix = new RegExp(`\\s*每\\s*隔?\\s*(\\d+)\\s*个?\\s*${unit}\\s*$`, "u").exec(input.trim());
+	if (suffix) {
+		const amount = Number(suffix[1]);
+		const seconds = CHINESE_UNITS[suffix[2]];
+		if (!(amount > 0) || !seconds) return null;
+		return { interval: amount * seconds, prompt: input.trim().slice(0, suffix.index).trim() };
+	}
+	return null;
+}
+
 
 /**
  * A human readable cadence for a cron expression, with Claude Code's labels:
