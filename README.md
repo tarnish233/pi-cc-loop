@@ -25,7 +25,7 @@ pi install npm:pi-cc-loop
 | 立即执行 | 创建后马上跑一次，不等首个 cron | 自动 |
 | 漏跑合并 | agent 忙时到点只记一次 pending，空闲后发一条 | 自动 |
 | 兜底心跳 | 模型忘记调度时 arm 一次 20 分钟心跳，预算 1 次 | 自动 |
-| Esc 取消 | 回合中按 Esc 取消所有自定步调 loop；固定间隔不受影响 | Esc |
+| Esc 取消 | 打断属于某个自定步调 loop 的回合（它的 tick、它的 Monitor 唤醒的回合）时取消该 loop；无关回合、空闲时不受影响；固定间隔不受影响 | Esc |
 | 错峰 | 周期任务按 id 固定延后最多半个周期（≤30 分钟）；`*/5` 每 4 分 45 秒一次以保持缓存；`:00`/`:30` 的一次性任务最多提前 90 秒 | 自动 |
 | 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
 | 次数上限 | `--max N`，到顶自动删除 | 标志 |
@@ -135,7 +135,7 @@ npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
 ## 说明
 
 - 行为对齐 Claude Code v2.1.306 的 `/loop`，用 Pi 扩展 API 实现。
-- Esc 打断回合时取消自定步调 loop；空闲时用 `/loop stop`（CC 空闲时按 Esc 也会取消）。
+- Esc 只取消被打断回合所属的自定步调 loop；CC 在任何时候按 Esc（包括空闲、打断无关回合）都会取消所有自定步调 loop。其他情况用 `/loop stop`。
 - 状态条默认关闭，和 CC 主会话一致。
 - `cron_create` 的 `maxFires` 是额外加固；CC 没有次数上限。
 - `/loop stop` 会连带静默停掉该 chain 绑定的 Monitor。

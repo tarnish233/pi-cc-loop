@@ -15,7 +15,7 @@
  *   self-paced      `schedule_wakeup` lets the model choose the next delay
  *                   (60-3600s). If the model forgets to reschedule, the runtime
  *                   arms one 20 minute keepalive; if it still forgets, the
- *                   chain ends. Esc during a turn cancels it.
+ *                   chain ends. Esc on one of its turns cancels it.
  *
  * The tools are named after their Claude Code counterparts:
  *   CronCreate -> cron_create, CronDelete -> cron_delete, CronList -> cron_list,
@@ -71,6 +71,8 @@ import { truncate } from "./tool-rows.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 export const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
+/** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
+const MONITOR_EVENT_TYPE = "pi-cc-monitor-event";
 const WIDGET_KEY = "pi-cc-loop";
 const CONFIG_CHANNEL = "pi-cc:config";
 const LOOP_TOOL_NAMES = ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"];
@@ -215,8 +217,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	const tickCounters = new Map<string, number>();
 	const loopFile = new LoopFileDelivery();
 	let durable: DurableRuntime | undefined;
-	/** What started the current run, derived from its starting message. */
-	let currentRun: { chainId?: string; tick?: number } = {};
+	/**
+	 * What the current run belongs to, derived from its starting message:
+	 * `chainId` is the self-paced chain whose tick (or monitor) started it,
+	 * `armed` the chains it armed, `tick` the tick number of a /loop run.
+	 */
+	let currentRun: { chainId?: string; armed?: Set<string>; tick?: number } = {};
 
 	const scheduler = new LoopScheduler({
 		dispatch: (job) => deliverTick(job),
@@ -525,12 +531,20 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Esc interrupted a turn: cancel every self-paced loop, like Claude Code's
-	 * "press Esc to stop it ... A `Pending wakeup cancelled` notice confirms
-	 * that the loop won't fire again". Fixed-interval jobs keep running.
+	 * Esc interrupted a turn that belongs to a self-paced loop (its tick, the
+	 * /loop run that armed it, or a turn its monitor woke): cancel that loop,
+	 * with Claude Code's notice ("A `Pending wakeup cancelled` notice confirms
+	 * that the loop won't fire again").
+	 *
+	 * Claude Code cancels every self-paced loop on any Esc, idle or not. Here
+	 * an interrupted unrelated turn leaves the loops alone; `/loop stop` stops
+	 * them. Fixed-interval jobs keep running either way, as in Claude Code.
 	 */
-	function cancelSelfPacedLoops(ctx: ExtensionContext): void {
-		const chains = scheduler.byKind("wakeup");
+	function cancelCurrentLoop(ctx: ExtensionContext): void {
+		const ids = new Set([...(currentRun.chainId ? [currentRun.chainId] : []), ...(currentRun.armed ?? [])]);
+		const chains = [...ids]
+			.map((id) => scheduler.get(id))
+			.filter((chain): chain is LoopJob => chain?.kind === "wakeup");
 		if (!chains.length) return;
 		for (const chain of chains) retireChain(chain, "pending wakeup cancelled (Esc)", { silent: true });
 		notify(ctx, `Pending wakeup cancelled \u00b7 loop ${chains.map((chain) => chain.id).join(", ")} ended`, "info");
@@ -793,7 +807,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop settings messages on|off   compact two-line markers",
 			"/loop settings tools on|off      one-line tool results",
 			"",
-			"Esc during a turn cancels self-paced loops; fixed-interval loops keep running.",
+			"Esc on a self-paced loop's own turn cancels that loop; fixed-interval loops keep running.",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
 			"       --max N   stop the loop after N fires.",
 		].join("\n");
@@ -1101,6 +1115,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				addJob(chain);
 			}
 
+			// The run that arms a chain belongs to it: Esc in this run cancels it.
+			(currentRun.armed ??= new Set()).add(chain.id);
 			const scheduledFor = now + delay * 1000;
 			scheduler.update(chain.id, {
 				scheduledFor,
@@ -1156,7 +1172,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
 		currentRun = {};
-		if (event.messageType !== "custom" || event.message.customType !== TICK_MESSAGE_TYPE) return;
+		if (event.messageType !== "custom") return;
+
+		if (event.message.customType === MONITOR_EVENT_TYPE) {
+			// A monitor bound to a loop woke the agent: the run belongs to that loop.
+			const loopPrompt = (event.message.details as { loopPrompt?: unknown } | undefined)?.loopPrompt;
+			const chain = typeof loopPrompt === "string" ? scheduler.findChain(loopPrompt) : undefined;
+			if (chain) currentRun.chainId = chain.id;
+			return;
+		}
+		if (event.message.customType !== TICK_MESSAGE_TYPE) return;
 
 		const details = (event.message.details ?? {}) as {
 			jobId?: string;
@@ -1184,14 +1209,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	/**
-	 * The run is over and Pi will not continue on its own. An aborted run (Esc)
-	 * cancels the self-paced loops; otherwise chains that were not rescheduled
-	 * get their keepalive. Then a pending tick may go out.
+	 * The run is over and Pi will not continue on its own. Esc on a loop's own
+	 * turn cancels that loop; chains whose tick was not rescheduled get their
+	 * keepalive. Then a pending tick may go out.
 	 */
 	pi.on("agent_settled", async (event, ctx) => {
 		lastCtx = ctx;
-		if ((event as { aborted?: boolean } | undefined)?.aborted) cancelSelfPacedLoops(ctx);
-		else settleChains(ctx);
+		if ((event as { aborted?: boolean } | undefined)?.aborted) cancelCurrentLoop(ctx);
+		settleChains(ctx);
 		currentRun = {};
 		scheduler.notifyIdle();
 	});

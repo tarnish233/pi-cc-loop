@@ -159,7 +159,9 @@ export function guidelinesOf(event) {
 }
 
 /** Mark a turn as started and finished, the way pi would. */
-export async function runTurn(h, { aborted = false } = {}) {
+export async function runTurn(h, { aborted = false, start } = {}) {
+	// `start` is the sent message that started the run (a tick, a monitor event).
+	if (start) await h.handlers.get("before_agent_start")(runEvent(start), h.ctx);
 	await h.handlers.get("agent_start")?.({}, h.ctx);
 	await h.handlers.get("agent_end")?.({}, h.ctx);
 	await h.handlers.get("agent_settled")({ type: "agent_settled", aborted }, h.ctx);

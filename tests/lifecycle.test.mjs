@@ -28,7 +28,7 @@ test("Esc during a loop tick cancels the self-paced loop", async () => {
 	makeDue(h, chain.id);
 	h.scheduler().tick(); // the wakeup fires
 
-	await runTurn(h, { aborted: true }); // the user presses Esc
+	await runTurn(h, { aborted: true, start: h.sent.at(-1) }); // Esc during the tick's turn
 
 	assert.equal(h.scheduler().get(chain.id), undefined, "the chain is gone, no keepalive was armed");
 	assert.ok(
@@ -39,16 +39,52 @@ test("Esc during a loop tick cancels the self-paced loop", async () => {
 	await assert.rejects(() => wakeup(h, { delaySeconds: 60, prompt: "check the deploy" }), /was stopped/);
 });
 
-test("Esc on any turn cancels self-paced loops but not fixed-interval jobs", async () => {
+test("Esc during the first /loop run cancels the loop it just armed", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent[0]), h.ctx); // the /loop run starts
+	await wakeup(h, { delaySeconds: 600, prompt: "watch CI" }); // the model arms the chain
+	await runTurn(h, { aborted: true }); // then the user presses Esc
+	assert.equal(h.scheduler().byKind("wakeup").length, 0);
+});
+
+test("Esc during a turn woken by the loop's monitor cancels that loop", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 1200);
+	await runTurn(h);
+	const monitorEvent = {
+		message: { customType: "pi-cc-monitor-event", content: "[monitor \u00b7 ci]\nFAILED", details: { loopPrompt: "watch CI" } },
+	};
+	await runTurn(h, { aborted: true, start: monitorEvent });
+	assert.equal(h.scheduler().get(chain.id), undefined);
+});
+
+test("Esc on an unrelated turn keeps the loops; fixed-interval jobs are never stopped by Esc", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("5m check the build", h.ctx);
-	await startSelfPaced(h, "watch CI", 1200);
+	const chain = await startSelfPaced(h, "watch CI", 1200);
 	await runTurn(h);
+	const scheduledFor = h.scheduler().get(chain.id).scheduledFor;
 
-	await runTurn(h, { aborted: true }); // Esc on an unrelated turn
+	// The user asks something else and interrupts it.
+	const userTurn = { messageType: "user", prompt: "what does this error mean?", systemPromptOptions: { promptGuidelines: [] } };
+	await h.handlers.get("before_agent_start")(userTurn, h.ctx);
+	await runTurn(h, { aborted: true });
+	assert.equal(h.scheduler().get(chain.id)?.scheduledFor, scheduledFor, "the loop keeps its pending wakeup");
+	assert.ok(!h.notifications.some((n) => n.message.startsWith("Pending wakeup cancelled")));
 
-	assert.equal(h.scheduler().byKind("wakeup").length, 0, "the self-paced loop ended");
-	assert.equal(h.scheduler().byKind("cron").length, 1, "Claude Code: Esc doesn't stop a fixed-interval loop");
+	// A monitor event of another loop is not this loop's turn either.
+	const otherMonitor = { message: { customType: "pi-cc-monitor-event", content: "x", details: { loopPrompt: "watch deploy" } } };
+	await runTurn(h, { aborted: true, start: otherMonitor });
+	assert.ok(h.scheduler().get(chain.id));
+
+	// A fixed-interval tick interrupted with Esc: Claude Code doesn't stop those either.
+	const cron = h.scheduler().byKind("cron")[0];
+	makeDue(h, cron.id);
+	h.scheduler().tick();
+	await runTurn(h, { aborted: true, start: h.sent.at(-1) });
+	assert.ok(h.scheduler().get(cron.id), "the fixed-interval job keeps running");
+	assert.ok(h.scheduler().get(chain.id), "and so does the self-paced loop");
 });
 
 test("a turn that ends normally does not cancel anything", async () => {
@@ -325,4 +361,15 @@ test("the tool descriptions carry Claude Code's guidance", async () => {
 		assert.ok(h.tools.get(name).promptSnippet, `${name} has a prompt snippet`);
 	}
 	assert.equal(h.tools.get("cron_create").parameters.properties.maxFires.type, "integer");
+});
+
+test("two loops armed in the same run stay separate, and Esc cancels both", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("watch CI and the deploy", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent[0]), h.ctx);
+	await wakeup(h, { delaySeconds: 600, prompt: "watch CI" });
+	await wakeup(h, { delaySeconds: 600, prompt: "watch deploy" });
+	assert.equal(h.scheduler().byKind("wakeup").length, 2, "the second prompt starts its own chain");
+	await runTurn(h, { aborted: true });
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "both belong to the interrupted run");
 });
