@@ -140,3 +140,15 @@ test("the expanded block names the job, and collapsed hides long prompts", async
 	assert.match(expanded, /line 10/);
 	assert.match(expanded, /job x/);
 });
+
+test("the reason for the delay rides in the header", async () => {
+	const { renderers } = makeHarness();
+	const message = tickMessage("[loop tick #8 \u00b7 scheduled by /loop, not typed by the user]\nwatch CI", {
+		kind: "wakeup",
+		jobId: "abc",
+		prompt: "watch CI",
+		reason: "CI run still going",
+	});
+	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.match(text, /\u273b loop #7 \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 CI run still going/);
+});

@@ -21,7 +21,9 @@ import {
 
 const LOOP_SENTINEL = "<<loop.md>>";
 
-const wakeup = (h, args) => h.tools.get("schedule_wakeup").execute("c", args, undefined, undefined, h.ctx);
+const rawWakeup = (h, args) => h.tools.get("schedule_wakeup").execute("c", args, undefined, undefined, h.ctx);
+/** Call the tool the way the model does, with the now-required reason. */
+const wakeup = (h, args) => rawWakeup(h, { reason: "waiting for the task", ...args });
 
 // -------------------------------------------------------------------- Esc
 
@@ -308,6 +310,7 @@ test("a chain older than 7 days ends when the model reschedules it", async () =>
 	h.scheduler().get(chain.id).chainStartedAt = Date.now() - 7 * 86_400_000 - 1000;
 	const result = await wakeup(h, { delaySeconds: 600, prompt: "check the deploy" });
 	assert.equal(result.details.agedOut, true);
+	assert.match(result.content[0].text, /Wakeup not scheduled\. The loop reached its maximum duration/);
 	assert.equal(h.scheduler().get(chain.id), undefined);
 });
 
@@ -396,3 +399,43 @@ test("two loops armed in the same run stay separate, and Esc cancels both", asyn
 
 
 
+
+// -------------------------------------------------- the tool result, worded like CC
+
+test("a wakeup result gives the time, the delay and the turn-ends rule", async () => {
+	const h = await start(makeHarness());
+	const result = await wakeup(h, { delaySeconds: 300, prompt: "check the deploy" });
+	const text = result.content[0].text;
+	assert.match(text, /^Next wakeup scheduled for \d{2}:\d{2}:\d{2} \(in 300s\)\./);
+	assert.match(text, /This turn ends when this call returns/);
+	assert.equal(result.terminate, true);
+});
+
+test("a clamped wakeup says so in Claude Code's words", async () => {
+	const h = await start(makeHarness());
+	const result = await wakeup(h, { delaySeconds: 7200, prompt: "check the deploy" });
+	assert.match(result.content[0].text, /\(clamped to 3600s from your requested value\)/);
+});
+
+test("reason is required unless stop is true", async () => {
+	const h = await start(makeHarness());
+	await assert.rejects(
+		() => rawWakeup(h, { delaySeconds: 300, prompt: "check the deploy" }),
+		/reason.*required/,
+		"a reason keeps the wakeup explainable in the transcript",
+	);
+	await assert.rejects(() => rawWakeup(h, { delaySeconds: 300, reason: "  ", prompt: "check the deploy" }), /required/);
+});
+
+test("stopping says what was cancelled, and what a cron is not", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	const stopped = await rawWakeup(h, { stop: true });
+	assert.match(stopped.content[0].text, /^Loop stopped \u2014 cancelled 1 pending wakeup\(s\)/);
+	assert.match(stopped.content[0].text, /Write the loop's outcome for the user, then end the turn/);
+	assert.equal(h.scheduler().get(chain.id), undefined);
+
+	const again = await rawWakeup(h, { stop: true });
+	assert.match(again.content[0].text, /there was no pending wakeup to cancel/);
+	assert.match(again.content[0].text, /NOT stopped by this call \u2014 cancel it with cron_delete/);
+});

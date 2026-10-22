@@ -88,7 +88,7 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 	// 1. the model starts a self-paced loop
 	const armedLoop = await tools
 		.get("schedule_wakeup")
-		.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
+		.execute("c", { delaySeconds: 60, reason: "waiting for CI", prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
 
 	// 2. the agent arms a Monitor that belongs to the chain
 	const armed = await tools
@@ -109,7 +109,7 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 	// 3. the agent schedules the fallback heartbeat
 	await tools
 		.get("schedule_wakeup")
-		.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
+		.execute("c", { delaySeconds: 60, reason: "waiting for CI", prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx);
 
 	// 4. the user asks to stop, and the model calls cron_delete (as /loop stop does now)
 	const sentBeforeStop = shared.sent.length;
@@ -140,7 +140,7 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 		() =>
 			tools
 				.get("schedule_wakeup")
-				.execute("c", { delaySeconds: 60, prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx),
+				.execute("c", { delaySeconds: 60, reason: "waiting for CI", prompt: "每10秒钟打印一次hello world" }, undefined, undefined, ctx),
 		/was stopped and must not be rescheduled/,
 	);
 

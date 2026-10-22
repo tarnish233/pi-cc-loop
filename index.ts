@@ -448,6 +448,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					jobId: job.id,
 					cron: job.cron,
 					prompt: body,
+					reason: job.reason,
 				},
 			},
 			// `triggerTurn` is what starts the run: without it the message is
@@ -808,7 +809,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				}),
 			),
 			reason: Type.Optional(
-				Type.String({ description: "One short sentence explaining the chosen delay. Shown to the user." }),
+				Type.String({
+					description:
+						"One short sentence explaining the chosen delay. Shown to the user, so be specific. Required unless stop is true.",
+				}),
 			),
 			prompt: Type.Optional(
 				Type.String({
@@ -836,8 +840,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 						{
 							type: "text" as const,
 							text: chains.length
-								? `Loop ended. ${chains.length} pending wakeup(s) cancelled.`
-								: "Loop ended. Nothing was pending.",
+								? `Loop stopped \u2014 cancelled ${chains.length} pending wakeup(s); no further dynamic-loop wakeups scheduled. ` +
+									"Any Monitor armed for this loop was stopped with it. Write the loop's outcome for the user, then end the turn."
+								: "Loop stopped \u2014 any dynamic loop in this session is ended; there was no pending wakeup to cancel. " +
+									"If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call \u2014 cancel it with cron_delete.",
 						},
 					],
 					details: { stopped: true, cancelledWakeups: chains.length },
@@ -845,11 +851,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			}
 
 			if (typeof params.delaySeconds !== "number" || Number.isNaN(params.delaySeconds)) {
-				throw new Error("delaySeconds is required unless stop is true.");
+				throw new Error("`delaySeconds` and `reason` are required when `stop` is not true.");
+			}
+			if (!params.reason || !params.reason.trim()) {
+				throw new Error("`delaySeconds` and `reason` are required when `stop` is not true.");
 			}
 			const prompt = params.prompt ? normalizePrompt(params.prompt) : "";
 			if (!prompt) {
-				throw new Error("prompt is required unless stop is true.");
+				throw new Error("`prompt` is required when `stop` is not true.");
 			}
 
 			if (currentRun.cronId) {
@@ -890,8 +899,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 							{
 								type: "text" as const,
 								text:
-									`The /loop has reached its ${maxAgeDays()}-day limit and has ended. Do not reschedule it; ` +
-									"tell the user they can start a new /loop.",
+									`Wakeup not scheduled. The loop reached its maximum duration (${maxAgeDays()} days) \u2014 the loop has ended; ` +
+									"do not re-issue. Tell the user they can start a new /loop.",
 							},
 						],
 						details: { stopped: true, agedOut: true, id: chain.id, cancelledWakeups: 1 },
@@ -929,9 +938,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				reason: params.reason,
 			});
 
-			const note = wasClamped ? ` (clamped from ${requested}s)` : "";
+			const note = wasClamped ? ` (clamped to ${delay}s from your requested value)` : "";
+			const clock = new Date(scheduledFor).toTimeString().slice(0, 8);
 			return {
-				content: [{ type: "text" as const, text: `Next iteration scheduled in ${delay}s${note} for loop ${chain.id}.` }],
+				content: [
+					{
+						type: "text" as const,
+						text:
+							`Next wakeup scheduled for ${clock} (in ${delay}s)${note}. ` +
+							"This turn ends when this call returns \u2014 you are re-invoked when the wakeup fires or a monitor event arrives.",
+					},
+				],
 				details: {
 					id: chain.id,
 					scheduledFor,

@@ -45,6 +45,7 @@ export interface ScheduledDetails {
 	jobId?: string;
 	cron?: string;
 	prompt?: string;
+	reason?: string;
 	missed?: boolean;
 }
 
@@ -71,9 +72,13 @@ export function renderScheduledMessage(message: any, options: any, theme: Theme)
 	}
 
 	const stamp = formatStamp(message.timestamp);
-	const header = stamp
-		? `${theme.fg("accent", theme.bold(label))}${theme.fg("dim", " \u00b7 ")}${theme.fg("muted", stamp)}`
-		: theme.fg("accent", theme.bold(label));
+	// The reason the model gave for this delay, in the header so the reader
+	// knows why the loop woke up without expanding anything.
+	const why = details.kind === "wakeup" && details.reason ? ` \u00b7 ${details.reason}` : "";
+	const header =
+		(stamp
+			? `${theme.fg("accent", theme.bold(label))}${theme.fg("dim", " \u00b7 ")}${theme.fg("muted", stamp)}`
+			: theme.fg("accent", theme.bold(label))) + (why ? theme.fg("dim", why) : "");
 
 	const meta: string[] = [];
 	if (details.jobId) meta.push(`job ${details.jobId}`);

@@ -198,7 +198,7 @@ export async function runTurn(h, { aborted = false, start } = {}) {
 export async function startSelfPaced(h, prompt = "check the deploy", delaySeconds = 60) {
 	await h.tools
 		.get("schedule_wakeup")
-		.execute("c", { delaySeconds, prompt }, undefined, undefined, h.ctx);
+		.execute("c", { delaySeconds, reason: "waiting for the task", prompt }, undefined, undefined, h.ctx);
 	// The chain this prompt created (or re-armed), live from the scheduler.
 	return h.scheduler().findChain(prompt);
 }
