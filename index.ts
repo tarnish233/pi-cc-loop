@@ -79,7 +79,13 @@ const WIDGET_KEY = "pi-cc-loop";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
 const CONFIG_CHANNEL = "pi-cc:config";
-const LOOP_TOOL_NAMES = ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"];
+/**
+ * Tools this package draws as one-line rows, and therefore also asks
+ * pi-cc-extensions to leave alone. `cron_create` is not here: Claude Code shows
+ * a normal tool call for CronCreate, with its arguments, and that reads better
+ * than a summary line.
+ */
+const LOOP_TOOL_NAMES = ["cron_delete", "cron_list", "schedule_wakeup"];
 const ALL_PI_CC_TOOLS = [...LOOP_TOOL_NAMES, "Monitor", "monitor_stop", "monitor_list"];
 
 /**
@@ -943,7 +949,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "cron_create",
-		label: "Create Scheduled Job",
+		// Claude Code's tool names: the row reads "CronCreate(*/5 * * * *: ...)".
+		label: "CronCreate",
 		description: CRON_CREATE_DESCRIPTION,
 		promptSnippet: CRON_CREATE_SNIPPET,
 		parameters: Type.Object({
@@ -1037,7 +1044,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "cron_delete",
-		label: "Cancel Scheduled Job",
+		label: "CronDelete",
 		description: CRON_DELETE_DESCRIPTION,
 		promptSnippet: CRON_DELETE_SNIPPET,
 		parameters: Type.Object({
@@ -1066,7 +1073,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "cron_list",
-		label: "List Scheduled Jobs",
+		label: "CronList",
 		description: CRON_LIST_DESCRIPTION,
 		promptSnippet: CRON_LIST_SNIPPET,
 		parameters: Type.Object({}),
@@ -1098,7 +1105,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "schedule_wakeup",
-		label: "Schedule Next Loop Iteration",
+		label: "ScheduleWakeup",
 		description: SCHEDULE_WAKEUP_DESCRIPTION,
 		promptSnippet: SCHEDULE_WAKEUP_SNIPPET,
 		parameters: Type.Object({

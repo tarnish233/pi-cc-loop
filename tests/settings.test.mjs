@@ -124,7 +124,8 @@ test("the defaults are compact messages and compact tool rows", async () => {
 	const tick = renderTick(h);
 	assert.equal(tick.lines.length, 2, tick.text);
 	assert.equal(tick.bgCalls.count, 0);
-	assert.ok(resolveTool(h, "cron_create")?.renderCall, "compact tool renderers are armed");
+	assert.ok(resolveTool(h, "schedule_wakeup")?.renderCall, "compact tool renderers are armed");
+	assert.equal(resolveTool(h, "cron_create"), undefined, "cron_create keeps the normal tool call row");
 });
 
 test("settings messages off restores the legacy card and on restores the compact block", async () => {
@@ -150,56 +151,46 @@ test("settings tools off falls back to the default renderer and on restores the 
 	const h = makeHarness();
 	const loop = h.commands.get("loop");
 
-	assert.ok(resolveTool(h, "cron_create"));
+	assert.ok(resolveTool(h, "schedule_wakeup"));
 	await loop.handler("settings tools off", h.ctx);
-	assert.equal(resolveTool(h, "cron_create"), undefined);
+	assert.equal(resolveTool(h, "schedule_wakeup"), undefined);
 
 	const saved = JSON.parse(fs.readFileSync(configFile, "utf8"));
 	assert.equal(saved.compactToolRows, false);
 
 	await loop.handler("settings tools on", h.ctx);
-	assert.ok(resolveTool(h, "cron_create"));
+	assert.ok(resolveTool(h, "schedule_wakeup"));
 
 	const ccstyle = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
-	assert.ok(ccstyle.excludeRenderers.includes("cron_create"), "loop tools are excluded from ccstyle");
+	assert.ok(ccstyle.excludeRenderers.includes("schedule_wakeup"), "loop tools are excluded from ccstyle");
+	assert.ok(!ccstyle.excludeRenderers.includes("cron_create"), "cron_create is not excluded: it uses the normal row");
 	assert.ok(ccstyle.excludeRenderers.includes("Monitor"), "monitor tools are excluded too");
 	assert.ok(!ccstyle.excludeRenderers.includes("bash"), "unrelated exclusions are untouched");
 
 	await loop.handler("settings tools off", h.ctx);
 	const restored = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
-	assert.ok(!restored.excludeRenderers.includes("cron_create"), "loop exclusions are removed again");
+	assert.ok(!restored.excludeRenderers.includes("schedule_wakeup"), "loop exclusions are removed again");
 	assert.ok(!restored.excludeRenderers.includes("Monitor"), "monitor exclusions are removed again");
 });
 
-test("the compact cron_create row is one line and collapses the call row after completion", async () => {
+test("cron_create is left to the normal tool row, like Claude Code's CronCreate", async () => {
 	const h = makeHarness();
 	await h.commands.get("loop").handler("settings tools on", h.ctx);
-	const renderers = resolveTool(h, "cron_create");
-	assert.ok(renderers, "compact renderers are armed");
+	assert.equal(resolveTool(h, "cron_create"), undefined, "no compact renderer");
 
-	const { theme } = makeTheme();
-	const call = renderers.renderCall(
-		{ cron: "*/1 * * * *", prompt: "每30秒输出一次hello world" },
-		theme,
-		{ isPartial: false, executionStarted: true },
+	// An exclusion this package added in an earlier version is cleaned up on the
+	// next sync: the tool goes back to whatever rendering pi-cc-extensions gives
+	// it, and entries nobody here added are untouched.
+	fs.writeFileSync(ccstyleConfig, JSON.stringify({ excludeRenderers: ["cron_create", "bash"] }, null, 2));
+	fs.writeFileSync(
+		configFile,
+		JSON.stringify({ compactToolRows: true, managePiCcExtensions: true, managedExcludes: ["cron_create"] }),
 	);
-	assert.deepEqual(call.render(100), [], "the finished call row disappears");
-
-	const result = {
-		content: [{ type: "text", text: "Scheduled hu2389lz (Every minute, next run 04:55 PM)" }],
-		details: {
-			id: "hu2389lz",
-			cron: "* * * * *",
-			nextFireAt: Date.now(),
-			recurring: true,
-			durable: false,
-			prompt: "每30秒输出一次hello world",
-		},
-	};
-	const rendered = renderers
-		.renderResult(result, { expanded: false, isPartial: false }, theme, { isError: false, args: {} })
-		.render(100)
-		.join("\n");
-	assert.match(rendered, /^✓ Scheduled hu2389lz · Every minute · next /);
-	assert.equal(rendered.split("\n").length, 1);
+	const { syncPiCcExtensionsExcludes } = await loadModule("config.ts");
+	syncPiCcExtensionsExcludes(["schedule_wakeup"], true);
+	const ccstyle = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
+	assert.ok(!ccstyle.excludeRenderers.includes("cron_create"), "the stale exclusion is dropped");
+	assert.ok(ccstyle.excludeRenderers.includes("bash"), "other entries are untouched");
+	assert.ok(ccstyle.excludeRenderers.includes("schedule_wakeup"), "current tools are still excluded");
 });
+

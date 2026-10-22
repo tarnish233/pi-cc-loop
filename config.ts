@@ -159,6 +159,14 @@ export function syncPiCcExtensionsExcludes(toolNames: readonly string[], enabled
 	const next = new Set(current);
 	let changed = false;
 
+	// A tool this package stopped compact-rendering goes back to the normal
+	// rendering other extensions give it; only names we added are removed.
+	for (const name of managed) {
+		if (toolNames.includes(name)) continue;
+		if (next.delete(name)) changed = true;
+		managed.delete(name);
+	}
+
 	for (const name of toolNames) {
 		if (enabled) {
 			if (!next.has(name)) {

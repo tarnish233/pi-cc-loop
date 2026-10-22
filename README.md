@@ -33,6 +33,13 @@ pi install npm:pi-cc-loop
 | 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，倒计时按分钟变化，无任务时不占位 | `/loop footer on\|off` |
 | 详细面板 | 输入框上方的逐任务详情（id、类型、绝对时间、prompt），默认关闭 | `/loop widget on\|off` |
 
+## 工具行
+
+`schedule_wakeup`、`cron_delete`、`cron_list`、`Monitor`、`monitor_list`、`monitor_stop` 用一行紧凑渲染；
+`cron_create` **不**渲染成一行，保留正常工具调用样式（带参数），和 CC 的 `CronCreate(*/5 * * * *: ...)` 一致。
+
+工具标签也用 CC 的名字：`CronCreate`、`CronDelete`、`CronList`、`ScheduleWakeup`。
+
 ## 命令
 
 ```text

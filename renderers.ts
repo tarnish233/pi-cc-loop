@@ -63,18 +63,6 @@ export function jobSummary(job: LoopJob): string {
 /** One-line rows for the four loop tools. */
 export function loopToolRenderers(): Record<string, ToolRenderers> {
 	return {
-		cron_create: compactRenderers({
-			call: (args) => ({
-				label: "Schedule",
-				detail: `${args.cron ?? ""} \u00b7 ${truncate(displayPrompt(args.prompt ?? ""), 40)}`,
-			}),
-			summary: (d) =>
-				`Scheduled ${d.id ?? "?"} \u00b7 ${humanSchedule(d.cron ?? "")} \u00b7 next ${formatClock(d.nextFireAt)}` +
-				(d.recurring === false ? " \u00b7 one-shot" : "") +
-				(d.durable ? " \u00b7 durable" : "") +
-				(d.runsHere === false ? " \u00b7 runs in another session" : ""),
-			detail: (d) => (d.prompt ? displayPrompt(d.prompt) : undefined),
-		}),
 		cron_delete: compactRenderers({
 			call: (args) => ({ label: "Cancel", detail: args.id ?? "" }),
 			summary: (d) => (d.cancelled ? `Cancelled ${d.id ?? "?"}` : `No job ${d.id ?? "?"}`),
