@@ -47,9 +47,18 @@ test("the offset is capped at 30 minutes for hourly and daily jobs", () => {
 	}
 });
 
-test("a */5 job runs 4m45s after the previous run, to keep the prompt cache warm", () => {
+test("a */5 job keeps a 5 minute cadence, late by its own offset", () => {
 	const from = at("2026-10-22T10:02:30");
-	assert.equal(nextRunTime(job("aaaa1111", "*/5 * * * *"), from), from + 285_000);
+	for (const id of ["aaaa1111", "zzzz9999", "q1w2e3r4"]) {
+		const first = nextRunTime(job(id, "*/5 * * * *"), from);
+		const offset = first - at("2026-10-22T10:05:00");
+		assert.ok(offset >= 0 && offset < 150_000, `${id}: ${offset}ms late`);
+		assert.equal(
+			nextRunTime(job(id, "*/5 * * * *"), first),
+			first + 300_000,
+			"consecutive runs stay exactly 5 minutes apart",
+		);
+	}
 });
 
 test("a one-shot on :00 or :30 runs up to 90s early, never before it was created", () => {
@@ -69,7 +78,7 @@ test("a one-shot on :00 or :30 runs up to 90s early, never before it was created
 });
 
 test("PI_LOOP_JITTER=0 style timing runs exactly on the cron minute", () => {
-	const exact = { ...DEFAULT_TIMING, recurringFrac: 0, oneShotMaxMs: 0, cacheLeadMs: 0 };
+	const exact = { ...DEFAULT_TIMING, recurringFrac: 0, oneShotMaxMs: 0 };
 	const from = at("2026-10-22T10:02:30");
 	assert.equal(nextRunTime(job("aaaa1111", "*/10 * * * *"), from, exact), at("2026-10-22T10:10:00"));
 	assert.equal(nextRunTime(job("aaaa1111", "*/5 * * * *"), from, exact), at("2026-10-22T10:05:00"));

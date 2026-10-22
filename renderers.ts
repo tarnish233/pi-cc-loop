@@ -84,7 +84,7 @@ export function loopToolRenderers(): Record<string, ToolRenderers> {
 				if (d.stopped) {
 					return `Stopped \u00b7 ${d.cancelledWakeups ?? 0} wakeup${d.cancelledWakeups === 1 ? "" : "s"} cancelled`;
 				}
-				const adjusted = d.wasClamped ? " (clamped)" : d.cacheAdjusted ? " (cache window)" : "";
+				const adjusted = d.wasClamped ? " (clamped)" : "";
 				return `Wakeup in ${formatDelay(d.clampedDelaySeconds)} \u00b7 loop ${d.id ?? "?"}${adjusted}`;
 			},
 			detail: (d, args) =>

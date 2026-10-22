@@ -26,8 +26,7 @@ export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed 
 
 const DELAY_ADVICE = [
 	"- Pick the delay from what you are waiting for. For idle ticks with nothing specific to watch, use 1200-1800s.",
-	"  When actively polling external state nothing notifies you about (a CI run, a deploy), match how fast it",
-	"  changes; under 300s prefer 270s, which stays inside the usual 5-minute prompt cache, and avoid exactly 300s.",
+	"  When actively polling external state nothing notifies you about (a CI run, a deploy), match how fast it changes.",
 	"- Do not poll for work Pi will report anyway (a monitor event, a command you are running): use a long",
 	"  fallback (1200s+) instead.",
 ].join("\n");

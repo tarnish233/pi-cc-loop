@@ -90,8 +90,6 @@ const MAX_JOBS = 50;
 const MIN_DELAY_SECONDS = 60;
 const MAX_DELAY_SECONDS = 3600;
 /** A wakeup just under the 5 minute prompt cache lifetime is pulled inside it. */
-const CACHE_WINDOW_SECONDS = 285;
-const CACHE_TTL_SECONDS = 300;
 const DEFAULT_KEEPALIVE_SECONDS = 1200;
 const DEFAULT_MAX_AGE_DAYS = 7;
 /** How many stopped prompts are remembered (and persisted). */
@@ -134,12 +132,10 @@ function keepaliveSeconds(): number {
 /** Claude Code's offsets; `PI_LOOP_JITTER=0` runs jobs exactly on their cron minute. */
 function timingConfig(): TimingConfig {
 	const fraction = Math.min(1, Math.max(0, envNumber("PI_LOOP_JITTER", DEFAULT_TIMING.recurringFrac)));
-	const leadSeconds = Math.max(0, envNumber("PI_LOOP_CACHE_LEAD_SECONDS", DEFAULT_TIMING.cacheLeadMs / 1000));
 	return {
 		...DEFAULT_TIMING,
 		recurringFrac: fraction,
 		oneShotMaxMs: fraction > 0 ? DEFAULT_TIMING.oneShotMaxMs : 0,
-		cacheLeadMs: leadSeconds * 1000,
 	};
 }
 
@@ -1070,9 +1066,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const rounded = Number.isFinite(requested) ? Math.round(requested) : requested > 0 ? MAX_DELAY_SECONDS : MIN_DELAY_SECONDS;
 			let delay = Math.min(MAX_DELAY_SECONDS, Math.max(MIN_DELAY_SECONDS, rounded));
 			const wasClamped = !Number.isFinite(requested) || delay !== rounded;
-			// Just under 5 minutes is pulled inside the prompt cache window.
-			const cacheAdjusted = delay > CACHE_WINDOW_SECONDS && delay <= CACHE_TTL_SECONDS;
-			if (cacheAdjusted) delay = CACHE_WINDOW_SECONDS;
 
 			const now = Date.now();
 			// A tick of a chain re-arms that chain even if the model reworded the prompt.
@@ -1126,7 +1119,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				reason: params.reason,
 			});
 
-			const note = wasClamped ? ` (clamped from ${requested}s)` : cacheAdjusted ? " (kept inside the 5-minute prompt cache)" : "";
+			const note = wasClamped ? ` (clamped from ${requested}s)` : "";
 			return {
 				content: [{ type: "text" as const, text: `Next iteration scheduled in ${delay}s${note} for loop ${chain.id}.` }],
 				details: {
@@ -1134,7 +1127,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					scheduledFor,
 					clampedDelaySeconds: delay,
 					wasClamped,
-					cacheAdjusted,
 					stopped: false,
 				},
 				// Claude Code ends the turn when ScheduleWakeup returns (on models

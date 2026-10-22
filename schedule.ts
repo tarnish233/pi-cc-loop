@@ -83,16 +83,18 @@ export function storedJob(job: LoopJob): LoopJob {
 /**
  * Claude Code's offsets (v2.1.302 defaults, also in its docs): "a recurring
  * task starts each run late by up to half the gap to the next run, and by at
- * most 30 minutes"; "a task written `*\/5 * * * *` isn't delayed ... each run
- * starts 15 seconds sooner" so the 5 minute prompt cache is still warm; "a
- * one-shot task scheduled for :00 or :30 runs up to 90 seconds early".
+ * most 30 minutes"; "a one-shot task scheduled for :00 or :30 runs up to 90
+ * seconds early".
+ *
+ * Claude Code also starts `*\/5` jobs 15 seconds early, so that consecutive runs
+ * stay inside its 5 minute prompt cache. That is dropped here: it makes the
+ * interval 4m45s instead of 5m, and caches now last far longer than 5 minutes.
  */
 export interface TimingConfig {
 	recurringFrac: number;
 	recurringCapMs: number;
 	oneShotMaxMs: number;
 	oneShotMinuteMod: number;
-	cacheLeadMs: number;
 }
 
 export const DEFAULT_TIMING: TimingConfig = {
@@ -100,12 +102,7 @@ export const DEFAULT_TIMING: TimingConfig = {
 	recurringCapMs: 30 * 60_000,
 	oneShotMaxMs: 90_000,
 	oneShotMinuteMod: 30,
-	cacheLeadMs: 15_000,
 };
-
-/** The prompt cache lifetime the cache lead is aimed at. */
-const CACHE_TTL_MS = 300_000;
-const MINUTE_STEP = /^\*\/\d+ \* \* \* \*$/;
 
 /** A fraction in [0, 1) derived from the job id, so a job always gets the same offset. */
 export function idFraction(id: string): number {
@@ -142,16 +139,6 @@ export function nextRunTime(
 	const second = nextFireAfter(fields, first);
 	if (!second) return slot;
 	const period = second.getTime() - slot;
-	const lead = timing.cacheLeadMs;
-	if (
-		MINUTE_STEP.test(job.cron.trim()) &&
-		lead > 0 &&
-		lead < period &&
-		period >= CACHE_TTL_MS &&
-		period - lead < CACHE_TTL_MS
-	) {
-		return from + period - lead;
-	}
 	return slot + Math.min(idFraction(job.id) * timing.recurringFrac * period, timing.recurringCapMs);
 }
 

@@ -238,20 +238,20 @@ test("schedule_wakeup ends the turn, except when it stops the loop", async () =>
 	assert.equal(stopped.terminate, undefined, "the model may still write the loop's outcome");
 });
 
-test("a wakeup just under 5 minutes is pulled inside the prompt cache window", async () => {
+test("the requested delay is used as asked, only clamped to [60, 3600]", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("check the deploy", h.ctx);
-	for (const [requested, expected, adjusted] of [
-		[300, 285, true],
-		[299.4, 285, true],
+	for (const [requested, expected, clamped] of [
+		[300, 300, false],
+		[299.4, 299, false],
 		[285, 285, false],
-		[270, 270, false],
 		[1200, 1200, false],
+		[30, 60, true],
+		[7200, 3600, true],
 	]) {
 		const result = await wakeup(h, { delaySeconds: requested, prompt: "check the deploy" });
 		assert.equal(result.details.clampedDelaySeconds, expected, `${requested}s`);
-		assert.equal(result.details.cacheAdjusted, adjusted, `${requested}s adjusted`);
-		assert.equal(result.details.wasClamped, false, `${requested}s is within [60, 3600]`);
+		assert.equal(result.details.wasClamped, clamped, `${requested}s clamped`);
 	}
 });
 
