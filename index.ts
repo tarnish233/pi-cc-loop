@@ -450,7 +450,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					prompt: body,
 				},
 			},
-			{ deliverAs: "followUp" },
+			// `triggerTurn` is what starts the run: without it the message is
+			// only recorded and nothing ever happens.
+			{ deliverAs: "followUp", triggerTurn: true },
 		);
 
 		if (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires) {

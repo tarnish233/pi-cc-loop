@@ -112,6 +112,7 @@ test("a scheduled fire says it fires on its own, and the reader sees no provenan
 	assert.match(textOf(sent), /^\[scheduled task \w+ \u00b7 Every minute/);
 	assert.match(textOf(sent), /do not call schedule_wakeup/);
 	assert.equal(sent.options.deliverAs, "followUp", "between turns, low priority");
+	assert.equal(sent.options.triggerTurn, true, "a fire must start a run, not just sit in the transcript");
 
 	const event = runEvent(sent);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
