@@ -14,6 +14,7 @@ import {
 	runTurn,
 	start,
 	startSelfPaced,
+	textOf,
 } from "./harness.mjs";
 
 const loop = (h) => h.commands.get("loop");
@@ -99,16 +100,17 @@ test("the run's rules do not leak into the next turn", async () => {
 	assert.equal(guidelinesOf(userTurn), "");
 });
 
-test("a scheduled fire is a user message that says it fires on its own", async () => {
+test("a scheduled fire says it fires on its own, and the reader sees no provenance", async () => {
 	const h = await start(makeHarness());
 	const job = await createCron(h, { cron: "* * * * *", prompt: "print hi" });
 	makeDue(h, job.id);
 	h.scheduler().tick();
 
 	const sent = h.sent.at(-1);
-	assert.equal(sent.kind, "user", "ticks are user messages too");
-	assert.match(sent.content, /^\[scheduled task \w+ \u00b7 Every minute/);
-	assert.match(sent.content, /do not call schedule_wakeup/);
+	assert.equal(sent.kind, "custom", "a custom message: the model needs the envelope, the reader does not");
+	assert.equal(sent.message.customType, "pi-cc-loop-tick");
+	assert.match(textOf(sent), /^\[scheduled task \w+ \u00b7 Every minute/);
+	assert.match(textOf(sent), /do not call schedule_wakeup/);
 	assert.equal(sent.options.deliverAs, "followUp", "between turns, low priority");
 
 	const event = runEvent(sent);
@@ -124,7 +126,7 @@ test("a self-paced tick keeps the loop framing and the reschedule rules", async 
 	h.scheduler().tick();
 
 	const sent = h.sent.at(-1);
-	assert.match(sent.content, /^\[loop tick #1 /, "the first fire is tick #1");
+	assert.match(textOf(sent), /^\[loop tick #1 /, "the first fire is tick #1");
 	const event = runEvent(sent);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
 	const text = guidelinesOf(event);

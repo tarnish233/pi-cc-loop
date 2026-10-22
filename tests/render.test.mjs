@@ -1,6 +1,6 @@
 /**
- * Rendering tests: the custom message renderer must replace Pi's machine-name
- * title (`[pi-cc-loop-tick]`) with a quiet, readable block.
+ * Rendering tests: a scheduled fire draws Claude Code's block, and the
+ * provenance line addressed to the model never reaches the reader.
  */
 import assert from "node:assert";
 import fs from "node:fs";
@@ -92,4 +92,51 @@ test("clock times read like Claude Code's '6:16pm'", async () => {
 	assert.equal(formatClock(new Date(2026, 9, 22, 12, 0).getTime()), "12:00pm");
 	assert.equal(formatClock(new Date(2026, 9, 22, 9, 3).getTime()), "9:03am");
 	assert.equal(formatClock(undefined), "unknown");
+});
+
+test("a scheduled fire draws Claude Code's block, without the provenance line", async () => {
+	const { renderers } = makeHarness();
+	const message = tickMessage(
+		"[scheduled task 91e7u72h \u00b7 Every minute \u00b7 started by the schedule, not typed by the user; it fires the next tick on its own, so do not call schedule_wakeup]\nprint hi",
+		{ kind: "cron", jobId: "91e7u72h", cron: "* * * * *", prompt: "print hi" },
+	);
+	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.match(text, /\u273b Running scheduled task \u00b7 \d{1,2}:\d{2}(am|pm)/);
+	assert.match(text, /print hi/);
+	assert.ok(!text.includes("[scheduled task"), "the envelope is for the model only");
+	assert.ok(!text.includes("schedule_wakeup"), "and so is the instruction");
+});
+
+test("a self-paced tick is a loop, not a scheduled task", async () => {
+	const { renderers } = makeHarness();
+	const message = tickMessage("[loop tick #7 \u00b7 scheduled by /loop, not typed by the user]\nwatch CI", {
+		kind: "wakeup",
+		jobId: "abc",
+		prompt: "watch CI",
+	});
+	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.match(text, /\u273b loop #7/);
+	assert.ok(!text.includes("Running scheduled task"));
+	assert.ok(!text.includes("[loop tick"));
+});
+
+test("the expanded block names the job, and collapsed hides long prompts", async () => {
+	const { renderers } = makeHarness();
+	const renderer = renderers.get("pi-cc-loop-tick");
+	const long = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n");
+	const message = tickMessage(`[scheduled task x \u00b7 Every minute \u00b7 y]\n${long}`, {
+		kind: "cron",
+		jobId: "x",
+		cron: "* * * * *",
+		prompt: long,
+	});
+
+	const collapsed = render(renderer, message, false).text;
+	assert.match(collapsed, /line 3/);
+	assert.ok(!collapsed.includes("line 10"), "collapsed stops after three lines");
+	assert.match(collapsed, /\+7 more lines/);
+
+	const expanded = render(renderer, message, true).text;
+	assert.match(expanded, /line 10/);
+	assert.match(expanded, /job x/);
 });

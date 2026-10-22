@@ -159,6 +159,11 @@ export function makeDue(h, jobId) {
 	else job.scheduledFor = Date.now() - 1;
 }
 
+/** The text of a message the extension sent, whichever lane it used. */
+export function textOf(sent) {
+	return sent?.content ?? sent?.message?.content ?? "";
+}
+
 /** The before_agent_start event of a run started by a message the extension sent. */
 export function runEvent(sent) {
 	// Our messages are ordinary user messages now; monitor events are not.

@@ -211,9 +211,9 @@ test("missed durable one-shots are surfaced to the model with an ask-first instr
 		}),
 	);
 	const h = await start(makeHarness(cwd));
-	const message = h.sent.find((entry) => entry.kind === "user" && /missed/.test(entry.content));
-	assert.ok(message, "a user message about the missed job");
+	const message = h.sent.find((entry) => entry.message?.details?.missed);
+	assert.ok(message, "a message about the missed job");
 	assert.equal(message.options.deliverAs, "followUp", "attached to the next turn, not started at startup");
-	assert.match(message.content, /Do NOT execute this prompt yet\. First ask the user/);
-	assert.match(message.content, /push the release branch/);
+	assert.match(message.message.content, /Do NOT execute this prompt yet\. First ask the user/);
+	assert.match(message.message.content, /push the release branch/);
 });

@@ -55,7 +55,7 @@ import {
 	SCHEDULE_WAKEUP_SNIPPET,
 	loopCommandGuidelines,
 } from "./prompts.ts";
-import { formatClock, formatEta } from "./renderers.ts";
+import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -388,7 +388,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		});
 		try {
 			// Attached to the next turn rather than starting one at startup.
-			pi.sendUserMessage(missedJobsMessage(lines), { deliverAs: "followUp", expandPromptTemplates: false });
+			pi.sendMessage(
+				{
+					customType: TICK_MESSAGE_TYPE,
+					content: missedJobsMessage(lines),
+					display: true,
+					details: { missed: true, prompt: lines.join("\n") },
+				},
+				{ deliverAs: "followUp" },
+			);
 		} catch {
 			// best effort
 		}
@@ -401,6 +409,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			);
 		}
 	}
+
+	/**
+	 * A scheduled fire is a custom message, not a user message: the provenance
+	 * line in its content is addressed to the model, and only a custom message
+	 * can draw something else for the reader (`renderScheduledMessage`).
+	 */
+	const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
 
 	/** The text the model gets for a prompt: the loop.md sentinel expands at fire time. */
 	function resolvePrompt(prompt: string, mode: TickMode): string {
@@ -418,23 +433,25 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		job.tickCount = tick;
 		const body = resolvePrompt(job.prompt, job.kind === "cron" ? "cron" : "wakeup");
 		// A fixed-interval tick is what it is - a scheduled task - and a
-		// self-paced tick keeps the loop framing. Both go in as ordinary user
-		// messages, and the rules for the run travel through `queueRun`.
-		const stamp =
-			job.kind === "cron"
-				? scheduledTaskProvenance(job.id, humanSchedule(job.cron ?? "* * * * *"))
-				: provenance(tick);
-		const content = `${stamp}\n${body}`;
-		const guidelines = [job.kind === "cron" ? cronTickGuidelines(job.id, humanSchedule(job.cron ?? "* * * * *")) : loopGuidelines(job.prompt)];
-		if (job.kind === "wakeup" && monitorToolAvailable()) guidelines.push(monitorGuidelines(job.prompt));
-		queueRun({
-			content,
-			guidelines,
-			chainId: job.kind === "wakeup" ? job.id : undefined,
-			cronId: job.kind === "cron" ? job.id : undefined,
-			tick,
-		});
-		pi.sendUserMessage(content, { deliverAs: "followUp", expandPromptTemplates: false });
+		// self-paced tick keeps the loop framing. The rules for the run are
+		// rebuilt from `details` in before_agent_start.
+		const cadence = job.kind === "cron" ? humanSchedule(job.cron ?? "* * * * *") : undefined;
+		const stamp = cadence ? scheduledTaskProvenance(job.id, cadence) : provenance(tick);
+		pi.sendMessage(
+			{
+				customType: TICK_MESSAGE_TYPE,
+				content: `${stamp}\n${body}`,
+				display: true,
+				details: {
+					kind: job.kind,
+					tickCount: tick,
+					jobId: job.id,
+					cron: job.cron,
+					prompt: body,
+				},
+			},
+			{ deliverAs: "followUp" },
+		);
 
 		if (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires) {
 			const ctx = lastCtx;
@@ -939,6 +956,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * wakeup stays armed as the fallback heartbeat, and the model re-arms it if
 	 * it wants a different time.
 	 */
+	pi.registerMessageRenderer(TICK_MESSAGE_TYPE, renderScheduledMessage);
+
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
 		currentRun = {};
@@ -955,6 +974,35 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		if (event.messageType !== "custom") return;
+
+		if (event.message.customType === TICK_MESSAGE_TYPE) {
+			const details = (event.message.details ?? {}) as {
+				kind?: "cron" | "wakeup";
+				jobId?: string;
+				cron?: string;
+				tickCount?: number;
+			};
+			currentRun = {
+				chainId: details.kind === "wakeup" ? details.jobId : undefined,
+				cronId: details.kind === "cron" ? details.jobId : undefined,
+				tick: details.tickCount,
+			};
+			const guidelines =
+				details.kind === "cron" && details.jobId
+					? [cronTickGuidelines(details.jobId, humanSchedule(details.cron ?? "* * * * *"))]
+					: [];
+			if (details.kind === "wakeup") {
+				const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
+				if (chain) {
+					guidelines.push(loopGuidelines(chain.prompt));
+					if (monitorToolAvailable()) guidelines.push(monitorGuidelines(chain.prompt));
+				}
+			}
+			if (!guidelines.length) return;
+			const options = event.systemPromptOptions;
+			options.promptGuidelines = [...(options.promptGuidelines ?? []), ...guidelines];
+			return;
+		}
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {
 			// A monitor bound to a loop woke the agent: the run belongs to that loop.

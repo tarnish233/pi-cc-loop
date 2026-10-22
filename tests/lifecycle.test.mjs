@@ -16,6 +16,7 @@ import {
 	start,
 	startSelfPaced,
 	stateEntries,
+	textOf,
 } from "./harness.mjs";
 
 const LOOP_SENTINEL = "<<loop.md>>";
@@ -168,7 +169,7 @@ test("/loop 5m runs the loop.md tasks on a fixed schedule", async () => {
 	assert.equal(job.prompt, "<<loop.md>>", "the prompt is the sentinel, not the file text");
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	assert.ok(h.sent.at(-1).content.includes("check the release branch"), "the first fire gets the tasks");
+	assert.ok(textOf(h.sent.at(-1)).includes("check the release branch"), "the first fire gets the tasks");
 });
 
 test("loop.md is read at fire time: edits apply, unchanged tasks are not resent", async () => {
@@ -181,7 +182,7 @@ test("loop.md is read at fire time: edits apply, unchanged tasks are not resent"
 	const fire = () => {
 		makeDue(h, job.id);
 		h.scheduler().tick();
-		return h.sent.at(-1).content;
+		return textOf(h.sent.at(-1));
 	};
 
 	const first = fire();
@@ -208,7 +209,7 @@ test("a compaction makes the next tick resend the full loop.md tasks", async () 
 	await h.handlers.get("session_compact")({}, h.ctx);
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	assert.ok(h.sent.at(-1).content.includes("task A"));
+	assert.ok(textOf(h.sent.at(-1)).includes("task A"));
 });
 
 test("a long loop.md is truncated like Claude Code's", async () => {
@@ -220,7 +221,7 @@ test("a long loop.md is truncated like Claude Code's", async () => {
 	const job = h.scheduler().list()[0];
 	makeDue(h, job.id);
 	h.scheduler().tick();
-	const content = h.sent.at(-1).content;
+	const content = textOf(h.sent.at(-1));
 	assert.ok(content.length < 26_000, `${content.length} characters`);
 	assert.match(content, /loop\.md was truncated to 25000 bytes/);
 });
