@@ -41,6 +41,22 @@ export function stripProvenance(text: string, pattern: RegExp): string {
 	return text.replace(pattern, "");
 }
 
+/** Cap a string for a display line, with an ellipsis. */
+export function truncate(text: string, max: number): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= max ? flat : `${flat.slice(0, Math.max(0, max - 1))}\u2026`;
+}
+
+/** "900ms", "5s", "1m 30s": a duration for a status line. */
+export function formatDuration(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	const rest = seconds % 60;
+	return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+}
+
 /** The first non-empty line of a text block. */
 export function firstLine(text: string): string {
 	for (const line of text.split("\n")) {

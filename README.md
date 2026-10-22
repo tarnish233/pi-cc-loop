@@ -33,13 +33,6 @@ pi install npm:pi-cc-loop
 | 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，倒计时按分钟变化，无任务时不占位 | `/loop footer on\|off` |
 | 详细面板 | 输入框上方的逐任务详情（id、类型、绝对时间、prompt），默认关闭 | `/loop widget on\|off` |
 
-## 工具行
-
-`schedule_wakeup`、`cron_delete`、`cron_list`、`Monitor`、`monitor_list`、`monitor_stop` 用一行紧凑渲染；
-`cron_create` **不**渲染成一行，保留正常工具调用样式（带参数），和 CC 的 `CronCreate(*/5 * * * *: ...)` 一致。
-
-工具标签也用 CC 的名字：`CronCreate`、`CronDelete`、`CronList`、`ScheduleWakeup`。
-
 ## 命令
 
 ```text
@@ -99,8 +92,6 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 ```jsonc
 {
   "compactMessages": true,          // 两行 marker / 旧的带底色卡片
-  "compactToolRows": true,          // 一行工具结果 / Pi 默认工具行
-  "managePiCcExtensions": true      // 自动维护 pi-cc-extensions 的 excludeRenderers
 }
 ```
 
@@ -109,12 +100,11 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 ```text
 /loop settings
 /loop settings messages on|off
-/loop settings tools on|off
 /loop settings footer on|off
 ```
 
 - 已画出的旧行需要 `/reload` 才会换样式
-- 环境变量覆盖：`PI_CC_COMPACT_MESSAGES=0`、`PI_CC_COMPACT_TOOL_ROWS=0`、`PI_CC_MANAGE_CCSTYLE=0`、`PI_CC_FOOTER=0`
+- 环境变量覆盖：`PI_CC_COMPACT_MESSAGES=0`、`PI_CC_FOOTER=0`
 
 ## 底部摘要
 
@@ -131,8 +121,9 @@ agent 忙时输入 `/loop`，会等当前回合结束再开始。
 - 装了 `pi-cc-extensions`：这一行会作为它的一个 chip 出现在第 2 行，可在它的配置面板里移动或隐藏；它会把 ANSI 去掉，所以这里只用纯文本
 - 没装 `pi-cc-extensions`：Pi 内置 footer 会把它和其他扩展的状态拼成一行，加在用量行下面，只在有任务时出现
 
-> 如果装了 `pi-cc-extensions`，`tools on` 会把本扩展的工具名加入它的 `excludeRenderers`；
-> `tools off` 只移除自己加过的名字。它只在启动时读配置，切换后需要 `/reload`。
+> 本扩展不写其他插件的配置文件。如果你之前在 `pi-cc-extensions.json` 里因为旧版本加过
+> `cron_create`、`cron_delete`、`cron_list`、`schedule_wakeup` 这几条 `excludeRenderers`，
+> 现在可以删掉：工具行由 Pi 或 pi-cc-extensions 自己渲染。
 
 ## 环境变量
 

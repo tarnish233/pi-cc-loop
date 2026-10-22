@@ -14,7 +14,7 @@ if (!process.env.PI_CC_EXTENSIONS_CONFIG_FILE) {
 // Isolate the shared settings file so tests never read or write the user's.
 if (!process.env.PI_CC_CONFIG_FILE) {
 	const configFile = path.join(os.tmpdir(), `pi-cc-config-${process.pid}.json`);
-	fs.writeFileSync(configFile, JSON.stringify({ compactMessages: true, compactToolRows: true }));
+	fs.writeFileSync(configFile, JSON.stringify({ compactMessages: true }));
 	process.env.PI_CC_CONFIG_FILE = configFile;
 }
 

@@ -29,7 +29,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { configPath, loadConfig, saveConfig, syncPiCcExtensionsExcludes, type PiCcConfig } from "./config.ts";
+import { configPath, invalidateConfig, loadConfig, saveConfig, type PiCcConfig } from "./config.ts";
 import {
 	describeCron,
 	humanSchedule,
@@ -59,7 +59,7 @@ import {
 	SCHEDULE_WAKEUP_SNIPPET,
 	scheduleRules,
 } from "./prompts.ts";
-import { formatClock, formatEta, loopToolRenderers, renderTickMessage } from "./renderers.ts";
+import { formatClock, formatEta, renderTickMessage } from "./renderers.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -69,7 +69,7 @@ import {
 	type LoopJob,
 	type TimingConfig,
 } from "./schedule.ts";
-import { truncate } from "./tool-rows.ts";
+import { truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 export const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
@@ -79,14 +79,6 @@ const WIDGET_KEY = "pi-cc-loop";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
 const CONFIG_CHANNEL = "pi-cc:config";
-/**
- * Tools this package draws as one-line rows, and therefore also asks
- * pi-cc-extensions to leave alone. `cron_create` is not here: Claude Code shows
- * a normal tool call for CronCreate, with its arguments, and that reads better
- * than a summary line.
- */
-const LOOP_TOOL_NAMES = ["cron_delete", "cron_list", "schedule_wakeup"];
-const ALL_PI_CC_TOOLS = [...LOOP_TOOL_NAMES, "Monitor", "monitor_stop", "monitor_list"];
 
 /**
  * The event channel this extension publishes on when a chain ends. pi-cc-monitor
@@ -554,10 +546,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	/** The tool names to exclude from pi-cc-extensions' global styling. */
-	function piCcToolNames(): string[] {
-		return monitorToolAvailable() ? ALL_PI_CC_TOOLS : LOOP_TOOL_NAMES;
-	}
-
 	/**
 	 * A run finished without an abort: self-paced chains whose tick the model
 	 * did not reschedule get their one keepalive, or end.
@@ -670,15 +658,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 						setSetting(ctx, "messages", value);
 						return;
 					}
-					if (name === "tools" || name === "tool" || name === "rows") {
-						setSetting(ctx, "tools", value);
-						return;
-					}
 					if (name === "footer" || name === "status") {
 						setSetting(ctx, "footer", value);
 						return;
 					}
-					notify(ctx, "Usage: /loop settings [messages|tools|footer] [on|off]", "info");
+					notify(ctx, "Usage: /loop settings [messages|footer] [on|off]", "info");
 					return;
 				}
 				case "help":
@@ -893,7 +877,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop footer on|off         show or hide the one-line summary in the footer",
 			"/loop settings              show UI settings",
 			"/loop settings messages on|off   compact two-line markers",
-			"/loop settings tools on|off      one-line tool results",
+			"/loop settings footer on|off     the one-line footer summary",
 			"",
 			"Esc on a self-paced loop's own turn cancels that loop; fixed-interval loops keep running.",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
@@ -907,17 +891,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		const lines = [
 			`pi-cc settings \u00b7 ${configPath()}`,
 			`  messages:  ${config.compactMessages ? "compact" : "card"}`,
-			`  tool rows: ${config.compactToolRows ? "compact" : "default"}`,
 			`  footer:    ${config.footer ? "summary" : "hidden"}`,
 			"",
 			"Usage: /loop settings messages on|off",
-			"       /loop settings tools on|off",
 			"       /loop settings footer on|off",
 		];
 		notify(ctx, lines.join("\n"), "info");
 	}
 
-	function setSetting(ctx: ExtensionContext, key: "messages" | "tools" | "footer", raw: string | undefined): void {
+	function setSetting(ctx: ExtensionContext, key: "messages" | "footer", raw: string | undefined): void {
 		const value = (raw ?? "").toLowerCase();
 		const on = value === "on" || value === "true" || value === "1";
 		const off = value === "off" || value === "false" || value === "0";
@@ -925,24 +907,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			showSettings(ctx);
 			return;
 		}
-		const patch: Partial<PiCcConfig> =
-			key === "messages" ? { compactMessages: on } : key === "tools" ? { compactToolRows: on } : { footer: on };
+		const patch: Partial<PiCcConfig> = key === "messages" ? { compactMessages: on } : { footer: on };
 		const next = saveConfig(patch);
-		let compatChanged = false;
-		if (key === "tools") {
-			compatChanged = syncPiCcExtensionsExcludes(piCcToolNames(), on);
-		}
 		try {
 			pi.events.emit(CONFIG_CHANNEL, next);
 		} catch {
 			// another extension must not break the command
 		}
-		const label = key === "messages" ? "Compact message style" : key === "tools" ? "Compact tool rows" : "Footer summary";
-		notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
+		notify(ctx, `${key === "messages" ? "Compact message style" : "Footer summary"} ${on ? "enabled" : "disabled"}`, "info");
 		if (key === "footer") refreshStatus();
-		if (compatChanged) {
-			notify(ctx, "pi-cc-extensions excludeRenderers updated \u00b7 /reload to apply", "info");
-		}
 	}
 
 	// ------------------------------------------------------------------ tools
@@ -1254,18 +1227,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---------------------------------------------------------------- rendering
-
-	if (typeof pi.registerToolRenderer === "function") {
-		const renderers = loopToolRenderers();
-		// The resolver runs every time a row renders, so the setting applies
-		// without re-registering anything.
-		pi.registerToolRenderer((toolName, next) => {
-			if (!loadConfig().compactToolRows) return next();
-			return renderers[toolName] ?? next();
-		});
-	}
-
 	pi.registerMessageRenderer(TICK_MESSAGE_TYPE, renderTickMessage);
 
 	// ----------------------------------------------------------------- events
@@ -1341,14 +1302,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
+		// Another process may have edited the shared settings file.
+		invalidateConfig();
 		durable?.stop();
 		restoreState(ctx, (event as { reason?: string } | undefined)?.reason);
 		durable = createDurable(ctx.cwd);
 		durable.start();
 		scheduler.start();
-		if (syncPiCcExtensionsExcludes(piCcToolNames(), loadConfig().compactToolRows)) {
-			notify(ctx, "pi-cc-extensions excludeRenderers updated \u00b7 /reload to apply", "info");
-		}
 	});
 
 	pi.on("session_shutdown", async () => {

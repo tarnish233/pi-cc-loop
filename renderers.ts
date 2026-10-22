@@ -1,8 +1,11 @@
 /**
- * Rendering for pi-cc-loop: the compact tool rows and the loop tick message.
+ * Rendering for pi-cc-loop: the loop tick message, the /loop status lines and
+ * the footer summary. Tool rows are left to Pi and to whatever renderer the
+ * user has installed: Claude Code shows every tool call the same way, with its
+ * arguments, and our one-line summaries hid them.
  */
 
-import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
 import { humanSchedule } from "./cron.ts";
 import { displayPrompt } from "./loopfile.ts";
@@ -16,7 +19,6 @@ import {
 	stripProvenance,
 } from "./render.ts";
 import type { LoopJob } from "./schedule.ts";
-import { compactRenderers, truncate } from "./tool-rows.ts";
 
 /**
  * A clock time the way Claude Code writes it: "6:16pm". Formatted here rather
@@ -58,53 +60,6 @@ export function jobSummary(job: LoopJob): string {
 		return `${job.id} ${humanSchedule(job.cron)} \u00b7 next ${formatClock(job.nextFireAt)}`;
 	}
 	return `${job.id} self-paced \u00b7 ${job.scheduledFor ? `next ${formatClock(job.scheduledFor)}` : "unscheduled"}`;
-}
-
-/** One-line rows for the four loop tools. */
-export function loopToolRenderers(): Record<string, ToolRenderers> {
-	return {
-		cron_delete: compactRenderers({
-			call: (args) => ({ label: "Cancel", detail: args.id ?? "" }),
-			summary: (d) => (d.cancelled ? `Cancelled ${d.id ?? "?"}` : `No job ${d.id ?? "?"}`),
-		}),
-		cron_list: compactRenderers({
-			call: () => ({ label: "List scheduled jobs" }),
-			summary: (d) => {
-				const jobs: LoopJob[] = d.jobs ?? [];
-				if (!jobs.length) return "No scheduled jobs";
-				if (jobs.length === 1) return `1 job \u00b7 ${jobSummary(jobs[0])}`;
-				const shown = jobs.slice(0, 2).map(jobSummary).join(" \u00b7 ");
-				return `${jobs.length} jobs \u00b7 ${shown}${jobs.length > 2 ? " \u2026" : ""}`;
-			},
-			detail: (d) =>
-				((d.jobs ?? []) as LoopJob[])
-					.map((job) => `${jobSummary(job)} \u00b7 ${truncate(displayPrompt(job.prompt), 60)}`)
-					.join("\n") || undefined,
-		}),
-		schedule_wakeup: compactRenderers({
-			call: (args) =>
-				args.stop === true
-					? { label: "Stop loop" }
-					: {
-							label: "Wakeup",
-							detail: `${formatDelay(args.delaySeconds)}${args.reason ? ` \u00b7 ${truncate(args.reason, 40)}` : ""}`,
-						},
-			summary: (d) => {
-				if (d.agedOut) return "Loop ended \u00b7 7-day limit reached";
-				if (d.stopped) {
-					return `Stopped \u00b7 ${d.cancelledWakeups ?? 0} wakeup${d.cancelledWakeups === 1 ? "" : "s"} cancelled`;
-				}
-				const adjusted = d.wasClamped ? " (clamped)" : "";
-				return `Wakeup in ${formatDelay(d.clampedDelaySeconds)} \u00b7 loop ${d.id ?? "?"}${adjusted}`;
-			},
-			detail: (d, args) =>
-				[args.reason, d.scheduledFor ? `at ${formatClock(d.scheduledFor)}` : undefined]
-					.filter(Boolean)
-					.join(" \u00b7 ") || undefined,
-			// A fixed-interval loop already fires its own ticks: nothing to do, quietly.
-			quiet: (d) => (d.suppressed === "fixed-interval" ? "No wakeup needed \u00b7 the schedule fires the next tick" : undefined),
-		}),
-	};
 }
 
 /**

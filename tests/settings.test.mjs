@@ -114,18 +114,16 @@ function resolveTool(h, name) {
 	return resolve(0);
 }
 
-test("the defaults are compact messages and compact tool rows", async () => {
+test("the defaults are compact messages, no tool-row renderers", async () => {
 	const h = makeHarness();
 	await h.commands.get("loop").handler("settings", h.ctx);
 	const shown = h.notifications.at(-1)?.message ?? "";
 	assert.match(shown, /messages:\s+compact/);
-	assert.match(shown, /tool rows:\s+compact/);
 
 	const tick = renderTick(h);
 	assert.equal(tick.lines.length, 2, tick.text);
 	assert.equal(tick.bgCalls.count, 0);
-	assert.ok(resolveTool(h, "schedule_wakeup")?.renderCall, "compact tool renderers are armed");
-	assert.equal(resolveTool(h, "cron_create"), undefined, "cron_create keeps the normal tool call row");
+	assert.equal(resolveTool(h, "schedule_wakeup"), undefined, "tool rows are left to Pi");
 });
 
 test("settings messages off restores the legacy card and on restores the compact block", async () => {
@@ -147,50 +145,5 @@ test("settings messages off restores the legacy card and on restores the compact
 	assert.equal(saved.compactMessages, true);
 });
 
-test("settings tools off falls back to the default renderer and on restores the compact rows", async () => {
-	const h = makeHarness();
-	const loop = h.commands.get("loop");
 
-	assert.ok(resolveTool(h, "schedule_wakeup"));
-	await loop.handler("settings tools off", h.ctx);
-	assert.equal(resolveTool(h, "schedule_wakeup"), undefined);
-
-	const saved = JSON.parse(fs.readFileSync(configFile, "utf8"));
-	assert.equal(saved.compactToolRows, false);
-
-	await loop.handler("settings tools on", h.ctx);
-	assert.ok(resolveTool(h, "schedule_wakeup"));
-
-	const ccstyle = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
-	assert.ok(ccstyle.excludeRenderers.includes("schedule_wakeup"), "loop tools are excluded from ccstyle");
-	assert.ok(!ccstyle.excludeRenderers.includes("cron_create"), "cron_create is not excluded: it uses the normal row");
-	assert.ok(ccstyle.excludeRenderers.includes("Monitor"), "monitor tools are excluded too");
-	assert.ok(!ccstyle.excludeRenderers.includes("bash"), "unrelated exclusions are untouched");
-
-	await loop.handler("settings tools off", h.ctx);
-	const restored = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
-	assert.ok(!restored.excludeRenderers.includes("schedule_wakeup"), "loop exclusions are removed again");
-	assert.ok(!restored.excludeRenderers.includes("Monitor"), "monitor exclusions are removed again");
-});
-
-test("cron_create is left to the normal tool row, like Claude Code's CronCreate", async () => {
-	const h = makeHarness();
-	await h.commands.get("loop").handler("settings tools on", h.ctx);
-	assert.equal(resolveTool(h, "cron_create"), undefined, "no compact renderer");
-
-	// An exclusion this package added in an earlier version is cleaned up on the
-	// next sync: the tool goes back to whatever rendering pi-cc-extensions gives
-	// it, and entries nobody here added are untouched.
-	fs.writeFileSync(ccstyleConfig, JSON.stringify({ excludeRenderers: ["cron_create", "bash"] }, null, 2));
-	fs.writeFileSync(
-		configFile,
-		JSON.stringify({ compactToolRows: true, managePiCcExtensions: true, managedExcludes: ["cron_create"] }),
-	);
-	const { syncPiCcExtensionsExcludes } = await loadModule("config.ts");
-	syncPiCcExtensionsExcludes(["schedule_wakeup"], true);
-	const ccstyle = JSON.parse(fs.readFileSync(ccstyleConfig, "utf8"));
-	assert.ok(!ccstyle.excludeRenderers.includes("cron_create"), "the stale exclusion is dropped");
-	assert.ok(ccstyle.excludeRenderers.includes("bash"), "other entries are untouched");
-	assert.ok(ccstyle.excludeRenderers.includes("schedule_wakeup"), "current tools are still excluded");
-});
 
