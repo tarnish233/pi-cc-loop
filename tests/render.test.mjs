@@ -155,3 +155,26 @@ test("the tool-rows error line keeps only the first sentence", async () => {
 	assert.equal(firstSentence("Short. Second sentence."), "Short.");
 	assert.ok(firstSentence("x".repeat(400)).length <= 160);
 });
+
+test("a scheduled fire is labelled like Claude Code's 'Running scheduled task'", async () => {
+	const { renderTickMessage } = await loadModule("renderers.ts");
+	const { text } = render(
+		renderTickMessage,
+		tickMessage(
+			"[scheduled task 751ff0dc \u00b7 Every minute \u00b7 started by the schedule; do not call schedule_wakeup]\n\u56de\u590d ok",
+			{ kind: "cron", tickCount: 3, jobId: "751ff0dc" },
+		),
+	);
+	assert.match(text, /scheduled task/);
+	assert.ok(!text.includes("#3"), "not a loop iteration");
+	assert.ok(!text.includes("751ff0dc"), "the id belongs in /loop status, not on every fire");
+});
+
+test("clock times read like Claude Code's '6:16pm'", async () => {
+	const { formatClock } = await loadModule("renderers.ts");
+	assert.equal(formatClock(new Date(2026, 9, 22, 18, 16).getTime()), "6:16pm");
+	assert.equal(formatClock(new Date(2026, 9, 22, 0, 5).getTime()), "12:05am");
+	assert.equal(formatClock(new Date(2026, 9, 22, 12, 0).getTime()), "12:00pm");
+	assert.equal(formatClock(new Date(2026, 9, 22, 9, 3).getTime()), "9:03am");
+	assert.equal(formatClock(undefined), "unknown");
+});

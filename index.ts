@@ -816,6 +816,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		const note =
 			`A recurring /loop job was created: id ${job.id}, cron \`${spec.cron}\` (${spec.human}), ` +
 			`next run ${formatClock(nextAt)}, auto-expires after ${days} days (it runs one final time, then it is deleted). ` +
+			`The job lives in this session only unless the user asked for a durable one. ` +
 			`The user cancels it with \`/loop stop ${job.id}\`. ` +
 			`The schedule fires every tick by itself: do not call \`schedule_wakeup\` for this loop, now or on a later tick.` +
 			(spec.note ? ` The requested interval was adjusted: ${spec.note}.` : "");

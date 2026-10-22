@@ -66,7 +66,11 @@ export function formatStamp(epochMs: number | undefined): string {
 	const date = new Date(epochMs ?? Date.now());
 	if (Number.isNaN(date.getTime())) return "";
 	const now = new Date();
-	const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	// Claude Code's clock style: "6:16pm", lowercase, no space.
+	const hour = date.getHours();
+	const time = `${hour % 12 === 0 ? 12 : hour % 12}:${String(date.getMinutes()).padStart(2, "0")}${
+		hour < 12 ? "am" : "pm"
+	}`;
 	if (date.toDateString() === now.toDateString()) return time;
 	const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 	return `${day} ${time}`;

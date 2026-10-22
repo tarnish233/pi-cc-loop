@@ -18,9 +18,17 @@ import {
 import type { LoopJob } from "./schedule.ts";
 import { compactRenderers, truncate } from "./tool-rows.ts";
 
+/**
+ * A clock time the way Claude Code writes it: "6:16pm". Formatted here rather
+ * than through the locale, so the transcript reads the same everywhere.
+ */
 export function formatClock(epochMs: number | undefined): string {
 	if (!epochMs) return "unknown";
-	return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+	const date = new Date(epochMs);
+	const hour = date.getHours();
+	const suffix = hour < 12 ? "am" : "pm";
+	const twelve = hour % 12 === 0 ? 12 : hour % 12;
+	return `${twelve}:${String(date.getMinutes()).padStart(2, "0")}${suffix}`;
 }
 
 /**
@@ -131,14 +139,12 @@ export function renderTickMessage(message: any, options: any, theme: Theme): any
 	// The immediate run of /loop 5m belongs to the /loop the user just typed.
 	const scheduled = details.kind === "cron" && !details.immediate;
 	const label = details.missed
-		? "loop \u00b7 missed jobs"
+		? "\u273b loop \u00b7 missed jobs"
 		: scheduled
-			? details.jobId
-				? `job ${details.jobId}`
-				: "scheduled job"
+			? "\u273b Running scheduled task"
 			: details.tickCount !== undefined
-				? `loop #${details.tickCount}`
-				: "loop";
+				? `\u273b loop #${details.tickCount}`
+				: "\u273b loop";
 
 	if (!loadConfig().compactMessages) {
 		const summary = firstLine(prompt);
