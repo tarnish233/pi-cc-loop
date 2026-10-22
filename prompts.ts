@@ -76,6 +76,18 @@ const LOOP_GUIDELINES = [
 ].join("\n");
 
 /**
+ * Fixed-interval loops fire their own next tick, so a wakeup scheduled from
+ * one would run the same prompt twice. Claude Code's tick says the same:
+ * "The recurring cron will fire the next tick automatically — do not call
+ * ScheduleWakeup from this tick."
+ */
+const CRON_TICK_GUIDELINES = [
+	"This is a fixed-interval /loop (job {id}, {schedule}): the schedule fires the next tick on its own.",
+	"Do not call `schedule_wakeup` from this tick — it would run this prompt a second time on a self-paced",
+	"schedule. To cancel the loop, call `cron_delete` with id {id}.",
+].join("\n");
+
+/**
  * How a self-paced loop uses the Monitor tool, after Claude Code's /loop
  * skill: arm a monitor only when the next iteration waits on an event, arm it
  * once, and keep the wakeup as a long fallback heartbeat. A monitor event
@@ -126,6 +138,10 @@ export function loopGuidelines(prompt: string): string {
 	return fill(LOOP_GUIDELINES, { prompt: describePrompt(prompt), quoted: quote(prompt) });
 }
 
+export function cronTickGuidelines(id: string, schedule: string): string {
+	return fill(CRON_TICK_GUIDELINES, { id, schedule });
+}
+
 export function monitorGuidelines(prompt: string): string {
 	return fill(MONITOR_GUIDELINES, { quoted: quote(prompt) });
 }
@@ -172,7 +188,7 @@ By default (durable: false) the job belongs to this Pi session: it is restored i
 cron_create re-runs a prompt at fixed wall-clock intervals. To watch a log file, process, or command output and be told the moment something changes, use the Monitor tool instead when it is available \u2014 it streams events as they happen; cron polls on a schedule.
 
 ## Runtime behavior
-Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: a recurring job runs up to half its period late (max 30 min), a "*/5 * * * *" job runs every 4m45s so the 5-minute prompt cache stays warm, and a one-shot job landing on :00 or :30 runs up to 90 s early. The result of this tool and of cron_list gives each job's actual next run time: when you tell the user when a job will run, give that time, not the minute in the cron expression.
+Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: a recurring job runs up to half its period late (max 30 min), a "*/5 * * * *" job keeps its 5 minute cadence, late by that offset rather than early, and a one-shot job landing on :00 or :30 runs up to 90 s early. The result of this tool and of cron_list gives each job's actual next run time: when you tell the user when a job will run, give that time, not the minute in the cron expression.
 Recurring jobs auto-expire after 7 days \u2014 they fire one final time, then are deleted. Tell the user about the 7-day limit when scheduling recurring jobs.
 Returns a job ID you can pass to cron_delete.`;
 
@@ -189,7 +205,10 @@ Pass the same /loop prompt back via \`prompt\` each turn so the next firing repe
 Do not schedule a short wakeup to poll for work Pi will tell you about anyway (a monitor event, a command you are running): schedule a long fallback (1200s+) so the loop survives if that never arrives. For external work nothing notifies you about (a CI run, a deploy, a remote queue), pick a delay matched to how fast that state actually changes.
 
 ## Picking delaySeconds
-Most model providers cache the conversation prefix for about 5 minutes. Under 300s (60-270s) the next wakeup reads the context cached; past that it is read uncached \u2014 slower and more expensive. When actively polling, prefer 270s over 300s (300s pays the cache miss without amortizing it), and commit to 1200s+ rather than repeated ~300s waits. For idle ticks with no specific signal to watch, default to 1200-1800s (20-30 min). The runtime clamps to [60, 3600].
+Pick the delay from what you are waiting for. When actively polling state nothing notifies you about, match how fast it changes and commit to it instead of stacking short waits. For idle ticks with no specific signal to watch, default to 1200-1800s (20-30 min). The runtime clamps to [60, 3600].
+
+## Only for self-paced loops
+A /loop started with an interval (for example /loop 5m ...) is a cron job: it fires its own ticks, and calling this from one of those ticks would run the prompt twice. Cancel that kind of loop with \`cron_delete\` instead.
 
 ## The reason field
 One short sentence on what you chose and why. It is shown to the user: "watching CI run" beats "waiting".`;

@@ -72,17 +72,13 @@ export class LoopFileDelivery {
 
 	/** The text of one tick for the loop.md sentinel. */
 	resolve(cwd: string, mode: TickMode): string {
-		const cronNote =
-			mode === "cron"
-				? "\nThe recurring job fires the next tick on its own: do not call schedule_wakeup from this tick."
-				: "";
 		const file = readLoopFile(cwd);
 		if (file) {
 			if (this.lastDelivered === file.content) {
 				return (
 					"# /loop tick \u2014 loop.md tasks\n" +
 					"Work the tasks from the loop.md contents established earlier in this conversation. " +
-					`If you cannot find them, treat this as a no-op tick.${cronNote}`
+					"If you cannot find them, treat this as a no-op tick."
 				);
 			}
 			this.lastDelivered = file.content;
@@ -92,16 +88,16 @@ export class LoopFileDelivery {
 					"instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).",
 				"",
 				file.content,
-			].join("\n") + cronNote;
+			].join("\n");
 		}
 		if (this.lastDelivered === MAINTENANCE_MARKER) {
 			return (
 				"# /loop tick \u2014 maintenance pass\n" +
 				"Run the maintenance pass using the instructions established earlier in this conversation. " +
-				`If you cannot find them, treat this as a no-op tick.${cronNote}`
+				"If you cannot find them, treat this as a no-op tick."
 			);
 		}
 		this.lastDelivered = MAINTENANCE_MARKER;
-		return MAINTENANCE_PROMPT + cronNote;
+		return MAINTENANCE_PROMPT;
 	}
 }

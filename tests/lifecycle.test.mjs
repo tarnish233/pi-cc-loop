@@ -182,7 +182,6 @@ test("loop.md is read at fire time: edits apply, unchanged tasks are not resent"
 	const unchanged = fire();
 	assert.ok(!unchanged.includes("task A"), "unchanged tasks: a short reminder");
 	assert.match(unchanged, /established earlier in this conversation/);
-	assert.match(unchanged, /do not call schedule_wakeup/, "a cron tick must not start a self-paced chain");
 
 	fs.writeFileSync(file, "task B\n");
 	assert.ok(fire().includes("task B"), "an edit is picked up on the next tick");
@@ -225,6 +224,42 @@ test("a bare /loop is self-paced and schedules with the sentinel", async () => {
 	assert.ok(text.includes("A self-paced `/loop` is running"), text);
 	assert.ok(text.includes('"<<loop.md>>"'), "the model passes the sentinel back");
 	assert.ok(!text.includes("Decide how it should repeat"), "no fixed-or-open-ended decision for a bare /loop");
+});
+
+test("a cron tick says the schedule fires on its own, and refuses a wakeup", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	const job = h.scheduler().byKind("cron")[0];
+	makeDue(h, job.id);
+	h.scheduler().tick();
+
+	const event = runEvent(h.sent.at(-1));
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	const text = guidelinesOf(event);
+	assert.match(text, /fixed-interval \/loop/);
+	assert.match(text, /Do not call `schedule_wakeup`/);
+	assert.ok(text.includes(job.id), "the job id, so cron_delete can be named too");
+
+	// Following the habit anyway must not quietly start a second schedule.
+	await assert.rejects(
+		() => wakeup(h, { delaySeconds: 1200, prompt: "check the deploy" }),
+		/fixed-interval/,
+	);
+	assert.equal(h.scheduler().byKind("wakeup").length, 0);
+});
+
+test("after a cron tick, a turn the user starts may schedule again", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
+	const job = h.scheduler().byKind("cron")[0];
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	await runTurn(h, { start: h.sent.at(-1) });
+
+	const userTurn = { messageType: "user", prompt: "now check the deploy every 10 minutes instead", systemPromptOptions: { promptGuidelines: [] } };
+	await h.handlers.get("before_agent_start")(userTurn, h.ctx);
+	const armed = await wakeup(h, { delaySeconds: 600, prompt: "watch the deploy" });
+	assert.equal(armed.details.stopped, false);
 });
 
 // --------------------------------------------------- schedule_wakeup contract
@@ -351,10 +386,10 @@ test("the stopped-prompt memory is capped", async () => {
 test("the tool descriptions carry Claude Code's guidance", async () => {
 	const h = await start(makeHarness());
 	const describe = (name) => h.tools.get(name).description;
-	for (const phrase of ["half its period late", "4m45s", "90 s early", "fire one final time", "NOT 0 or 30", "Monitor tool"]) {
+	for (const phrase of ["half its period late", "5 minute cadence", "90 s early", "fire one final time", "NOT 0 or 30", "Monitor tool"]) {
 		assert.ok(describe("cron_create").includes(phrase), `cron_create: ${phrase}`);
 	}
-	for (const phrase of ["prefer 270s over 300s", "1200-1800s", "<<loop.md>>", "the turn ends as soon as it returns"]) {
+	for (const phrase of ["Only for self-paced loops", "1200-1800s", "<<loop.md>>", "the turn ends as soon as it returns"]) {
 		assert.ok(describe("schedule_wakeup").includes(phrase), `schedule_wakeup: ${phrase}`);
 	}
 	for (const name of ["cron_create", "cron_delete", "cron_list", "schedule_wakeup"]) {

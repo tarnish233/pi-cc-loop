@@ -48,6 +48,7 @@ import {
 	CRON_DELETE_SNIPPET,
 	CRON_LIST_DESCRIPTION,
 	CRON_LIST_SNIPPET,
+	cronTickGuidelines,
 	LOOP_FILE_SENTINEL,
 	loopGuidelines,
 	missedJobsMessage,
@@ -218,9 +219,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	/**
 	 * What the current run belongs to, derived from its starting message:
 	 * `chainId` is the self-paced chain whose tick (or monitor) started it,
-	 * `armed` the chains it armed, `tick` the tick number of a /loop run.
+	 * `cronId` the fixed-interval job whose tick started it, `armed` the chains
+	 * it armed, `tick` the tick number of a /loop run.
 	 */
-	let currentRun: { chainId?: string; armed?: Set<string>; tick?: number } = {};
+	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number } = {};
 
 	const scheduler = new LoopScheduler({
 		dispatch: (job) => deliverTick(job),
@@ -1127,6 +1129,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				throw new Error("prompt is required unless stop is true.");
 			}
 
+			if (currentRun.cronId) {
+				const cronJob = scheduler.get(currentRun.cronId);
+				throw new Error(
+					`This tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
+						`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
+						"Do not call schedule_wakeup from it: that would run the same prompt twice. " +
+						`To stop the loop, call cron_delete with id ${currentRun.cronId}.`,
+				);
+			}
+
 			// Claude Code rounds and clamps; only a change after rounding counts as clamped.
 			const requested = params.delaySeconds;
 			const rounded = Number.isFinite(requested) ? Math.round(requested) : requested > 0 ? MAX_DELAY_SECONDS : MIN_DELAY_SECONDS;
@@ -1252,13 +1264,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			: [];
 		if (details.immediate && typeof details.tickCount === "number") currentRun.tick = details.tickCount;
 
-		// A self-paced tick has to schedule the next iteration.
-		const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
-		if (chain?.kind === "wakeup") {
-			currentRun.chainId = chain.id;
-			notes.push(loopGuidelines(chain.prompt));
+		const job = details.jobId ? scheduler.get(details.jobId) : undefined;
+		if (job?.kind === "wakeup") {
+			// A self-paced tick has to schedule the next iteration.
+			currentRun.chainId = job.id;
+			notes.push(loopGuidelines(job.prompt));
 			// Only mention the Monitor tool when it is actually installed.
-			if (monitorToolAvailable()) notes.push(monitorGuidelines(chain.prompt));
+			if (monitorToolAvailable()) notes.push(monitorGuidelines(job.prompt));
+		} else if (job?.kind === "cron") {
+			// A fixed interval fires its own next tick; this run must not arm one.
+			currentRun.cronId = job.id;
+			notes.push(cronTickGuidelines(job.id, humanSchedule(job.cron ?? "* * * * *")));
 		}
 
 		if (!notes.length) return;

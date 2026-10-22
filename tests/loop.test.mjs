@@ -549,7 +549,7 @@ test("a scheduled tick of a self-paced chain gets the chain guidelines", async (
 	assert.ok(guidelinesOf(event).includes('"check the deploy"'), "with the chain's prompt");
 });
 
-test("a cron tick's turn gets no self-paced guidelines", async () => {
+test("a cron tick's turn is told the schedule fires on its own", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
 	const job = h.lastState().jobs[0];
@@ -558,5 +558,7 @@ test("a cron tick's turn gets no self-paced guidelines", async () => {
 
 	const event = runEvent(h.sent[1]);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
-	assert.ok(!guidelinesOf(event).includes("schedule_wakeup"), guidelinesOf(event));
+	const text = guidelinesOf(event);
+	assert.ok(!text.includes("A self-paced `/loop` is running"), "it is not a self-paced chain");
+	assert.match(text, /fixed-interval \/loop .* the schedule fires the next tick on its own/);
 });
