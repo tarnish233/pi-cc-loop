@@ -26,6 +26,11 @@ test("/loop becomes a normal user message and creates nothing itself", async () 
 	assert.equal(h.sent.length, 1, "one message");
 	assert.equal(h.sent[0].kind, "user", "an ordinary user message, not a custom block");
 	assert.equal(h.sent[0].content, "/loop 5m check the deploy", "the request is kept verbatim");
+	assert.equal(
+		h.sent[0].options.deliverAs,
+		"followUp",
+		"typing /loop mid-turn must queue, not throw 'Agent is already processing'",
+	);
 	assert.equal(h.scheduler().size, 0, "the model creates the job, not the command");
 });
 

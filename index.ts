@@ -586,7 +586,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// The per-run rules travel with the run through before_agent_start.
 			const text = raw ? `/loop ${raw}` : "/loop";
 			queueRun({ content: text, guidelines: [loopCommandGuidelines(raw)] });
-			pi.sendUserMessage(text, { expandPromptTemplates: false });
+			// Pi runs an extension command even while a turn is streaming, and its
+			// sendUserMessage throws unless a lane is named: "Agent is already
+			// processing. Specify streamingBehavior". `followUp` is that lane - the
+			// request waits for the current turn to end, which is where a /loop
+			// belongs anyway. When idle the option is ignored and the turn starts.
+			pi.sendUserMessage(text, { expandPromptTemplates: false, deliverAs: "followUp" });
 		},
 	});
 
