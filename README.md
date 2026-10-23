@@ -25,7 +25,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 
 | 功能 | 说明 | 入口 |
 | --- | --- | --- |
-| 固定间隔 | 模型用 `cron_create` 建一个 cron（`5m` → `*/5 * * * *`），然后立即执行一次；触发时按"定时任务"呈现 | `/loop 5m <prompt>`、`/loop 每分钟 ...` |
+| 固定间隔 | 模型用 `cron_create` 建一个 cron（`5m` → `*/5 * * * *`），然后立即执行一次；触发时按"定时任务"呈现。不带 `/loop`、直接说"每分钟打印一次hello"也一样 | `/loop 5m <prompt>`、`/loop 每分钟 ...` |
 | 自选间隔 | 运行一次后用 `schedule_wakeup` 决定下次延迟（60–3600s） | `/loop <prompt>` |
 | loop.md | 请求本身没有任务时（裸 `/loop` 或只给间隔）由 `.pi/loop.md`（或 `~/.pi/loop.md`）提供，每次触发重读；没有时用内置维护 prompt | `/loop`、`/loop 15m` |
 | 停止 / 查看 | 也走对话：模型用 `cron_list` / `cron_delete`（自选间隔用 `schedule_wakeup` + `stop: true`）；停掉后再输入同一个 `/loop` 会重新开始 | `/loop stop`、`/loop status` |
@@ -159,6 +159,7 @@ node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免
 
 - Esc 只取消被打断回合所属的自定步调 loop；CC 按 Esc（包括空闲时、打断无关回合时）会取消所有自定步调 loop。其他情况用 `/loop stop`。
 - 固定间隔的触发里调用 `schedule_wakeup` 会被当作空操作并返回说明，防止同一个任务又被自定步调重复调度；CC 没有这条硬规则。
+- 不带 `/loop` 的请求（比如"每分钟打印一次hello"）也会在建好任务后立即做一次。CC 靠模型自己调用 loop 技能做到（`CronCreate` 在 CC 里是延迟加载的工具，模型会先走技能）；Pi 没有延迟加载工具，这里改为在 `cron_create` 的结果里加一句提示，只在普通对话里建周期任务时出现。
 - 底部摘要和 `maxFires` 次数上限是额外加的；CC 主会话不显示 loop 状态，也没有次数上限。
 - 自定步调 loop 结束（stop、Esc、`cron_delete`、兜底心跳用完）时，绑定的 Monitor 会被静默停止；CC 靠模型自己调用 `TaskStop`。
 - Monitor 事件不会取消待触发的 wakeup，它始终是兜底心跳（与 CC 一致）。

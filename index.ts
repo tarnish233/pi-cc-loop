@@ -50,6 +50,7 @@ import {
 	monitorGuidelines,
 	provenance,
 	RULES_PROVENANCE,
+	RUN_NOW_HINT,
 	SCHEDULE_WAKEUP_DESCRIPTION,
 	scheduledTaskProvenance,
 	SCHEDULE_WAKEUP_SNIPPET,
@@ -171,9 +172,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * What the current run belongs to, derived from its starting message:
 	 * `chainId` is the self-paced chain whose tick (or monitor) started it,
 	 * `cronId` the fixed-interval job whose tick started it, `armed` the chains
-	 * it armed, `tick` the tick number of a /loop run.
+	 * it armed, `tick` the tick number of a /loop run, `loopRequest` set when a
+	 * typed /loop started it (its rules already say to do the task now).
 	 */
-	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number } = {};
+	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number; loopRequest?: boolean } = {};
 
 	const scheduler = new LoopScheduler({
 		dispatch: (job) => deliverTick(job),
@@ -773,6 +775,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				lines.push(`Recurring jobs auto-expire after ${maxAgeDays()} days: the job runs one final time, then it is deleted.`);
 			}
 			lines.push(`Cancel it with cron_delete { "id": "${job.id}" }.`);
+			// Asked for in plain words, not through /loop: do it once now, as /loop would.
+			if (recurring && !currentRun.loopRequest && !currentRun.cronId && !currentRun.chainId) lines.push(RUN_NOW_HINT);
 
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
@@ -1039,7 +1043,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		if (event.messageType === "user") {
 			const queued = takeQueuedRun(event.prompt);
 			if (!queued) return;
-			currentRun = { chainId: queued.chainId, cronId: queued.cronId, tick: queued.tick };
+			currentRun = { chainId: queued.chainId, cronId: queued.cronId, tick: queued.tick, loopRequest: true };
 			return rulesFor(queued.guidelines);
 		}
 		if (event.messageType !== "custom") return;

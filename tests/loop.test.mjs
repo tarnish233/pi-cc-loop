@@ -136,6 +136,52 @@ test("the run's rules do not leak into the next turn", async () => {
 	assert.equal(guidelinesOf(userTurn), "");
 });
 
+test("a recurring job asked for in plain words is done once now too; /loop runs, ticks and one-shots get no hint", async () => {
+	// Claude Code reaches "Then immediately run it now" through its loop skill,
+	// which its model invokes on its own for "every 5 minutes ..." (CronCreate is
+	// a deferred tool there). Pi has neither, so a recurring job created in a
+	// plain turn says it in its result, at the end of the transcript.
+	const h = await start(makeHarness());
+	const hint = /do the task once now as well/;
+	const create = async (args) => {
+		const created = await createCron(h, args);
+		return { id: created.id, text: created.result.content[0].text };
+	};
+	const userTurn = (prompt) =>
+		h.handlers.get("before_agent_start")({ messageType: "user", prompt, systemPromptOptions: { promptGuidelines: [] } }, h.ctx);
+	const startedBy = (sent) => h.handlers.get("before_agent_start")(runEvent(sent), h.ctx);
+
+	await userTurn("每分钟打印一次hello");
+	const plain = await create({ cron: "* * * * *", prompt: "print hello" });
+	assert.match(plain.text, hint, "a recurring job from a plain request");
+	assert.match(plain.text, /at set times .* only runs at those times/, "a job at set times is not run early");
+	const oneShot = await create({ cron: "30 14 23 10 *", prompt: "remind me to drink water", recurring: false });
+	assert.doesNotMatch(oneShot.text, hint, "a one-shot reminder");
+	await runTurn(h);
+
+	await loop(h).handler("5m check the deploy", h.ctx);
+	await startedBy(h.sent.at(-1));
+	assert.doesNotMatch((await create({ cron: "*/5 * * * *", prompt: "check the deploy" })).text, hint, "a /loop request: its rules say it");
+	await runTurn(h);
+
+	makeDue(h, plain.id);
+	h.scheduler().tick();
+	await startedBy(h.sent.at(-1));
+	assert.doesNotMatch((await create({ cron: "*/10 * * * *", prompt: "tidy up" })).text, hint, "a cron tick");
+	await runTurn(h);
+
+	const chain = await startSelfPaced(h, "watch CI", 60);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await startedBy(h.sent.at(-1));
+	assert.doesNotMatch((await create({ cron: "*/15 * * * *", prompt: "check CI" })).text, hint, "a self-paced tick");
+	await runTurn(h);
+
+	await userTurn("every 2 minutes print the time");
+	assert.match((await create({ cron: "*/2 * * * *", prompt: "print the time" })).text, hint, "a plain turn after a /loop run");
+});
+
 test("a scheduled fire says it fires on its own, and the reader sees no provenance", async () => {
 	const h = await start(makeHarness());
 	const job = await createCron(h, { cron: "* * * * *", prompt: "print hi" });

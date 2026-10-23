@@ -51,6 +51,9 @@ test("no loop path changes the system prompt, the tool set or earlier messages",
 		runs.push({ label, changed, systemPrompt: result?.systemPrompt !== undefined });
 	};
 
+	await check("plain request", { kind: "user", content: "print hello every minute" });
+	await createCron(h, { cron: "* * * * *", prompt: "print hello" });
+	await runTurn(h);
 	await h.commands.get("loop").handler("5m check the deploy", h.ctx);
 	await check("/loop request", h.sent.at(-1));
 	const job = await createCron(h, { cron: "* * * * *", prompt: "print hi" });

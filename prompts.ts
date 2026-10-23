@@ -217,6 +217,19 @@ Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each
 Recurring jobs auto-expire after 7 days \u2014 they fire one final time, then are deleted. Tell the user about the 7-day limit when scheduling recurring jobs.
 Returns a job ID you can pass to cron_delete.`;
 
+/**
+ * Appended to the result of a recurring `cron_create` in a plain turn (not a
+ * /loop request, not a scheduled tick). Claude Code's /loop skill says "Then
+ * immediately run it now ... Don't wait for the first cron fire", and its model
+ * reaches that skill for "every 5 minutes ..." typed without /loop: the skill is
+ * listed every turn and CronCreate is a deferred tool. Pi has no deferred tools,
+ * so the model calls cron_create directly and the result says it instead. A
+ * tool result is appended at the end of the transcript; the cache is untouched.
+ */
+export const RUN_NOW_HINT =
+	'If the user asked for this to repeat on an interval ("every 5 minutes"), do the task once now as well \u2014 ' +
+	'don\'t wait for the first fire, as /loop does. A job at set times ("every day at 9am") only runs at those times.';
+
 export const CRON_DELETE_DESCRIPTION =
 	"Cancel a job scheduled with cron_create, or end a self-paced /loop, by its id. Removes it from .pi/scheduled_tasks.json (durable jobs) or from this session (session-only jobs).";
 
