@@ -1,120 +1,89 @@
 /**
- * Settings tests: the shared config file switches the message style and the
- * compact tool rows, without re-registering the tools.
+ * The shared settings file (pi-cc.json) and the /loop settings commands.
+ *
+ * The file belongs to the user: a command writes only the key it changes. An
+ * environment override (PI_CC_FOOTER, PI_CC_COMPACT_MESSAGES) wins while it is
+ * set but is never copied into the file, and the commands say when one is in
+ * force. The file lives in Pi's agent directory, so PI_CODING_AGENT_DIR moves
+ * it along with Pi's own settings.
  */
 import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createCron, makeHarness, start } from "./harness.mjs";
 import { loadModule } from "./helpers.mjs";
 
-const configFile = process.env.PI_CC_CONFIG_FILE;
-const ccstyleConfig = process.env.PI_CC_EXTENSIONS_CONFIG_FILE;
-assert.ok(configFile, "the test helper points PI_CC_CONFIG_FILE at a temp file");
-assert.ok(ccstyleConfig, "the test helper points PI_CC_EXTENSIONS_CONFIG_FILE at a temp file");
-fs.writeFileSync(configFile, JSON.stringify({ compactMessages: true, compactToolRows: true }), "utf8");
+const config = await loadModule("config.ts");
 
-const mod = await loadModule("index.ts");
+const ENV_KEYS = ["PI_CC_CONFIG_FILE", "PI_CC_FOOTER", "PI_CC_COMPACT_MESSAGES", "PI_CODING_AGENT_DIR"];
 
-function makeTheme() {
-	const bgCalls = { count: 0 };
-	return {
-		bgCalls,
-		theme: {
-			fg: (_color, text) => text,
-			bg: (_color, text) => {
-				bgCalls.count += 1;
-				return text;
-			},
-			bold: (text) => text,
-		},
-	};
+function setEnv(vars) {
+	for (const [key, value] of Object.entries(vars)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 }
 
-function makeHarness() {
-	const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-loop-settings-"));
-	process.chdir(workdir);
-
-	const commands = new Map();
-	const tools = new Map();
-	const renderers = new Map();
-	const toolRenderers = [];
-	const notifications = [];
-	const appended = [];
-
-	const pi = {
-		registerCommand(name, options) {
-			commands.set(name, options);
-		},
-		registerTool(tool) {
-			tools.set(tool.name, tool);
-		},
-		registerMessageRenderer(customType, renderer) {
-			renderers.set(customType, renderer);
-		},
-		registerToolRenderer(resolver) {
-			toolRenderers.push(resolver);
-		},
-		on() {
-			return () => {};
-		},
-		appendEntry(customType, data) {
-			appended.push({ customType, data });
-		},
-		sendUserMessage() {},
-		sendMessage() {},
-		events: { emit() {}, on() { return () => {}; } },
-		getAllTools() {
-			return [...tools.keys()].map((name) => ({ name }));
-		},
-	};
-
-	const ctx = {
-		ui: {
-			notify: (message, level) => notifications.push({ message, level }),
-			setWidget: () => {},
-			theme: { fg: (_color, text) => text },
-		},
-		hasUI: true,
-		mode: "tui",
-		cwd: workdir,
-		sessionManager: { getEntries: () => [] },
-		isIdle: () => true,
-		hasPendingMessages: () => false,
-	};
-
-	mod.default(pi);
-	// Simulate pi-cc-monitor being installed so the loop command manages all
-	// seven pi-cc tool names.
-	tools.set("Monitor", { name: "Monitor" });
-	return { commands, tools, renderers, toolRenderers, notifications, appended, ctx };
+/** Run `body` with these variables (undefined unsets one), then put them back. */
+async function withEnv(vars, body) {
+	const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+	try {
+		setEnv(vars);
+		config.invalidateConfig();
+		return await body();
+	} finally {
+		setEnv(saved);
+		config.invalidateConfig();
+	}
 }
 
-function renderTick(h, expanded = false) {
-	const renderer = h.renderers.get("pi-cc-loop-tick");
-	const { theme, bgCalls } = makeTheme();
-	const message = {
-		role: "custom",
-		customType: "pi-cc-loop-tick",
-		display: true,
-		content: "[loop tick #7 · scheduled by /loop, not typed by the user]\ncheck the deploy",
-		details: { tickCount: 7, jobId: "abc12345", cron: "*/5 * * * *" },
-		timestamp: Date.now(),
-	};
-	const lines = renderer(message, { expanded, outputPad: 1 }, theme).render(100);
-	return { text: lines.join("\n"), lines, bgCalls };
+function tempConfig(content) {
+	const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-settings-")), "pi-cc.json");
+	if (content) fs.writeFileSync(file, JSON.stringify(content), "utf8");
+	return file;
 }
 
-/** Resolve the compact renderers for a tool name, if the resolver returns them. */
-function resolveTool(h, name) {
-	const next = () => undefined;
-	const resolvers = h.toolRenderers;
-	const resolve = (index) => (index < resolvers.length ? resolvers[index](name, () => resolve(index + 1)) : next());
-	return resolve(0);
-}
+const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+const loop = (h) => h.commands.get("loop");
 
+test("a setting writes only its own key: other keys stay, an environment override never reaches the file", async () => {
+	const file = tempConfig({ compactMessages: true, footer: true, mine: "kept" });
+	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_COMPACT_MESSAGES: "0" }, async () => {
+		const h = await start(makeHarness());
+		await loop(h).handler("settings footer off", h.ctx);
+		assert.deepEqual(readJson(file), { compactMessages: true, footer: false, mine: "kept" });
+	});
+});
 
+test("under PI_CC_FOOTER=0, footer on is saved for later but the variable still wins, and the commands say so", async () => {
+	const file = tempConfig({ footer: false });
+	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_FOOTER: "0" }, async () => {
+		const h = await start(makeHarness());
+		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
+		await loop(h).handler("settings footer on", h.ctx);
+		assert.equal(readJson(file).footer, true, "the file keeps the user's choice");
+		assert.equal(config.loadConfig().footer, false, "the variable wins while it is set");
+		assert.equal(h.status("loop"), undefined, "so the footer stays hidden, as it does in pi-cc-monitor");
+		const notice = h.notifications.at(-1);
+		assert.equal(notice.level, "warning");
+		assert.match(notice.message, /PI_CC_FOOTER=0/);
 
+		await loop(h).handler("settings", h.ctx);
+		assert.match(h.notifications.at(-1).message, /footer: +hidden \(PI_CC_FOOTER=0\)/);
+		await loop(h).handler("footer", h.ctx);
+		assert.match(h.notifications.at(-1).message, /currently off \(PI_CC_FOOTER=0\)/);
+	});
+});
 
-
+test("the settings file lives in Pi's agent directory, so PI_CODING_AGENT_DIR moves it with Pi's own settings", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-agent-"));
+	await withEnv({ PI_CC_CONFIG_FILE: undefined, PI_CODING_AGENT_DIR: agentDir }, async () => {
+		// Checked before anything is written: a wrong path would be the user's real file.
+		assert.equal(config.configPath(), path.join(agentDir, "pi-cc.json"));
+		const h = await start(makeHarness());
+		await loop(h).handler("settings footer off", h.ctx);
+		assert.deepEqual(readJson(path.join(agentDir, "pi-cc.json")), { footer: false });
+	});
+});

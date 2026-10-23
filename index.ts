@@ -29,7 +29,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { configPath, invalidateConfig, loadConfig, saveConfig, type PiCcConfig } from "./config.ts";
+import { configPath, envOverride, invalidateConfig, loadConfig, saveConfig, type PiCcConfig } from "./config.ts";
 import {
 	humanSchedule,
 	isUnreachable,
@@ -574,7 +574,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				case "statusline": {
 					const arg = (rest[0] ?? "").toLowerCase();
 					if (!arg) {
-						notify(ctx, `Usage: /loop footer on|off (currently ${loadConfig().footer ? "on" : "off"})`, "info");
+						const current = `${loadConfig().footer ? "on" : "off"}${overrideNote("footer")}`;
+						notify(ctx, `Usage: /loop footer on|off (currently ${current})`, "info");
 						return;
 					}
 					setSetting(ctx, "footer", arg);
@@ -662,12 +663,18 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		notify(ctx, help, "info");
 	}
 
+	/** ` (PI_CC_FOOTER=0)` when an environment variable decides the setting. */
+	function overrideNote(key: keyof PiCcConfig): string {
+		const override = envOverride(key);
+		return override ? ` (${override})` : "";
+	}
+
 	function showSettings(ctx: ExtensionContext): void {
 		const config = loadConfig();
 		const lines = [
 			`pi-cc settings \u00b7 ${configPath()}`,
-			`  messages:  ${config.compactMessages ? "compact" : "card"}`,
-			`  footer:    ${config.footer ? "summary" : "hidden"}`,
+			`  messages:  ${config.compactMessages ? "compact" : "card"}${overrideNote("compactMessages")}`,
+			`  footer:    ${config.footer ? "summary" : "hidden"}${overrideNote("footer")}`,
 			"",
 			"Usage: /loop settings messages on|off",
 			"       /loop settings footer on|off",
@@ -683,6 +690,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			showSettings(ctx);
 			return;
 		}
+		const field: keyof PiCcConfig = key === "messages" ? "compactMessages" : "footer";
 		const patch: Partial<PiCcConfig> = key === "messages" ? { compactMessages: on } : { footer: on };
 		const next = saveConfig(patch);
 		try {
@@ -690,7 +698,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		} catch {
 			// another extension must not break the command
 		}
-		notify(ctx, `${key === "messages" ? "Compact message style" : "Footer summary"} ${on ? "enabled" : "disabled"}`, "info");
+		const label = key === "messages" ? "Compact message style" : "Footer summary";
+		const override = envOverride(field);
+		if (override && next[field] !== on) {
+			// The file has the choice, but the variable decides while it is set.
+			notify(ctx, `${label} saved as ${on ? "on" : "off"}, but ${override} overrides it while set`, "warning");
+		} else {
+			notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
+		}
 		if (key === "footer") refreshStatus();
 	}
 

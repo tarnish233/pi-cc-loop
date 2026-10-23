@@ -10,6 +10,10 @@ import test from "node:test";
 import { createCron, makeHarness, start, startSelfPaced } from "./harness.mjs";
 
 const statusFile = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+// The helper's throwaway settings file. Tests that point elsewhere put this
+// back: without it the settings file is the user's real one.
+const isolatedConfig = process.env.PI_CC_CONFIG_FILE;
+assert.ok(isolatedConfig, "the test helper points PI_CC_CONFIG_FILE at a temp file");
 
 /** Park a job's next run a fixed time from now. */
 function schedule(h, id, inMs) {
@@ -94,7 +98,7 @@ test("/loop footer on|off turns the footer summary off for every pi-cc package",
 		assert.equal(h.status("loop"), "loop 1 · next 3m");
 		assert.equal(statusFile(configFile).footer, true);
 	} finally {
-		delete process.env.PI_CC_CONFIG_FILE;
+		process.env.PI_CC_CONFIG_FILE = isolatedConfig;
 	}
 });
 
@@ -108,7 +112,7 @@ test("PI_CC_FOOTER=0 starts with the footer off", async () => {
 		assert.equal(h.statusCalls.length, 0);
 	} finally {
 		delete process.env.PI_CC_FOOTER;
-		delete process.env.PI_CC_CONFIG_FILE;
+		process.env.PI_CC_CONFIG_FILE = isolatedConfig;
 	}
 });
 

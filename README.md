@@ -86,7 +86,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 
 ## 设置
 
-两个 pi-cc 扩展共用 `~/.pi/agent/pi-cc.json`，文件不存在时用默认值：
+两个 pi-cc 扩展共用 Pi 配置目录下的 `pi-cc.json`（默认 `~/.pi/agent/pi-cc.json`，跟随 `PI_CODING_AGENT_DIR`），文件不存在时用默认值：
 
 ```jsonc
 {
@@ -96,6 +96,10 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 ```
 
 用 `/loop settings messages on|off`、`/loop settings footer on|off`（或 `/loop footer on|off`）切换，两个扩展同时生效。
+命令只写改动的那一项，文件里的其他内容原样保留。
+
+环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES` 优先于文件，但不会被写进文件。设着的时候，`/loop settings` 会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；
+用命令切换会写进文件，但提示会说明变量还在覆盖它。
 
 ## 底部摘要
 
@@ -124,7 +128,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 | `PI_LOOP_DURABLE_SYNC_MS` | `5000` | 持久化任务文件的同步间隔 |
 | `PI_CC_FOOTER` | — | `0` / `1`，覆盖设置文件里的 `footer` |
 | `PI_CC_COMPACT_MESSAGES` | — | `0` / `1`，覆盖设置文件里的 `compactMessages` |
-| `PI_CC_CONFIG_FILE` | `~/.pi/agent/pi-cc.json` | 设置文件路径 |
+| `PI_CC_CONFIG_FILE` | `~/.pi/agent/pi-cc.json` | 设置文件路径；不设时在 Pi 的配置目录里，跟随 `PI_CODING_AGENT_DIR` |
 
 ## 兼容性
 

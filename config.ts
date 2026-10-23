@@ -3,7 +3,8 @@
  *
  * Both pi-cc-loop and pi-cc-monitor read the same small JSON file so a single
  * toggle changes the look of both packages. The file is optional; when it is
- * missing or malformed the defaults apply.
+ * missing or malformed the defaults apply. It sits in Pi's agent directory
+ * (PI_CODING_AGENT_DIR, default ~/.pi/agent), next to Pi's own settings.
  *
  *   ~/.pi/agent/pi-cc.json
  *   {
@@ -11,14 +12,15 @@
  *     "footer": true
  *   }
  *
- * Environment overrides (useful for tests and quick experiments):
+ * Environment overrides (useful for tests and quick experiments) win over the
+ * file while they are set, and are never written to it:
  *   PI_CC_CONFIG_FILE=/path/to/pi-cc.json
  *   PI_CC_COMPACT_MESSAGES=0|1
  *   PI_CC_FOOTER=0|1
  */
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 export interface PiCcConfig {
@@ -36,6 +38,12 @@ export const DEFAULT_CONFIG: PiCcConfig = {
 	footer: true,
 };
 
+/** The environment variable that overrides each setting. */
+const ENV_OVERRIDES: Record<keyof PiCcConfig, string> = {
+	compactMessages: "PI_CC_COMPACT_MESSAGES",
+	footer: "PI_CC_FOOTER",
+};
+
 function envBool(name: string): boolean | undefined {
 	const raw = process.env[name];
 	if (raw === undefined) return undefined;
@@ -44,11 +52,16 @@ function envBool(name: string): boolean | undefined {
 	return undefined;
 }
 
-/** The settings file shared by pi-cc-loop and pi-cc-monitor. */
+/** The variable overriding a setting right now, as `PI_CC_FOOTER=0`; undefined when none is. */
+export function envOverride(key: keyof PiCcConfig): string | undefined {
+	const name = ENV_OVERRIDES[key];
+	return envBool(name) === undefined ? undefined : `${name}=${process.env[name]}`;
+}
+
+/** The settings file shared by pi-cc-loop and pi-cc-monitor, in Pi's agent directory. */
 export function configPath(): string {
 	if (process.env.PI_CC_CONFIG_FILE) return process.env.PI_CC_CONFIG_FILE;
-	const agentDir = process.env.PI_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
-	return path.join(agentDir, "pi-cc.json");
+	return path.join(getAgentDir(), "pi-cc.json");
 }
 
 function readConfig(): PiCcConfig {
@@ -61,10 +74,10 @@ function readConfig(): PiCcConfig {
 	}
 	return {
 		compactMessages:
-			envBool("PI_CC_COMPACT_MESSAGES") ??
+			envBool(ENV_OVERRIDES.compactMessages) ??
 			(typeof file.compactMessages === "boolean" ? file.compactMessages : DEFAULT_CONFIG.compactMessages),
 		footer:
-			envBool("PI_CC_FOOTER") ?? (typeof file.footer === "boolean" ? file.footer : DEFAULT_CONFIG.footer),
+			envBool(ENV_OVERRIDES.footer) ?? (typeof file.footer === "boolean" ? file.footer : DEFAULT_CONFIG.footer),
 	};
 }
 
@@ -81,9 +94,14 @@ export function invalidateConfig(): void {
 	cached = undefined;
 }
 
-/** Merge a patch into the settings file and update the cache. */
+/**
+ * Write the changed keys to the settings file and return the settings now in
+ * effect. Only the patch is written: every other key stays as the user left
+ * it, and an environment override is never copied into the file. It still
+ * wins over the file while it is set, so the returned value can differ from
+ * the patch (see `envOverride`).
+ */
 export function saveConfig(patch: Partial<PiCcConfig>): PiCcConfig {
-	const next = { ...loadConfig(), ...patch };
 	const file = configPath();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	// Keep keys this version does not know about: the file is the user's.
@@ -95,8 +113,8 @@ export function saveConfig(patch: Partial<PiCcConfig>): PiCcConfig {
 		// A missing or malformed file is rewritten from scratch.
 	}
 	const temp = `${file}.tmp`;
-	fs.writeFileSync(temp, `${JSON.stringify({ ...raw, ...next }, null, 2)}\n`, "utf8");
+	fs.writeFileSync(temp, `${JSON.stringify({ ...raw, ...patch }, null, 2)}\n`, "utf8");
 	fs.renameSync(temp, file);
-	cached = next;
-	return next;
+	cached = undefined;
+	return loadConfig();
 }
