@@ -91,7 +91,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 ```jsonc
 {
   "compactMessages": true,   // 触发块和 Monitor 事件用上面的样式；false 为旧的带底色卡片
-  "footer": true             // 底部摘要
+  "footer": true             // 底部摘要：loop 的一行和 Monitor 的 `monitor N`
 }
 ```
 
@@ -111,6 +111,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 - 倒计时取整到分钟，配合"文本相同就不调用"的去重，最多每分钟重绘一次（Pi 每次 `setStatus` 都会触发重绘）
 - 装了 `pi-cc-extensions`：这一行会作为它的一个 chip 出现在第 2 行，可在它的配置面板里移动或隐藏；它会把 ANSI 去掉，所以这里只用纯文本
 - 没装 `pi-cc-extensions`：Pi 内置 footer 会把它和其他扩展的状态拼成一行，加在用量行下面，只在有任务时出现
+- 装了 `pi-cc-monitor`：运行中的 monitor 另有一项 `monitor 2`，和这一行用同一个开关
 
 ## 环境变量
 
