@@ -37,8 +37,8 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
-| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/loop footer on\|off` |
-| 界面设置 | 和 Pi 的 `/settings` 一样的面板，本地命令，不进对话 | `/loop settings` |
+| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
+| 界面设置 | 和 Pi 的 `/settings` 一样的面板，本地命令，不进对话 | `/pi_cc` |
 
 ## 命令
 
@@ -48,12 +48,12 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 /loop [间隔]              跑 loop.md，没有就跑内置维护 prompt
 /loop status              列出当前任务
 /loop stop [id]           停止一个或全部
-/loop footer on|off       本地：底部摘要
-/loop settings            本地：设置面板
 /loop help                本地：帮助
+/pi_cc                    本地：pi-cc 设置面板（见下）
 ```
 
-前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；后三个只改界面，不进对话。
+前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；后两个只改界面，不进对话。
+旧的 `/loop footer`、`/loop settings` 会提示改用 `/pi_cc`，不会当成 loop 请求。
 
 间隔写法没有约束，模型自己解析：`30s`、`5m`、`2h`、`1d`、`check the deploy every 20m`、
 `每2分钟输出一次`、`每分钟打印一次hi` 都可以。小于一分钟会向上取整到每分钟。
@@ -86,7 +86,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 
 ## 设置
 
-两个 pi-cc 扩展共用 Pi 配置目录下的 `pi-cc.json`（默认 `~/.pi/agent/pi-cc.json`，跟随 `PI_CODING_AGENT_DIR`），文件不存在时用默认值：
+三个 pi-cc 扩展共用 Pi 配置目录下的 `pi-cc.json`（默认 `~/.pi/agent/pi-cc.json`，跟随 `PI_CODING_AGENT_DIR`），文件不存在时用默认值：
 
 ```jsonc
 {
@@ -95,8 +95,11 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 }
 ```
 
-在 TUI 里输入 `/loop settings` 会打开设置面板，样子和操作都和 Pi 的 `/settings` 一样：上下键选择，Enter/空格切换，Esc 关闭；
-改动立即保存，两个扩展同时生效。Pi 的 `/settings` 不接受扩展加项，所以面板放在 `/loop settings` 下。
+在 TUI 里输入 `/pi_cc` 会打开设置面板，样子和操作都和 Pi 的 `/settings` 一样：上下键选择，Enter/空格切换，Esc 关闭；
+改动立即保存，所有 pi-cc 扩展同时生效。Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
+
+`/pi_cc` 由三个 pi-cc 包（loop、monitor、plugins）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
+（Pi 会把不同扩展的同名命令变成 `/pi_cc:1`、`/pi_cc:2`，所以由最先加载的包认领注册，会话结束时释放，`/reload` 会重新认领）。
 
 ```text
 ─────────────────────────────────────────────────────────────
@@ -112,8 +115,8 @@ pi-cc settings · ~/.pi/agent/pi-cc.json
 ─────────────────────────────────────────────────────────────
 ```
 
-也可以用文字命令：`/loop settings messages on|off`、`/loop settings footer on|off`（或 `/loop footer on|off`），适合脚本和 RPC；
-非 TUI 模式下，不带参数的 `/loop settings` 输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
+也可以用文字命令：`/pi_cc messages on|off`、`/pi_cc footer on|off`，适合脚本和 RPC；
+非 TUI 模式下，不带参数的 `/pi_cc` 输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
 
 环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES` 优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
 说明里写出是哪个变量；文字输出会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；用文字命令切换会写进文件，但提示会说明变量还在覆盖它。

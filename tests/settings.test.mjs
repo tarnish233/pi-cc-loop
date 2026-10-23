@@ -7,10 +7,12 @@
  * force. The file lives in Pi's agent directory, so PI_CODING_AGENT_DIR moves
  * it along with Pi's own settings.
  *
- * In the TUI, a bare /loop settings opens a panel like Pi's own /settings (an
- * extension cannot add items to that one): the same SettingsList, where
- * Enter/Space changes the selected setting and saves it at once, and Esc
- * closes. Elsewhere it prints the summary.
+ * The command is /pi_cc, shared verbatim with pi-cc-monitor and pi-cc-plugins
+ * (see settings.ts); only the first package to load registers it. In the TUI,
+ * a bare /pi_cc opens a panel like Pi's own /settings (an extension cannot add
+ * items to that one): the same SettingsList, where Enter/Space changes the
+ * selected setting and saves it at once, and Esc closes. Elsewhere it prints
+ * the summary.
  */
 import assert from "node:assert";
 import fs from "node:fs";
@@ -52,6 +54,7 @@ function tempConfig(content) {
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const loop = (h) => h.commands.get("loop");
+const piCc = (h) => h.commands.get("pi_cc");
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -59,7 +62,7 @@ const ENTER = "\r";
 const SPACE = " ";
 const ESC = "\x1b";
 
-/** Run /loop settings with a TUI that hands out the panel the way ctx.ui.custom does. */
+/** Run /pi_cc with a TUI that hands out the panel the way ctx.ui.custom does. */
 function openPanel(h) {
 	let panel;
 	let renders = 0;
@@ -68,7 +71,7 @@ function openPanel(h) {
 		new Promise((resolve) => {
 			panel = factory({ requestRender: () => renders++ }, theme, {}, resolve);
 		});
-	const closed = loop(h).handler("settings", h.ctx);
+	const closed = piCc(h).handler("", h.ctx);
 	assert.ok(panel, "the panel opened");
 	return { panel, closed, screen: () => panel.render(100).join("\n"), renders: () => renders };
 }
@@ -77,7 +80,7 @@ test("a setting writes only its own key: other keys stay, an environment overrid
 	const file = tempConfig({ compactMessages: true, footer: true, mine: "kept" });
 	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_COMPACT_MESSAGES: "0" }, async () => {
 		const h = await start(makeHarness());
-		await loop(h).handler("settings footer off", h.ctx);
+		await piCc(h).handler("footer off", h.ctx);
 		assert.deepEqual(readJson(file), { compactMessages: true, footer: false, mine: "kept" });
 	});
 });
@@ -87,7 +90,7 @@ test("under PI_CC_FOOTER=0, footer on is saved for later but the variable still 
 	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_FOOTER: "0" }, async () => {
 		const h = await start(makeHarness());
 		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
-		await loop(h).handler("settings footer on", h.ctx);
+		await piCc(h).handler("footer on", h.ctx);
 		assert.equal(readJson(file).footer, true, "the file keeps the user's choice");
 		assert.equal(config.loadConfig().footer, false, "the variable wins while it is set");
 		assert.equal(h.status("loop"), undefined, "so the footer stays hidden, as it does in pi-cc-monitor");
@@ -95,10 +98,10 @@ test("under PI_CC_FOOTER=0, footer on is saved for later but the variable still 
 		assert.equal(notice.level, "warning");
 		assert.match(notice.message, /PI_CC_FOOTER=0/);
 
-		await loop(h).handler("settings", h.ctx);
+		await piCc(h).handler("", h.ctx);
 		assert.match(h.notifications.at(-1).message, /footer: +hidden \(PI_CC_FOOTER=0\)/);
-		await loop(h).handler("footer", h.ctx);
-		assert.match(h.notifications.at(-1).message, /currently off \(PI_CC_FOOTER=0\)/);
+		await piCc(h).handler("footer", h.ctx);
+		assert.match(h.notifications.at(-1).message, /footer: +hidden \(PI_CC_FOOTER=0\)/, "a bare /pi_cc footer prints the summary");
 	});
 });
 
@@ -159,7 +162,7 @@ test("outside the TUI, /loop settings prints the summary as before", async () =>
 		h.ctx.ui.custom = async () => {
 			opened = true;
 		};
-		await loop(h).handler("settings", h.ctx);
+		await piCc(h).handler("", h.ctx);
 		assert.equal(opened, false);
 		assert.match(h.notifications.at(-1).message, /pi-cc settings/);
 	});
@@ -171,7 +174,44 @@ test("the settings file lives in Pi's agent directory, so PI_CODING_AGENT_DIR mo
 		// Checked before anything is written: a wrong path would be the user's real file.
 		assert.equal(config.configPath(), path.join(agentDir, "pi-cc.json"));
 		const h = await start(makeHarness());
-		await loop(h).handler("settings footer off", h.ctx);
+		await piCc(h).handler("footer off", h.ctx);
 		assert.deepEqual(readJson(path.join(agentDir, "pi-cc.json")), { footer: false });
 	});
+});
+
+test("only one /pi_cc however many pi-cc packages load: the claim is first come, released at shutdown", async () => {
+	const { registerPiCcCommand } = await loadModule("settings.ts");
+	const claim = Symbol.for("pi-cc:slash-command");
+	globalThis[claim] = undefined;
+	try {
+		const first = makeHarness();
+		registerPiCcCommand(first.pi, "pi-cc-loop");
+		const second = makeHarness();
+		registerPiCcCommand(second.pi, "pi-cc-monitor");
+		assert.ok(first.commands.has("pi_cc"));
+		assert.ok(!second.commands.has("pi_cc"), "the later package leaves /pi_cc to the first");
+
+		// A package re-loading over its own claim re-claims it (/reload re-runs the module).
+		const again = makeHarness();
+		registerPiCcCommand(again.pi, "pi-cc-loop");
+		assert.ok(again.commands.has("pi_cc"));
+
+		// Shutdown releases the name: the next package can take it.
+		await first.handlers.get("session_shutdown")({ type: "session_shutdown" }, first.ctx);
+		const third = makeHarness();
+		registerPiCcCommand(third.pi, "pi-cc-monitor");
+		assert.ok(third.commands.has("pi_cc"), "the claim is released at shutdown");
+	} finally {
+		globalThis[claim] = undefined;
+	}
+});
+
+test("the old /loop settings words redirect instead of starting a loop", async () => {
+	const h = await start(makeHarness());
+	await loop(h).handler("settings", h.ctx);
+	assert.equal(h.sent.length, 0, "no message to the model");
+	assert.match(h.notifications.at(-1).message, /under \/pi_cc/);
+	await loop(h).handler("footer on", h.ctx);
+	assert.equal(h.sent.length, 0, "still no loop started");
+	assert.match(h.notifications.at(-1).message, /under \/pi_cc/);
 });

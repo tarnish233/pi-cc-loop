@@ -1,7 +1,8 @@
 /**
- * render.ts and config.ts are copied verbatim between pi-cc-loop
- * and pi-cc-monitor (they are separate npm packages). This test fails when the
- * copies drift apart; it is skipped when the sibling checkout is missing.
+ * The files copied verbatim between the pi-cc packages (they are separate npm
+ * packages): config.ts and settings.ts in all three, render.ts in pi-cc-loop
+ * and pi-cc-monitor. This test fails when the copies drift apart; each
+ * comparison is skipped when that sibling checkout is missing.
  */
 import assert from "node:assert";
 import fs from "node:fs";
@@ -10,13 +11,25 @@ import test from "node:test";
 import { extensionDir, siblingExtensionDir } from "./helpers.mjs";
 
 const self = path.basename(extensionDir);
-const sibling = siblingExtensionDir(self === "pi-cc-loop" ? "pi-cc-monitor" : "pi-cc-loop");
-const hasSibling = fs.existsSync(path.join(sibling, "package.json"));
+const SIBLINGS = ["pi-cc-loop", "pi-cc-monitor", "pi-cc-plugins"].filter((name) => name !== self);
+/** Which packages carry which shared file. */
+const SHARED = {
+	"config.ts": SIBLINGS,
+	"settings.ts": SIBLINGS,
+	"render.ts": SIBLINGS.filter((name) => name !== "pi-cc-plugins"),
+};
 
-for (const file of ["render.ts", "config.ts"]) {
-	test(`${file} is identical in both packages`, { skip: !hasSibling && "sibling checkout not found" }, () => {
-		const mine = fs.readFileSync(path.join(extensionDir, file), "utf8");
-		const theirs = fs.readFileSync(path.join(sibling, file), "utf8");
-		assert.ok(mine === theirs, `${file} differs from ${path.join(sibling, file)}; copy the newer one over`);
-	});
+for (const [file, siblings] of Object.entries(SHARED)) {
+	// pi-cc-plugins carries no render.ts: it renders nothing from the shared
+	// settings, so the file being absent there is not drift. Skip what self lacks.
+	if (!fs.existsSync(path.join(extensionDir, file))) continue;
+	for (const sibling of siblings) {
+		const theirs = siblingExtensionDir(sibling);
+		const present = fs.existsSync(path.join(theirs, "package.json"));
+		test(`${file} is identical in ${self} and ${sibling}`, { skip: !present && "sibling checkout not found" }, () => {
+			const mine = fs.readFileSync(path.join(extensionDir, file), "utf8");
+			const theirsFile = fs.readFileSync(path.join(theirs, file), "utf8");
+			assert.ok(mine === theirsFile, `${file} differs from ${path.join(theirs, file)}; copy the newer one over`);
+		});
+	}
 }

@@ -29,7 +29,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { configPath, envOverride, invalidateConfig, loadConfig, saveConfig, type PiCcConfig } from "./config.ts";
+import { invalidateConfig, loadConfig } from "./config.ts";
 import {
 	humanSchedule,
 	isUnreachable,
@@ -57,7 +57,7 @@ import {
 	loopCommandGuidelines,
 } from "./prompts.ts";
 import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
-import { settingsPanel } from "./settings-panel.ts";
+import { CONFIG_CHANNEL, registerPiCcCommand } from "./settings.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -74,7 +74,6 @@ const STATE_ENTRY = "pi-cc-loop-state";
 const MONITOR_EVENT_TYPE = "Monitor";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
-const CONFIG_CHANNEL = "pi-cc:config";
 
 /**
  * The event channel this extension publishes on when a chain ends. pi-cc-monitor
@@ -569,38 +568,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const raw = args.trim();
 			const [head, ...rest] = raw.split(/\s+/);
 
-			// Settings configure the extension, not a loop: they stay in code.
+			// Settings moved to /pi_cc: these words stay recognized so they cannot
+			// start a loop by mistake (everything else is a loop request).
 			switch ((head ?? "").toLowerCase()) {
 				case "footer":
-				case "statusline": {
-					const arg = (rest[0] ?? "").toLowerCase();
-					if (!arg) {
-						const current = `${loadConfig().footer ? "on" : "off"}${overrideNote("footer")}`;
-						notify(ctx, `Usage: /loop footer on|off (currently ${current})`, "info");
-						return;
-					}
-					setSetting(ctx, "footer", arg);
-					return;
-				}
+				case "statusline":
 				case "settings":
-				case "config": {
-					const [key, value] = rest;
-					if (!key) {
-						if (!(await openSettingsPanel(ctx))) showSettings(ctx);
-						return;
-					}
-					const name = key.toLowerCase();
-					if (name === "messages" || name === "message") {
-						setSetting(ctx, "messages", value);
-						return;
-					}
-					if (name === "footer" || name === "status") {
-						setSetting(ctx, "footer", value);
-						return;
-					}
-					notify(ctx, "Usage: /loop settings [messages|footer] [on|off]", "info");
+				case "config":
+					notify(ctx, "Settings live under /pi_cc now: /pi_cc footer on|off, /pi_cc messages on|off", "info");
 					return;
-				}
 				case "help":
 				case "--help":
 				case "-h":
@@ -652,10 +628,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop [interval] <prompt>   run <prompt> every <interval> (e.g. 30s, 5m, 2h, 1d)",
 			"/loop <prompt>              self-paced: the agent picks the next delay",
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
-			"/loop footer on|off         show or hide the one-line summary in the footer",
-			"/loop settings              settings panel (a summary outside the TUI)",
-			"/loop settings messages on|off   compact two-line markers",
-			"/loop settings footer on|off     the one-line footer summary",
+			"/pi_cc                      pi-cc settings panel (message style, footer summary)",
 			"",
 			"Esc on a self-paced loop's own turn cancels that loop; fixed-interval loops keep running.",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
@@ -664,85 +637,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		notify(ctx, help, "info");
 	}
 
-	/** ` (PI_CC_FOOTER=0)` when an environment variable decides the setting. */
-	function overrideNote(key: keyof PiCcConfig): string {
-		const override = envOverride(key);
-		return override ? ` (${override})` : "";
-	}
+	// The shared pi-cc settings and their /pi_cc command. The first pi-cc
+	// package to load registers it; this one re-claims its own claim on /reload.
+	registerPiCcCommand(pi, "pi-cc-loop");
 
-	/**
-	 * A bare /loop settings in the TUI: a panel like Pi's /settings, which
-	 * extensions cannot add to. Resolves when the panel closes; false when there
-	 * is no TUI to show it in, so the caller prints the summary instead.
-	 */
-	async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<boolean> {
-		if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") return false;
-		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-			const panel = settingsPanel({
-				theme,
-				file: configPath(),
-				onChange: (field, value) => {
-					applySetting(field, value);
-				},
-				onClose: () => done(undefined),
-			});
-			return {
-				render: (width: number) => panel.render(width),
-				invalidate: () => panel.invalidate(),
-				handleInput: (data: string) => {
-					panel.handleInput(data);
-					tui.requestRender();
-				},
-			};
-		});
-		return true;
-	}
-
-	function showSettings(ctx: ExtensionContext): void {
-		const config = loadConfig();
-		const lines = [
-			`pi-cc settings \u00b7 ${configPath()}`,
-			`  messages:  ${config.compactMessages ? "compact" : "card"}${overrideNote("compactMessages")}`,
-			`  footer:    ${config.footer ? "summary" : "hidden"}${overrideNote("footer")}`,
-			"",
-			"Usage: /loop settings messages on|off",
-			"       /loop settings footer on|off",
-		];
-		notify(ctx, lines.join("\n"), "info");
-	}
-
-	function setSetting(ctx: ExtensionContext, key: "messages" | "footer", raw: string | undefined): void {
-		const value = (raw ?? "").toLowerCase();
-		const on = value === "on" || value === "true" || value === "1";
-		const off = value === "off" || value === "false" || value === "0";
-		if (!on && !off) {
-			showSettings(ctx);
-			return;
-		}
-		const field: keyof PiCcConfig = key === "messages" ? "compactMessages" : "footer";
-		const next = applySetting(field, on);
-		const label = key === "messages" ? "Compact message style" : "Footer summary";
-		const override = envOverride(field);
-		if (override && next[field] !== on) {
-			// The file has the choice, but the variable decides while it is set.
-			notify(ctx, `${label} saved as ${on ? "on" : "off"}, but ${override} overrides it while set`, "warning");
-		} else {
-			notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
-		}
-	}
-
-	/** Save one setting, tell the other pi-cc packages, and repaint the footer. Returns the settings in effect. */
-	function applySetting(field: keyof PiCcConfig, on: boolean): PiCcConfig {
-		const patch: Partial<PiCcConfig> = field === "compactMessages" ? { compactMessages: on } : { footer: on };
-		const next = saveConfig(patch);
-		try {
-			pi.events.emit(CONFIG_CHANNEL, next);
-		} catch {
-			// another extension must not break the command
-		}
-		if (field === "footer") refreshStatus();
-		return next;
-	}
+	// A setting changed (here or in another pi-cc package): the footer follows.
+	pi.events.on(CONFIG_CHANNEL, () => {
+		invalidateConfig();
+		refreshStatus();
+	});
 
 	// ------------------------------------------------------------------ tools
 

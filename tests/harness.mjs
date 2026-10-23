@@ -21,6 +21,9 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 	const renderers = new Map();
 	const toolRenderers = [];
 	const handlers = new Map();
+	// Pi runs every handler an extension registered for an event, so more
+	// than one can exist (the /pi_cc claim adds a second session_shutdown).
+	const handlerLists = new Map();
 	const busEvents = [];
 	const sent = [];
 	const appended = [];
@@ -29,6 +32,26 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 	const statuses = new Map();
 	const statusCalls = [];
 	let registeredToolNames = [];
+
+	// One slot in `handlers` runs every handler registered for that key, the
+	// way Pi dispatches an event to all of a session's extensions.
+	function addHandler(key, handler) {
+		let list = handlerLists.get(key);
+		if (!list) {
+			list = [];
+			handlerLists.set(key, list);
+			handlers.set(key, async (e, ctx) => {
+				let last;
+				for (const fn of [...list]) last = await fn(e, ctx);
+				return last;
+			});
+		}
+		list.push(handler);
+		return () => {
+			const i = list.indexOf(handler);
+			if (i >= 0) list.splice(i, 1);
+		};
+	}
 
 	const pi = {
 		registerCommand(name, options) {
@@ -54,8 +77,7 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 							return result;
 						}
 					: handler;
-			handlers.set(event, wrapped);
-			return () => handlers.delete(event);
+			return addHandler(event, wrapped);
 		},
 		appendEntry(customType, data) {
 			appended.push({ customType, data });
@@ -69,10 +91,13 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 		events: {
 			emit(channel, data) {
 				busEvents.push({ channel, data });
+				// The real bus dispatches to the listeners (loop repaints the
+				// footer from a config event); only recording hid that.
+				const list = handlerLists.get(`bus:${channel}`);
+				if (list) for (const fn of [...list]) fn(data);
 			},
 			on(channel, handler) {
-				handlers.set(`bus:${channel}`, handler);
-				return () => handlers.delete(`bus:${channel}`);
+				return addHandler(`bus:${channel}`, handler);
 			},
 		},
 		getAllTools() {

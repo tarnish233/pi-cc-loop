@@ -114,9 +114,12 @@ test("stop and status are forwarded too, and tell the model which tools to use",
 
 test("settings and help stay in code: they are not loop requests", async () => {
 	const h = await start(makeHarness());
-	await loop(h).handler("settings", h.ctx);
+	await h.commands.get("pi_cc").handler("footer off", h.ctx);
 	assert.equal(h.sent.length, 0, "no message to the model");
-	assert.match(h.notifications.at(-1).message, /pi-cc settings/);
+	assert.match(h.notifications.at(-1).message, /Footer summary disabled/);
+	await loop(h).handler("settings", h.ctx);
+	assert.equal(h.sent.length, 0);
+	assert.match(h.notifications.at(-1).message, /under \/pi_cc/);
 
 	await loop(h).handler("help", h.ctx);
 	assert.equal(h.sent.length, 0);
