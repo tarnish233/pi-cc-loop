@@ -1,22 +1,31 @@
 /**
  * Shared settings for the pi-cc extensions.
  *
- * Both pi-cc-loop and pi-cc-monitor read the same small JSON file so a single
- * toggle changes the look of both packages. The file is optional; when it is
- * missing or malformed the defaults apply. It sits in Pi's agent directory
- * (PI_CODING_AGENT_DIR, default ~/.pi/agent), next to Pi's own settings.
+ * pi-cc-loop, pi-cc-monitor and pi-cc-plugins read the same small JSON file
+ * so a single toggle changes the whole family at once. The file is optional;
+ * when it is missing or malformed the defaults apply. It sits in Pi's agent
+ * directory (PI_CODING_AGENT_DIR, default ~/.pi/agent), next to Pi's own
+ * settings.
  *
  *   ~/.pi/agent/pi-cc.json
  *   {
  *     "compactMessages": true,
- *     "footer": true
+ *     "footer": true,
+ *     "draft": true,
+ *     "turnSummary": true
  *   }
+ *
+ * compactMessages and footer drive loop and monitor; draft and turnSummary
+ * drive pi-cc-plugins. A package that is not installed simply ignores its
+ * keys, and they are kept as the user left them.
  *
  * Environment overrides (useful for tests and quick experiments) win over the
  * file while they are set, and are never written to it:
  *   PI_CC_CONFIG_FILE=/path/to/pi-cc.json
  *   PI_CC_COMPACT_MESSAGES=0|1
  *   PI_CC_FOOTER=0|1
+ *   PI_CC_DRAFT=0|1
+ *   PI_CC_TURN_SUMMARY=0|1
  */
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -31,17 +40,25 @@ export interface PiCcConfig {
 	 * Shared so one switch silences both packages.
 	 */
 	footer: boolean;
+	/** pi-cc-plugins: Ctrl+C keeps what it clears, Up brings it back. */
+	draft: boolean;
+	/** pi-cc-plugins: one line closes every agent run. */
+	turnSummary: boolean;
 }
 
 export const DEFAULT_CONFIG: PiCcConfig = {
 	compactMessages: true,
 	footer: true,
+	draft: true,
+	turnSummary: true,
 };
 
 /** The environment variable that overrides each setting. */
 const ENV_OVERRIDES: Record<keyof PiCcConfig, string> = {
 	compactMessages: "PI_CC_COMPACT_MESSAGES",
 	footer: "PI_CC_FOOTER",
+	draft: "PI_CC_DRAFT",
+	turnSummary: "PI_CC_TURN_SUMMARY",
 };
 
 function envBool(name: string): boolean | undefined {
@@ -78,6 +95,10 @@ function readConfig(): PiCcConfig {
 			(typeof file.compactMessages === "boolean" ? file.compactMessages : DEFAULT_CONFIG.compactMessages),
 		footer:
 			envBool(ENV_OVERRIDES.footer) ?? (typeof file.footer === "boolean" ? file.footer : DEFAULT_CONFIG.footer),
+		draft: envBool(ENV_OVERRIDES.draft) ?? (typeof file.draft === "boolean" ? file.draft : DEFAULT_CONFIG.draft),
+		turnSummary:
+			envBool(ENV_OVERRIDES.turnSummary) ??
+			(typeof file.turnSummary === "boolean" ? file.turnSummary : DEFAULT_CONFIG.turnSummary),
 	};
 }
 

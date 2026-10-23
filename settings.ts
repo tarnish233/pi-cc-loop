@@ -70,6 +70,20 @@ const SETTINGS: SettingSpec[] = [
 		off: "off",
 		description: "One line in Pi's footer while loops or monitors run: loop 2 \u00b7 next 3m, monitor 2.",
 	},
+	{
+		field: "draft",
+		label: "Draft recall",
+		on: "on",
+		off: "off",
+		description: "pi-cc-plugins: Ctrl+C keeps what it clears; Up on the empty editor brings it back.",
+	},
+	{
+		field: "turnSummary",
+		label: "Turn summary",
+		on: "on",
+		off: "off",
+		description: "pi-cc-plugins: one line closes every agent run \u2014 tools, duration, done time.",
+	},
 ];
 
 /**
@@ -176,9 +190,13 @@ function showSettings(ctx: ExtensionContext): void {
 		`pi-cc settings \u00b7 ${configPath()}`,
 		`  messages:  ${config.compactMessages ? "compact" : "card"}${overrideNote("compactMessages")}`,
 		`  footer:    ${config.footer ? "summary" : "hidden"}${overrideNote("footer")}`,
+		`  draft:     ${config.draft ? "on" : "off"}${overrideNote("draft")}`,
+		`  summary:   ${config.turnSummary ? "on" : "off"}${overrideNote("turnSummary")}`,
 		"",
 		"Usage: /pi_cc messages on|off",
 		"       /pi_cc footer on|off",
+		"       /pi_cc draft on|off",
+		"       /pi_cc summary on|off",
 	];
 	notify(ctx, lines.join("\n"), "info");
 }
@@ -214,7 +232,24 @@ async function openSettingsPanel(ctx: ExtensionCommandContext, apply: ApplySetti
 	return true;
 }
 
-function setSetting(ctx: ExtensionContext, apply: ApplySetting, key: "messages" | "footer", raw: string | undefined): void {
+/** The command word for each setting: the field it writes and its notice label. */
+const KEYS: Record<string, { field: keyof PiCcConfig; label: string }> = {
+	messages: { field: "compactMessages", label: "Compact message style" },
+	message: { field: "compactMessages", label: "Compact message style" },
+	footer: { field: "footer", label: "Footer summary" },
+	status: { field: "footer", label: "Footer summary" },
+	statusline: { field: "footer", label: "Footer summary" },
+	draft: { field: "draft", label: "Draft recall" },
+	summary: { field: "turnSummary", label: "Turn summary" },
+	turnsummary: { field: "turnSummary", label: "Turn summary" },
+};
+
+function setSetting(ctx: ExtensionContext, apply: ApplySetting, key: string, raw: string | undefined): void {
+	const spec = KEYS[key];
+	if (!spec) {
+		showSettings(ctx);
+		return;
+	}
 	const value = (raw ?? "").toLowerCase();
 	const on = value === "on" || value === "true" || value === "1";
 	const off = value === "off" || value === "false" || value === "0";
@@ -222,15 +257,14 @@ function setSetting(ctx: ExtensionContext, apply: ApplySetting, key: "messages" 
 		showSettings(ctx);
 		return;
 	}
-	const field: keyof PiCcConfig = key === "messages" ? "compactMessages" : "footer";
+	const field = spec.field;
 	const next = apply(field, on);
-	const label = key === "messages" ? "Compact message style" : "Footer summary";
 	const override = envOverride(field);
 	if (override && next[field] !== on) {
 		// The file has the choice, but the variable decides while it is set.
-		notify(ctx, `${label} saved as ${on ? "on" : "off"}, but ${override} overrides it while set`, "warning");
+		notify(ctx, `${spec.label} saved as ${on ? "on" : "off"}, but ${override} overrides it while set`, "warning");
 	} else {
-		notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
+		notify(ctx, `${spec.label} ${on ? "enabled" : "disabled"}`, "info");
 	}
 }
 
@@ -248,7 +282,7 @@ export function registerPiCcCommand(pi: ExtensionAPI, owner: string): void {
 	});
 
 	const applySetting: ApplySetting = (field, on) => {
-		const patch: Partial<PiCcConfig> = field === "compactMessages" ? { compactMessages: on } : { footer: on };
+		const patch: Partial<PiCcConfig> = { [field]: on };
 		const next = saveConfig(patch);
 		try {
 			pi.events.emit(CONFIG_CHANNEL, next);
@@ -264,25 +298,17 @@ export function registerPiCcCommand(pi: ExtensionAPI, owner: string): void {
 			const words = args.trim().split(/\s+/).filter(Boolean);
 			// "/pi_cc settings footer on" reads like the old /loop settings: drop the noun.
 			if (words[0] === "settings" || words[0] === "config") words.shift();
-			switch ((words[0] ?? "").toLowerCase()) {
-				case "":
-					if (!(await openSettingsPanel(ctx, applySetting))) showSettings(ctx);
-					return;
-				case "messages":
-				case "message":
-					setSetting(ctx, applySetting, "messages", words[1]);
-					return;
-				case "footer":
-				case "status":
-				case "statusline":
-					setSetting(ctx, applySetting, "footer", words[1]);
-					return;
-				case "help":
-					showSettings(ctx);
-					return;
-				default:
-					notify(ctx, "Usage: /pi_cc \u00b7 /pi_cc messages on|off \u00b7 /pi_cc footer on|off", "info");
+			if (words.length === 0) {
+				if (!(await openSettingsPanel(ctx, applySetting))) showSettings(ctx);
+				return;
 			}
+			// "/pi_cc help", or a word that is not a setting: the summary says what is.
+			const key = words[0].toLowerCase();
+			if (key === "help" || !KEYS[key]) {
+				showSettings(ctx);
+				return;
+			}
+			setSetting(ctx, applySetting, key, words[1]);
 		},
 	});
 }
