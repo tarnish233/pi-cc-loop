@@ -199,6 +199,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const ctx = lastCtx;
 			if (ctx) notify(ctx, `loop ${job.id} ran its final time: recurring jobs expire after ${maxAgeDays()} days`);
 		},
+		onDispatchError: (job, error) => {
+			const ctx = lastCtx;
+			if (ctx) notify(ctx, `loop ${job.id}: this tick could not be delivered and was skipped (${error.message})`, "warning");
+		},
 		onScan: (now) => {
 			durable?.maintain(now);
 			// The countdown is coarse, so this is a string compare most seconds.
@@ -429,8 +433,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	function deliverTick(job: LoopJob): void {
 		const tick = Math.max(tickCounters.get(job.prompt) ?? 0, job.tickCount ?? 0) + 1;
-		tickCounters.set(job.prompt, tick);
-		job.tickCount = tick;
 		const body = resolvePrompt(job.prompt, job.kind === "cron" ? "cron" : "wakeup");
 		// A fixed-interval tick is what it is - a scheduled task - and a
 		// self-paced tick keeps the loop framing. The rules for the run are
@@ -455,6 +457,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// only recorded and nothing ever happens.
 			{ deliverAs: "followUp", triggerTurn: true },
 		);
+		// Counted only once the message is in: a throw here means the tick never
+		// happened, so it must not use up a number.
+		tickCounters.set(job.prompt, tick);
+		job.tickCount = tick;
 
 		if (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires) {
 			const ctx = lastCtx;
@@ -471,7 +477,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	/** The tool names to exclude from pi-cc-extensions' global styling. */
 	/**
 	 * A run finished without an abort: self-paced chains whose tick the model
 	 * did not reschedule get their one keepalive, or end.
@@ -585,13 +590,35 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// drives cron_create / cron_list / cron_delete / schedule_wakeup itself.
 			// The per-run rules travel with the run through before_agent_start.
 			const text = raw ? `/loop ${raw}` : "/loop";
-			queueRun({ content: text, guidelines: [loopCommandGuidelines(raw)] });
-			// Pi runs an extension command even while a turn is streaming, and its
-			// sendUserMessage throws unless a lane is named: "Agent is already
-			// processing. Specify streamingBehavior". `followUp` is that lane - the
-			// request waits for the current turn to end, which is where a /loop
-			// belongs anyway. When idle the option is ignored and the turn starts.
-			pi.sendUserMessage(text, { expandPromptTemplates: false, deliverAs: "followUp" });
+			const guidelines = [loopCommandGuidelines(raw)];
+			const send = () => {
+				// The user asking for this loop again is a new loop: the mark that
+				// keeps a late schedule_wakeup from reviving a stopped chain must
+				// not block it.
+				stoppedPrompts.delete(normalizePrompt(raw) || LOOP_FILE_SENTINEL);
+				queueRun({ content: text, guidelines });
+				try {
+					pi.sendUserMessage(text, { expandPromptTemplates: false, deliverAs: "followUp" });
+				} catch {
+					// The session was replaced while this request waited.
+				}
+			};
+
+			// A run that is already streaming has passed before_agent_start, so
+			// sending now would split the request in two: the text would be queued
+			// into that run without its rules, and the model would work through it
+			// twice. Wait for the run to end and start a clean one instead - the
+			// same wait a follow-up lane would impose, without losing the rules.
+			if (!ctx.isIdle() && typeof ctx.waitForIdle === "function") {
+				notify(ctx, `${text} will start when the current turn ends`, "info");
+				void ctx.waitForIdle().then(send, () => {});
+				return;
+			}
+			// The followUp lane is the fallback for a Pi without waitForIdle: a
+			// sendUserMessage from a streaming turn throws without one ("Agent is
+			// already processing. Specify streamingBehavior"). When idle the option
+			// is ignored and the turn starts.
+			send();
 		},
 	});
 

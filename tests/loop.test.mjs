@@ -57,6 +57,36 @@ test("a request without an interval is explained as self-paced", async () => {
 	assert.match(text, /Monitor/);
 });
 
+test("/loop typed mid-turn waits for a clean turn instead of splitting the request", async () => {
+	const h = await start(makeHarness());
+	// Streaming: before_agent_start already fired for that run, so sending now
+	// would deliver the text without its rules - and the same request twice.
+	h.state.idle = false;
+	let release;
+	h.ctx.waitForIdle = () =>
+		new Promise((resolve) => {
+			release = () => {
+				h.state.idle = true;
+				resolve();
+			};
+		});
+	await loop(h).handler("check the deploy", h.ctx);
+
+	assert.equal(h.sent.length, 0, "nothing goes into the run that already started");
+
+	release();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(h.sent.length, 1, "then exactly one user message");
+	assert.equal(h.sent[0].kind, "user");
+	assert.equal(h.sent[0].content, "/loop check the deploy");
+	assert.equal(h.sent[0].options.deliverAs, "followUp");
+
+	const event = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	assert.match(guidelinesOf(event), /schedule_wakeup/, "with its rules in the run's system prompt");
+	assert.ok(guidelinesOf(event).includes('"check the deploy"'), "quoted for the model");
+});
+
 test("a bare /loop points at loop.md", async () => {
 	const h = await start(makeHarness());
 	await loop(h).handler("", h.ctx);

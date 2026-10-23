@@ -152,3 +152,27 @@ test("the reason for the delay rides in the header", async () => {
 	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
 	assert.match(text, /\u273b loop #7 \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 CI run still going/);
 });
+
+test("with compactMessages off, a scheduled fire is still a scheduled task, not a loop tick", async () => {
+	const { renderers } = makeHarness();
+	fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: false }), "utf8");
+	(await loadModule("config.ts")).invalidateConfig();
+	try {
+		const cron = tickMessage("[scheduled task j1 \u00b7 Every minute \u00b7 ...]\nprint hi", {
+			kind: "cron",
+			jobId: "j1",
+			cron: "* * * * *",
+			prompt: "print hi",
+		});
+		const card = render(renderers.get("pi-cc-loop-tick"), cron, false);
+		assert.ok(card.bgCalls.count > 0, "the padded card");
+		assert.match(card.text, /Running scheduled task \u00b7 print hi/);
+		assert.ok(!card.text.includes("loop tick"), card.text);
+
+		const wakeup = tickMessage("[loop tick #7 \u00b7 ...]\nwatch CI", { kind: "wakeup", jobId: "abc", prompt: "watch CI" });
+		assert.match(render(renderers.get("pi-cc-loop-tick"), wakeup, false).text, /loop #7 \u00b7 watch CI/);
+	} finally {
+		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
+		(await loadModule("config.ts")).invalidateConfig();
+	}
+});

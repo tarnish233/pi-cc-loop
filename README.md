@@ -24,7 +24,8 @@ pi install npm:pi-cc-loop
 | 固定间隔 | 模型用 `cron_create` 建一个 cron（`5m` → `*/5 * * * *`），然后立即执行一次；触发时按"定时任务"呈现 | `/loop 5m <prompt>`、`/loop 每分钟 ...` |
 | 自选间隔 | 运行一次后用 `schedule_wakeup` 决定下次延迟（60–3600s） | `/loop <prompt>` |
 | loop.md | 请求本身没有任务时（裸 `/loop` 或只给间隔）由 `.pi/loop.md` 提供，每次触发重读；首轮由模型自己读文件 | `/loop`、`/loop 15m` |
-| 停止 / 查看 | 也走对话：模型用 `cron_list` / `cron_delete`（自选间隔用 `schedule_wakeup` + `stop: true`） | `/loop stop`、`/loop status` |
+| 停止 / 查看 | 也走对话：模型用 `cron_list` / `cron_delete`（自选间隔用 `schedule_wakeup` + `stop: true`）；停掉后再输入同一个 `/loop` 会重新开始 | `/loop stop`、`/loop status` |
+| 回合中输入 | 模型正在回复时输入 `/loop ...`：底部提示"will start when the current turn ends"，当前回合结束后作为新的一轮开始（不会混进正在进行的回合） | 自动 |
 | 漏跑合并 | agent 忙时到点只记一次 pending，空闲后发一条 | 自动 |
 | 兜底心跳 | 模型忘记调度时 arm 一次 20 分钟心跳，预算 1 次 | 自动 |
 | Esc 取消 | 打断属于某个自定步调 loop 的回合（它的 tick、它的 Monitor 唤醒的回合）时取消该 loop；无关回合、空闲时不受影响；固定间隔不受影响 | Esc |

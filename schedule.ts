@@ -159,6 +159,8 @@ export interface SchedulerHooks {
 	onExpire?: (job: LoopJob) => void;
 	/** Runs at the start of every scan (housekeeping such as durable jobs). */
 	onScan?: (now: number) => void;
+	/** A delivery threw (Pi's API is stale once the session is replaced); the tick is dropped. */
+	onDispatchError?: (job: LoopJob, error: Error) => void;
 }
 
 /** Claude Code checks for due tasks once a second. */
@@ -277,7 +279,12 @@ export class LoopScheduler {
 
 	/** Run one scan: housekeeping, mark due jobs pending, dispatch the oldest when idle. */
 	tick(now = Date.now()): void {
-		this.hooks.onScan?.(now);
+		try {
+			this.hooks.onScan?.(now);
+		} catch {
+			// Housekeeping (the durable file, the footer) is best effort. This runs
+			// from a timer, where an exception would take Pi down with it.
+		}
 		this.markDue(now);
 		this.tryDispatch(now);
 	}
@@ -336,7 +343,14 @@ export class LoopScheduler {
 			finished = next === null;
 		}
 
-		this.hooks.dispatch(job);
+		try {
+			this.hooks.dispatch(job);
+		} catch (error) {
+			// Dropped, like any tick that fails to start; the job keeps its next
+			// run. Not rethrown: this runs from a timer, where an exception would
+			// take Pi down with it.
+			this.hooks.onDispatchError?.(job, error instanceof Error ? error : new Error(String(error)));
+		}
 		if (finished) this.jobs.delete(job.id);
 		this.hooks.afterDispatch?.(job, finished);
 		if (expired) this.hooks.onExpire?.(job);

@@ -154,7 +154,6 @@ export function isUnreachable(expression: string): boolean {
 	return nextFireAfter(fields, new Date(), 366) === null;
 }
 
-/** The unit words Claude Code's /loop accepts in a trailing "every N <unit>" clause. */
 /**
  * The divisor of `total` closest to `n`.
  *
@@ -176,15 +175,6 @@ function nearestDivisor(n: number, total: number): number {
 	return best;
 }
 
-/**
- * Parse `每2分钟输出一次` / `输出一次 每隔 2 小时`: an explicit interval written
- * in Chinese. The digit is required on purpose: `每天都有一个测试失败` is a
- * prompt, not a schedule, and Claude Code's own splitting is just as literal.
- */
-/**
- * Parse a trailing `every 20m` / `every 5 min` / `every 2 hours` clause, with
- * the unit words Claude Code accepts.
- */
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 

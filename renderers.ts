@@ -67,7 +67,9 @@ export function renderScheduledMessage(message: any, options: any, theme: Theme)
 				: "\u273b loop";
 
 	if (!loadConfig().compactMessages) {
-		const header = details.missed ? label : `loop tick #${details.tickCount ?? "?"} \u00b7 ${displayPrompt(prompt)}`;
+		// Same naming as the block: a cron fire is a scheduled task, only a
+		// self-paced tick is a loop.
+		const header = details.missed ? label : `${label.replace("\u273b ", "")} \u00b7 ${displayPrompt(prompt)}`;
 		return renderCard({ header, body: prompt, expanded: options.expanded, outputPad: options.outputPad, theme });
 	}
 

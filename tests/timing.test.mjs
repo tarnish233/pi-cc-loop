@@ -17,6 +17,58 @@ const { DEFAULT_TIMING, LoopScheduler, nextRunTime } = schedule;
 const at = (iso) => new Date(iso).getTime();
 const job = (id, cronExpr, recurring = true) => ({ id, cron: cronExpr, recurring });
 
+test("a delivery that throws is dropped and reported, without escaping the scan", () => {
+	const errors = [];
+	const scheduler = new LoopScheduler({
+		dispatch: () => {
+			throw new Error("This extension ctx is stale");
+		},
+		canDispatch: () => true,
+		onDispatchError: (job, error) => errors.push(`${job.id}: ${error.message}`),
+	});
+	const added = scheduler.add({
+		id: "j1",
+		kind: "cron",
+		cron: "* * * * *",
+		prompt: "print hi",
+		recurring: true,
+		createdAt: Date.now(),
+		durable: false,
+		source: "cron_create",
+	});
+	added.nextFireAt = Date.now() - 1000;
+
+	assert.doesNotThrow(() => scheduler.tick(), "an exception in a timer callback would crash Pi");
+	assert.deepEqual(errors, ["j1: This extension ctx is stale"]);
+	assert.ok(!added.pending, "dropped, like any tick that fails to start");
+	assert.ok(added.nextFireAt > Date.now(), "the job keeps its next run");
+});
+
+test("a failing housekeeping step does not stop due jobs or escape the scan", () => {
+	const delivered = [];
+	const scheduler = new LoopScheduler({
+		dispatch: (job) => delivered.push(job.id),
+		canDispatch: () => true,
+		// e.g. .pi/scheduled_tasks.json became unwritable
+		onScan: () => {
+			throw new Error("EACCES: permission denied");
+		},
+	});
+	const added = scheduler.add({
+		id: "j2",
+		kind: "cron",
+		cron: "* * * * *",
+		prompt: "print hi",
+		recurring: true,
+		createdAt: Date.now(),
+		durable: false,
+		source: "cron_create",
+	});
+	added.nextFireAt = Date.now() - 1000;
+	assert.doesNotThrow(() => scheduler.tick(), "an exception in a timer callback would crash Pi");
+	assert.deepEqual(delivered, ["j2"]);
+});
+
 test("a recurring job runs late by a fixed per-job offset, at most half its period", () => {
 	const from = at("2026-10-22T10:02:00");
 	const slot = at("2026-10-22T10:10:00");

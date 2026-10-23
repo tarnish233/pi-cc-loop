@@ -134,6 +134,27 @@ test("resuming a session does not restore a self-paced loop, and says so", async
 	}
 });
 
+test("after /loop stop, typing the same /loop again starts it again", async () => {
+	const h = await start(makeHarness());
+	await startSelfPaced(h, "watch CI", 600);
+	await h.tools.get("schedule_wakeup").execute("c", { stop: true }, undefined, undefined, h.ctx);
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "the chain is gone");
+
+	// A late wakeup from a stale turn must still be refused...
+	await assert.rejects(
+		h.tools
+			.get("schedule_wakeup")
+			.execute("c", { delaySeconds: 600, reason: "late", prompt: "watch CI" }, undefined, undefined, h.ctx),
+		/was stopped/,
+	);
+
+	// ...but the user asking for the loop again is a new loop.
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	assert.ok(chain, "the same prompt can be armed again");
+});
+
 test("restoring drops one-shots whose time passed and recurring jobs that expired", async () => {
 	const h = await start(makeHarness());
 	const create = (args) => h.tools.get("cron_create").execute("c", args, undefined, undefined, h.ctx);
