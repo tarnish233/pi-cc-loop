@@ -38,7 +38,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
 | 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/loop footer on\|off` |
-| 界面设置 | 本地命令，不进对话 | `/loop settings ...` |
+| 界面设置 | 和 Pi 的 `/settings` 一样的面板，本地命令，不进对话 | `/loop settings` |
 
 ## 命令
 
@@ -49,7 +49,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 /loop status              列出当前任务
 /loop stop [id]           停止一个或全部
 /loop footer on|off       本地：底部摘要
-/loop settings ...        本地：界面设置
+/loop settings            本地：设置面板
 /loop help                本地：帮助
 ```
 
@@ -95,11 +95,28 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 }
 ```
 
-用 `/loop settings messages on|off`、`/loop settings footer on|off`（或 `/loop footer on|off`）切换，两个扩展同时生效。
-命令只写改动的那一项，文件里的其他内容原样保留。
+在 TUI 里输入 `/loop settings` 会打开设置面板，样子和操作都和 Pi 的 `/settings` 一样：上下键选择，Enter/空格切换，Esc 关闭；
+改动立即保存，两个扩展同时生效。Pi 的 `/settings` 不接受扩展加项，所以面板放在 `/loop settings` 下。
 
-环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES` 优先于文件，但不会被写进文件。设着的时候，`/loop settings` 会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；
-用命令切换会写进文件，但提示会说明变量还在覆盖它。
+```text
+─────────────────────────────────────────────────────────────
+pi-cc settings · ~/.pi/agent/pi-cc.json
+
+→ Message style   compact
+  Footer summary  on
+
+  How scheduled fires and Monitor events are drawn. compact: ✻ header
+  and indented body; card: the old padded card.
+
+  Enter/Space to change · Esc to cancel
+─────────────────────────────────────────────────────────────
+```
+
+也可以用文字命令：`/loop settings messages on|off`、`/loop settings footer on|off`（或 `/loop footer on|off`），适合脚本和 RPC；
+非 TUI 模式下，不带参数的 `/loop settings` 输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
+
+环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES` 优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
+说明里写出是哪个变量；文字输出会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；用文字命令切换会写进文件，但提示会说明变量还在覆盖它。
 
 ## 底部摘要
 

@@ -57,6 +57,7 @@ import {
 	loopCommandGuidelines,
 } from "./prompts.ts";
 import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
+import { settingsPanel } from "./settings-panel.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -585,7 +586,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				case "config": {
 					const [key, value] = rest;
 					if (!key) {
-						showSettings(ctx);
+						if (!(await openSettingsPanel(ctx))) showSettings(ctx);
 						return;
 					}
 					const name = key.toLowerCase();
@@ -652,7 +653,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop <prompt>              self-paced: the agent picks the next delay",
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
 			"/loop footer on|off         show or hide the one-line summary in the footer",
-			"/loop settings              show UI settings",
+			"/loop settings              settings panel (a summary outside the TUI)",
 			"/loop settings messages on|off   compact two-line markers",
 			"/loop settings footer on|off     the one-line footer summary",
 			"",
@@ -667,6 +668,34 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	function overrideNote(key: keyof PiCcConfig): string {
 		const override = envOverride(key);
 		return override ? ` (${override})` : "";
+	}
+
+	/**
+	 * A bare /loop settings in the TUI: a panel like Pi's /settings, which
+	 * extensions cannot add to. Resolves when the panel closes; false when there
+	 * is no TUI to show it in, so the caller prints the summary instead.
+	 */
+	async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<boolean> {
+		if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") return false;
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			const panel = settingsPanel({
+				theme,
+				file: configPath(),
+				onChange: (field, value) => {
+					applySetting(field, value);
+				},
+				onClose: () => done(undefined),
+			});
+			return {
+				render: (width: number) => panel.render(width),
+				invalidate: () => panel.invalidate(),
+				handleInput: (data: string) => {
+					panel.handleInput(data);
+					tui.requestRender();
+				},
+			};
+		});
+		return true;
 	}
 
 	function showSettings(ctx: ExtensionContext): void {
@@ -691,13 +720,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		const field: keyof PiCcConfig = key === "messages" ? "compactMessages" : "footer";
-		const patch: Partial<PiCcConfig> = key === "messages" ? { compactMessages: on } : { footer: on };
-		const next = saveConfig(patch);
-		try {
-			pi.events.emit(CONFIG_CHANNEL, next);
-		} catch {
-			// another extension must not break the command
-		}
+		const next = applySetting(field, on);
 		const label = key === "messages" ? "Compact message style" : "Footer summary";
 		const override = envOverride(field);
 		if (override && next[field] !== on) {
@@ -706,7 +729,19 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		} else {
 			notify(ctx, `${label} ${on ? "enabled" : "disabled"}`, "info");
 		}
-		if (key === "footer") refreshStatus();
+	}
+
+	/** Save one setting, tell the other pi-cc packages, and repaint the footer. Returns the settings in effect. */
+	function applySetting(field: keyof PiCcConfig, on: boolean): PiCcConfig {
+		const patch: Partial<PiCcConfig> = field === "compactMessages" ? { compactMessages: on } : { footer: on };
+		const next = saveConfig(patch);
+		try {
+			pi.events.emit(CONFIG_CHANNEL, next);
+		} catch {
+			// another extension must not break the command
+		}
+		if (field === "footer") refreshStatus();
+		return next;
 	}
 
 	// ------------------------------------------------------------------ tools
