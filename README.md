@@ -99,7 +99,20 @@ pi install npm:pi-cc-loop
 ```bash
 node --test tests/*.test.mjs
 npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
+node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
+
+### 缓存约束
+
+提示缓存按前缀匹配（工具 → system prompt → 消息），扩展只能往对话末尾追加：
+
+- **不改 system prompt**：每轮需要的规则作为隐藏消息附在这一轮后面（`before_agent_start` 返回 `message`），不写 `promptGuidelines`，不返回 `systemPrompt`。
+- **不动工具集**：工具在加载时一次注册，描述是固定文本；不调用 `setActiveTools`，会话中途不改描述。
+- **不改历史**：不注册 `context` / `context_with_system` / `before_provider_request`。
+
+`tests/cache.test.mjs` 守住这三条。`scripts/cache-check.mjs` 用真实 provider 依次走一遍固定间隔 `/loop`、触发、普通对话、`/loop stop`、Monitor 事件、自定步调 `/loop` 和它的触发，逐个请求看缓存读取量：
+读到的明显少于上一个请求发出的内容就报 MISS（退出码 1）。provider 偶尔会自己丢缓存，同一步骤重跑仍然 MISS 才是扩展的问题。
+默认模型 `opencode-go/beam-free` 免费；`--model` 可换，脚本最后会打印本次花费。
 
 ## 说明
 
