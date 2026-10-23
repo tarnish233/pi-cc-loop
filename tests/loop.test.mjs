@@ -8,6 +8,7 @@ import test from "node:test";
 import {
 	createCron,
 	guidelinesOf,
+	systemGuidelinesOf,
 	makeDue,
 	makeHarness,
 	runEvent,
@@ -149,9 +150,45 @@ test("a scheduled fire says it fires on its own, and the reader sees no provenan
 	assert.equal(sent.options.deliverAs, "followUp", "between turns, low priority");
 	assert.equal(sent.options.triggerTurn, true, "a fire must start a run, not just sit in the transcript");
 
+	assert.ok(textOf(sent).includes(`cron_delete with id ${job.id}`), "how to cancel it");
 	const event = runEvent(sent);
 	await h.handlers.get("before_agent_start")(event, h.ctx);
-	assert.match(guidelinesOf(event), /fixed-interval \/loop/);
+	assert.equal(guidelinesOf(event), "", "no extra message every minute");
+});
+
+test("no loop run touches the system prompt: the rules ride along as a hidden message", async () => {
+	// Providers without mid-conversation system messages rebuild the leading
+	// system prompt from every change, so a per-run rule there invalidates the
+	// whole cached prefix - twice: going into the run and coming back out.
+	const h = await start(makeHarness());
+	const check = async (sent, label, { rules }) => {
+		const event = runEvent(sent);
+		await h.handlers.get("before_agent_start")(event, h.ctx);
+		assert.equal(systemGuidelinesOf(event), "", `${label}: system prompt untouched`);
+		if (!rules) {
+			assert.equal(event.result?.message, undefined, `${label}: nothing appended`);
+			return;
+		}
+		const message = event.result?.message;
+		assert.equal(message?.customType, "pi-cc-loop-rules", `${label}: a rules message`);
+		assert.equal(message?.display, false, `${label}: hidden from the transcript view`);
+		assert.match(message?.content ?? "", rules, label);
+	};
+
+	await loop(h).handler("5m check the deploy", h.ctx);
+	await check(h.sent.at(-1), "/loop request", { rules: /Fixed interval/ });
+
+	const job = await createCron(h, { cron: "* * * * *", prompt: "print hi" });
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	await check(h.sent.at(-1), "cron tick", { rules: null });
+	await runTurn(h);
+
+	const chain = await startSelfPaced(h, "watch CI", 60);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await check(h.sent.at(-1), "self-paced tick", { rules: /A self-paced `\/loop` is running/ });
 });
 
 test("a self-paced tick keeps the loop framing and the reschedule rules", async () => {

@@ -33,7 +33,10 @@ export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed 
  * it "loop" here is what made the model try to reschedule.
  */
 export const SCHEDULED_TASK_PROVENANCE =
-	"[scheduled task {id} \u00b7 {schedule} \u00b7 started by the schedule, not typed by the user; it fires the next tick on its own, so do not call schedule_wakeup]";
+	"[scheduled task {id} \u00b7 {schedule} \u00b7 started by the schedule, not typed by the user; it fires the next tick on its own, so do not call schedule_wakeup; to cancel it, call cron_delete with id {id}]";
+
+/** The first line of the hidden rules message a /loop request or a self-paced tick carries. */
+export const RULES_PROVENANCE = "[/loop instructions for this run \u00b7 added by pi-cc-loop, not typed by the user]";
 
 const DELAY_ADVICE = [
 	"- Pick the delay from what you are waiting for. For idle ticks with nothing specific to watch, use 1200-1800s.",
@@ -104,18 +107,6 @@ const LOOP_GUIDELINES = [
 ].join("\n");
 
 /**
- * Fixed-interval loops fire their own next tick, so a wakeup scheduled from
- * one would run the same prompt twice. Claude Code's tick says the same:
- * "The recurring cron will fire the next tick automatically — do not call
- * ScheduleWakeup from this tick."
- */
-const CRON_TICK_GUIDELINES = [
-	"This is a fixed-interval /loop (job {id}, {schedule}): the schedule fires the next tick on its own.",
-	"Do not call `schedule_wakeup` from this tick — it would run this prompt a second time on a self-paced",
-	"schedule. To cancel the loop, call `cron_delete` with id {id}.",
-].join("\n");
-
-/**
  * How a self-paced loop uses the Monitor tool, after Claude Code's /loop
  * skill: arm a monitor only when the next iteration waits on an event, arm it
  * once, and keep the wakeup as a long fallback heartbeat. A monitor event
@@ -174,10 +165,6 @@ export function loopCommandGuidelines(raw: string): string {
 
 export function loopGuidelines(prompt: string): string {
 	return fill(LOOP_GUIDELINES, { prompt: describePrompt(prompt), quoted: quote(prompt) });
-}
-
-export function cronTickGuidelines(id: string, schedule: string): string {
-	return fill(CRON_TICK_GUIDELINES, { id, schedule });
 }
 
 export function monitorGuidelines(prompt: string): string {

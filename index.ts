@@ -44,12 +44,12 @@ import {
 	CRON_DELETE_SNIPPET,
 	CRON_LIST_DESCRIPTION,
 	CRON_LIST_SNIPPET,
-	cronTickGuidelines,
 	LOOP_FILE_SENTINEL,
 	loopGuidelines,
 	missedJobsMessage,
 	monitorGuidelines,
 	provenance,
+	RULES_PROVENANCE,
 	SCHEDULE_WAKEUP_DESCRIPTION,
 	scheduledTaskProvenance,
 	SCHEDULE_WAKEUP_SNIPPET,
@@ -420,6 +420,27 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * can draw something else for the reader (`renderScheduledMessage`).
 	 */
 	const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
+
+	/**
+	 * The per-run rules, appended to the run as a hidden message instead of
+	 * being written into the system prompt. Providers that cannot carry a system
+	 * message mid-conversation get the leading system prompt rebuilt from every
+	 * change, so a rule that comes and goes with each tick would invalidate the
+	 * whole cached prefix on the way into the run and again on the way out.
+	 * Claude Code does the same: its /loop instructions are part of the message.
+	 */
+	const RULES_MESSAGE_TYPE = "pi-cc-loop-rules";
+
+	function rulesFor(guidelines: string[]) {
+		if (!guidelines.length) return undefined;
+		return {
+			message: {
+				customType: RULES_MESSAGE_TYPE,
+				content: [RULES_PROVENANCE, ...guidelines].join("\n\n"),
+				display: false,
+			},
+		};
+	}
 
 	/** The text the model gets for a prompt: the loop.md sentinel expands at fire time. */
 	function resolvePrompt(prompt: string, mode: TickMode): string {
@@ -1019,10 +1040,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const queued = takeQueuedRun(event.prompt);
 			if (!queued) return;
 			currentRun = { chainId: queued.chainId, cronId: queued.cronId, tick: queued.tick };
-			if (!queued.guidelines.length) return;
-			const options = event.systemPromptOptions;
-			options.promptGuidelines = [...(options.promptGuidelines ?? []), ...queued.guidelines];
-			return;
+			return rulesFor(queued.guidelines);
 		}
 		if (event.messageType !== "custom") return;
 
@@ -1038,21 +1056,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				cronId: details.kind === "cron" ? details.jobId : undefined,
 				tick: details.tickCount,
 			};
-			const guidelines =
-				details.kind === "cron" && details.jobId
-					? [cronTickGuidelines(details.jobId, humanSchedule(details.cron ?? "* * * * *"))]
-					: [];
-			if (details.kind === "wakeup") {
-				const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
-				if (chain) {
-					guidelines.push(loopGuidelines(chain.prompt));
-					if (monitorToolAvailable()) guidelines.push(monitorGuidelines(chain.prompt));
-				}
-			}
-			if (!guidelines.length) return;
-			const options = event.systemPromptOptions;
-			options.promptGuidelines = [...(options.promptGuidelines ?? []), ...guidelines];
-			return;
+			// A cron fire needs nothing beyond its envelope ("it fires the next tick
+			// on its own, so do not call schedule_wakeup; to cancel it, call
+			// cron_delete"): an extra message every minute would only grow the
+			// context. A self-paced tick carries the rules that keep the loop alive.
+			if (details.kind !== "wakeup") return;
+			const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
+			if (!chain) return;
+			const guidelines = [loopGuidelines(chain.prompt)];
+			if (monitorToolAvailable()) guidelines.push(monitorGuidelines(chain.prompt));
+			return rulesFor(guidelines);
 		}
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {

@@ -267,12 +267,12 @@ test("a cron tick says the schedule fires on its own, and refuses a wakeup", asy
 	makeDue(h, job.id);
 	h.scheduler().tick();
 
+	const text = textOf(h.sent.at(-1));
+	assert.match(text, /fires the next tick on its own, so do not call schedule_wakeup/);
+	assert.ok(text.includes(`cron_delete with id ${job.id}`), "the job id, so cron_delete can be named too");
 	const event = runEvent(h.sent.at(-1));
 	await h.handlers.get("before_agent_start")(event, h.ctx);
-	const text = guidelinesOf(event);
-	assert.match(text, /fixed-interval \/loop/);
-	assert.match(text, /Do not call `schedule_wakeup`/);
-	assert.ok(text.includes(job.id), "the job id, so cron_delete can be named too");
+	assert.equal(guidelinesOf(event), "", "the envelope says it all: nothing is added to the run");
 
 	// Following the habit anyway must not start a second schedule, and is not an
 	// error: the schedule already covers the next tick.

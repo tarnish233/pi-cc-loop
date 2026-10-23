@@ -44,7 +44,17 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 			toolRenderers.push(resolver);
 		},
 		on(event, handler) {
-			handlers.set(event, handler);
+			// Keep what before_agent_start returns on the event, the way Pi
+			// collects it: the run's rules arrive as a returned message.
+			const wrapped =
+				event === "before_agent_start"
+					? async (e, ctx) => {
+							const result = await handler(e, ctx);
+							e.result = result;
+							return result;
+						}
+					: handler;
+			handlers.set(event, wrapped);
 			return () => handlers.delete(event);
 		},
 		appendEntry(customType, data) {
@@ -177,7 +187,14 @@ export async function createCron(h, args) {
 	return { ...result.details, result };
 }
 
+/** The rules a run got: the hidden message before_agent_start appended to it. */
 export function guidelinesOf(event) {
+	const message = event.result?.message;
+	return typeof message?.content === "string" ? message.content : "";
+}
+
+/** What the run changed in the system prompt; it must stay empty, or the prompt cache breaks. */
+export function systemGuidelinesOf(event) {
 	return event.systemPromptOptions.promptGuidelines.join("\n");
 }
 
