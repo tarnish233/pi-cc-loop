@@ -1,6 +1,6 @@
 {
 	"name": "pi-cc-loop",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Claude Code compatible /loop for the Pi coding agent: cron-scheduled fixed intervals, self-paced chains, and the same dispatch semantics as Claude Code.",
 	"author": "tarnish233",
 	"type": "module",
