@@ -18,6 +18,28 @@ test("parseCron rejects invalid expressions", () => {
 	assert.equal(cron.parseCron(""), null);
 });
 
+test("a step after a single value is invalid, as in Claude Code (not silently the value alone)", () => {
+	// Claude Code 2.1.308 accepts *, */N, a-b, a-b/N and single values; "5/15" is none of them.
+	assert.equal(cron.parseCron("5/15 * * * *"), null);
+	assert.equal(cron.parseCron("0 9/2 * * *"), null);
+	assert.ok(cron.parseCron("5-59/15 * * * *"), "the range form says it");
+	assert.deepEqual([...cron.parseCron("5-59/15 * * * *").minute], [5, 20, 35, 50]);
+});
+
+test("a day field counts as restricted when it leaves days out, as in Claude Code", () => {
+	// Claude Code compares the set with the full range: 1-31 and */1 are every day.
+	for (const dom of ["*", "*/1", "1-31"]) {
+		const fields = cron.parseCron(`0 9 ${dom} * 1`);
+		assert.equal(fields.domRestricted, false, dom);
+		const next = cron.nextFireAfter(fields, new Date("2026-10-21T10:00:00")); // a Wednesday
+		assert.equal(next.getDay(), 1, `${dom}: Mondays only`);
+	}
+	for (const dow of ["*", "0-6", "0-7", "*/1"]) assert.equal(cron.parseCron(`0 9 15 * ${dow}`).dowRestricted, false, dow);
+	const either = cron.parseCron("0 9 */2 * 1");
+	assert.equal(either.domRestricted, true, "every other day leaves days out");
+	assert.equal(either.dowRestricted, true);
+});
+
 test("day of week 7 aliases Sunday", () => {
 	const fields = cron.parseCron("0 9 * * 7");
 	assert.ok(fields.dow.has(0));
@@ -49,17 +71,6 @@ test("an impossible date never matches", () => {
 	assert.equal(cron.nextFireAfter(fields, new Date("2026-01-01T00:00:00"), 366 * 4), null);
 	assert.equal(cron.isUnreachable("0 0 30 2 *"), true);
 	assert.equal(cron.isUnreachable("0 0 * * *"), false);
-});
-
-
-
-
-
-
-
-test("describeCron summarises the expression", () => {
-	assert.equal(cron.describeCron("*/5 * * * *"), "minute */5");
-	assert.equal(cron.describeCron("0 9 * * *"), "minute 0, hour 9");
 });
 
 test("humanSchedule labels cron expressions like Claude Code", () => {

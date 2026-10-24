@@ -4,8 +4,9 @@
  * Fields: minute hour day-of-month month day-of-week
  * Per-field syntax: `*`, `*\/N`, `a`, `a-b`, `a-b/N`, `a,b,c`
  *
- * Deliberately unsupported (same subset Claude Code accepts): `L`, `W`, `?`
- * and name aliases such as `MON`.
+ * The subset Claude Code 2.1.308 accepts, nothing more: a step after a
+ * single value (`5/15`) is invalid there too, and `L`, `W`, `?` and name
+ * aliases such as `MON` are not supported.
  */
 
 export interface CronFields {
@@ -14,9 +15,9 @@ export interface CronFields {
 	dom: Set<number>;
 	month: Set<number>;
 	dow: Set<number>;
-	/** True when the day-of-month field was not `*`. */
+	/** True when the day-of-month field leaves days out (Claude Code: fewer than 31 values). */
 	domRestricted: boolean;
-	/** True when the day-of-week field was not `*`. */
+	/** True when the day-of-week field leaves days out (Claude Code: fewer than 7 values). */
 	dowRestricted: boolean;
 }
 
@@ -59,6 +60,8 @@ function parseField(spec: FieldSpec, raw: string): Set<number> | null {
 		} else {
 			const m = /^(\d+)(?:-(\d+))?$/.exec(rangePart);
 			if (!m) return null;
+			// "5/15": Claude Code rejects a step after a single value.
+			if (stepPart !== undefined && m[2] === undefined) return null;
 			start = Number(m[1]);
 			end = m[2] !== undefined ? Number(m[2]) : start;
 			if (end < start) return null;
@@ -93,8 +96,9 @@ export function parseCron(expression: string): CronFields | null {
 		dom: parsed[2],
 		month: parsed[3],
 		dow: parsed[4],
-		domRestricted: tokens[2] !== "*",
-		dowRestricted: tokens[4] !== "*",
+		// Claude Code compares with the full range, so 1-31 or */1 is every day.
+		domRestricted: parsed[2].size < 31,
+		dowRestricted: parsed[4].size < 7,
 	};
 }
 
@@ -232,18 +236,4 @@ function clockText(minute: number, hour: number): string {
 	const suffix = hour < 12 ? "AM" : "PM";
 	const display = hour % 12 === 0 ? 12 : hour % 12;
 	return `${display}:${String(minute).padStart(2, "0")} ${suffix}`;
-}
-
-/** Human readable summary of a cron expression. */
-export function describeCron(expression: string): string {
-	const fields = parseCron(expression);
-	if (!fields) return expression;
-	const [minute, hour, dom, month, dow] = expression.trim().split(/\s+/);
-	const parts: string[] = [];
-	if (minute !== "*") parts.push(`minute ${minute}`);
-	if (hour !== "*") parts.push(`hour ${hour}`);
-	if (dom !== "*") parts.push(`day-of-month ${dom}`);
-	if (month !== "*") parts.push(`month ${month}`);
-	if (dow !== "*") parts.push(`day-of-week ${dow}`);
-	return parts.length ? parts.join(", ") : "every minute";
 }

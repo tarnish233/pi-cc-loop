@@ -57,15 +57,6 @@ export function formatDuration(ms: number): string {
 	return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 }
 
-/** The first non-empty line of a text block. */
-export function firstLine(text: string): string {
-	for (const line of text.split("\n")) {
-		const trimmed = line.trim();
-		if (trimmed) return trimmed;
-	}
-	return "";
-}
-
 /** Split a text block into displayable lines, dropping blank ones. */
 export function bodyLines(text: string): string[] {
 	return text

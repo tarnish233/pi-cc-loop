@@ -65,7 +65,7 @@ export type TickMode = "cron" | "wakeup";
 export class LoopFileDelivery {
 	private lastDelivered: string | null = null;
 
-	/** Send the full text on the next tick (a new /loop, or after compaction). */
+	/** Send the full text on the next tick: after a compaction the earlier copy is gone. */
 	reset(): void {
 		this.lastDelivered = null;
 	}

@@ -86,7 +86,7 @@ const LOOP_STOPPED_CHANNEL = "loop:stopped";
 const MAX_JOBS = 50;
 const MIN_DELAY_SECONDS = 60;
 const MAX_DELAY_SECONDS = 3600;
-/** A wakeup just under the 5 minute prompt cache lifetime is pulled inside it. */
+/** The one fallback wakeup a self-paced chain gets when the model forgot to reschedule. */
 const DEFAULT_KEEPALIVE_SECONDS = 1200;
 const DEFAULT_MAX_AGE_DAYS = 7;
 /** How many stopped prompts are remembered (and persisted). */
@@ -628,7 +628,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop [interval] <prompt>   run <prompt> every <interval> (e.g. 30s, 5m, 2h, 1d)",
 			"/loop <prompt>              self-paced: the agent picks the next delay",
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
-			"/pi_cc                      pi-cc settings panel (message style, footer summary)",
+			"/pi_cc                      pi-cc settings, one page per plugin",
 			"",
 			"Esc on a self-paced loop's own turn cancels that loop; fixed-interval loops keep running.",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
