@@ -1,8 +1,8 @@
 /**
  * The /pi_cc command: the settings every pi-cc package shares.
  *
- * This file is copied verbatim between pi-cc-loop, pi-cc-monitor and
- * pi-cc-plugins (separate npm packages); each repo's tests/shared.test.mjs
+ * This file is copied verbatim between pi-cc-loop, pi-cc-monitor,
+ * pi-cc-plugins and pi-cc-compact (separate npm packages); each repo's tests/shared.test.mjs
  * fails when the copies drift apart. The settings live in one pi-cc.json and
  * apply to every pi-cc package installed. A change is announced on the
  * "pi-cc:config" channel, so the packages repaint what the settings change
@@ -83,6 +83,22 @@ const SETTINGS: SettingSpec[] = [
 		on: "on",
 		off: "off",
 		description: "pi-cc-plugins: one line closes every agent run \u2014 tools, duration, done time.",
+	},
+	{
+		field: "compaction",
+		label: "CC compaction",
+		on: "on",
+		off: "off",
+		description:
+			"pi-cc-compact: compaction summarizes the way Claude Code does \u2014 the same prompt and thresholds, reusing the prompt cache. off: Pi's own compaction.",
+	},
+	{
+		field: "idleCompaction",
+		label: "Idle compaction",
+		on: "on",
+		off: "off",
+		description:
+			"pi-cc-compact: compact while idle, before a prompt cache of an hour or more expires (models with promptCache). Turns Pi's cache warming off while on.",
 	},
 ];
 
@@ -192,11 +208,15 @@ function showSettings(ctx: ExtensionContext): void {
 		`  footer:    ${config.footer ? "summary" : "hidden"}${overrideNote("footer")}`,
 		`  draft:     ${config.draft ? "on" : "off"}${overrideNote("draft")}`,
 		`  summary:   ${config.turnSummary ? "on" : "off"}${overrideNote("turnSummary")}`,
+		`  compact:   ${config.compaction ? "on" : "off"}${overrideNote("compaction")}`,
+		`  idle:      ${config.idleCompaction ? "on" : "off"}${overrideNote("idleCompaction")}`,
 		"",
 		"Usage: /pi_cc messages on|off",
 		"       /pi_cc footer on|off",
 		"       /pi_cc draft on|off",
 		"       /pi_cc summary on|off",
+		"       /pi_cc compact on|off",
+		"       /pi_cc idle on|off",
 	];
 	notify(ctx, lines.join("\n"), "info");
 }
@@ -242,6 +262,9 @@ const KEYS: Record<string, { field: keyof PiCcConfig; label: string }> = {
 	draft: { field: "draft", label: "Draft recall" },
 	summary: { field: "turnSummary", label: "Turn summary" },
 	turnsummary: { field: "turnSummary", label: "Turn summary" },
+	compact: { field: "compaction", label: "CC compaction" },
+	compaction: { field: "compaction", label: "CC compaction" },
+	idle: { field: "idleCompaction", label: "Idle compaction" },
 };
 
 function setSetting(ctx: ExtensionContext, apply: ApplySetting, key: string, raw: string | undefined): void {
@@ -293,7 +316,7 @@ export function registerPiCcCommand(pi: ExtensionAPI, owner: string): void {
 	};
 
 	pi.registerCommand("pi_cc", {
-		description: "pi-cc settings: message style, footer summary",
+		description: "pi-cc settings: message style, footer, draft, turn summary, compaction",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const words = args.trim().split(/\s+/).filter(Boolean);
 			// "/pi_cc settings footer on" reads like the old /loop settings: drop the noun.

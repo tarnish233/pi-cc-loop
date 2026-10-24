@@ -1,8 +1,8 @@
 /**
  * Shared settings for the pi-cc extensions.
  *
- * pi-cc-loop, pi-cc-monitor and pi-cc-plugins read the same small JSON file
- * so a single toggle changes the whole family at once. The file is optional;
+ * pi-cc-loop, pi-cc-monitor, pi-cc-plugins and pi-cc-compact read the same
+ * small JSON file so a single toggle changes the whole family at once. The file is optional;
  * when it is missing or malformed the defaults apply. It sits in Pi's agent
  * directory (PI_CODING_AGENT_DIR, default ~/.pi/agent), next to Pi's own
  * settings.
@@ -12,11 +12,13 @@
  *     "compactMessages": true,
  *     "footer": true,
  *     "draft": true,
- *     "turnSummary": true
+ *     "turnSummary": true,
+ *     "compaction": true,
+ *     "idleCompaction": true
  *   }
  *
  * compactMessages and footer drive loop and monitor; draft and turnSummary
- * drive pi-cc-plugins. A package that is not installed simply ignores its
+ * drive pi-cc-plugins; compaction and idleCompaction drive pi-cc-compact. A package that is not installed simply ignores its
  * keys, and they are kept as the user left them.
  *
  * Environment overrides (useful for tests and quick experiments) win over the
@@ -26,6 +28,8 @@
  *   PI_CC_FOOTER=0|1
  *   PI_CC_DRAFT=0|1
  *   PI_CC_TURN_SUMMARY=0|1
+ *   PI_CC_COMPACTION=0|1
+ *   PI_CC_IDLE_COMPACTION=0|1
  */
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -44,6 +48,10 @@ export interface PiCcConfig {
 	draft: boolean;
 	/** pi-cc-plugins: one line closes every agent run. */
 	turnSummary: boolean;
+	/** pi-cc-compact: Claude Code's compaction replaces Pi's summary request. */
+	compaction: boolean;
+	/** pi-cc-compact: compact while idle, before a long prompt cache expires. */
+	idleCompaction: boolean;
 }
 
 export const DEFAULT_CONFIG: PiCcConfig = {
@@ -51,6 +59,8 @@ export const DEFAULT_CONFIG: PiCcConfig = {
 	footer: true,
 	draft: true,
 	turnSummary: true,
+	compaction: true,
+	idleCompaction: true,
 };
 
 /** The environment variable that overrides each setting. */
@@ -59,6 +69,8 @@ const ENV_OVERRIDES: Record<keyof PiCcConfig, string> = {
 	footer: "PI_CC_FOOTER",
 	draft: "PI_CC_DRAFT",
 	turnSummary: "PI_CC_TURN_SUMMARY",
+	compaction: "PI_CC_COMPACTION",
+	idleCompaction: "PI_CC_IDLE_COMPACTION",
 };
 
 function envBool(name: string): boolean | undefined {
@@ -75,7 +87,7 @@ export function envOverride(key: keyof PiCcConfig): string | undefined {
 	return envBool(name) === undefined ? undefined : `${name}=${process.env[name]}`;
 }
 
-/** The settings file shared by pi-cc-loop and pi-cc-monitor, in Pi's agent directory. */
+/** The settings file shared by the pi-cc packages, in Pi's agent directory. */
 export function configPath(): string {
 	if (process.env.PI_CC_CONFIG_FILE) return process.env.PI_CC_CONFIG_FILE;
 	return path.join(getAgentDir(), "pi-cc.json");
@@ -99,6 +111,12 @@ function readConfig(): PiCcConfig {
 		turnSummary:
 			envBool(ENV_OVERRIDES.turnSummary) ??
 			(typeof file.turnSummary === "boolean" ? file.turnSummary : DEFAULT_CONFIG.turnSummary),
+		compaction:
+			envBool(ENV_OVERRIDES.compaction) ??
+			(typeof file.compaction === "boolean" ? file.compaction : DEFAULT_CONFIG.compaction),
+		idleCompaction:
+			envBool(ENV_OVERRIDES.idleCompaction) ??
+			(typeof file.idleCompaction === "boolean" ? file.idleCompaction : DEFAULT_CONFIG.idleCompaction),
 	};
 }
 
