@@ -9,10 +9,10 @@
  *
  * The command is /pi_cc, shared verbatim with pi-cc-monitor and pi-cc-plugins
  * (see settings.ts); only the first package to load registers it. In the TUI,
- * a bare /pi_cc opens a panel like Pi's own /settings (an extension cannot add
- * items to that one): the same SettingsList, where Enter/Space changes the
- * selected setting and saves it at once, and Esc closes. Elsewhere it prints
- * the summary.
+ * a bare /pi_cc opens a panel with one page per plugin, like pi-cc-extensions'
+ * /ccstyle: a tab bar on top (Tab and Shift+Tab switch pages), Pi's
+ * SettingsList below, where Enter/Space changes the selected setting and saves
+ * it at once, and Esc closes. Elsewhere it prints the summary, page by page.
  */
 import assert from "node:assert";
 import fs from "node:fs";
@@ -61,12 +61,13 @@ const DOWN = "\x1b[B";
 const ENTER = "\r";
 const SPACE = " ";
 const ESC = "\x1b";
+const TAB = "\t";
+const SHIFT_TAB = "\x1b[Z";
 
 /** Run /pi_cc with a TUI that hands out the panel the way ctx.ui.custom does. */
-function openPanel(h) {
+function openPanel(h, theme = { fg: (_color, text) => text, bold: (text) => text }) {
 	let panel;
 	let renders = 0;
-	const theme = { fg: (_color, text) => text, bold: (text) => text };
 	h.ctx.ui.custom = (factory) =>
 		new Promise((resolve) => {
 			panel = factory({ requestRender: () => renders++ }, theme, {}, resolve);
@@ -111,10 +112,8 @@ test("in the TUI, /loop settings opens a panel like Pi's /settings: Enter/Space 
 		const h = await start(makeHarness());
 		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 		const ui = openPanel(h);
-		assert.match(ui.screen(), /pi-cc settings/);
 		assert.match(ui.screen(), /→ Message style +compact/);
 		assert.match(ui.screen(), /\n {2}Footer summary +on/);
-		assert.match(ui.screen(), /Enter\/Space to change · Esc to cancel/);
 
 		ui.panel.handleInput(DOWN);
 		ui.panel.handleInput(SPACE);
@@ -138,6 +137,65 @@ test("in the TUI, /loop settings opens a panel like Pi's /settings: Enter/Space 
 	});
 });
 
+test("one page per plugin, like /ccstyle: Loop & Monitor / Plugins / Compact; Tab and Shift+Tab switch pages", async () => {
+	const file = tempConfig({});
+	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
+		const h = await start(makeHarness());
+		const ui = openPanel(h, { fg: (_color, text) => text, bold: (text) => `*${text}*` });
+		const page = () => ui.screen().split("\n");
+		assert.match(page()[1], /^\*Loop & Monitor\* \/ Plugins \/ Compact/, "the tab bar, the open page in bold");
+		assert.match(ui.screen(), /→ Message style +compact/);
+		assert.match(ui.screen(), /\n {2}Footer summary +on/);
+		assert.doesNotMatch(ui.screen(), /Draft recall|Turn summary|CC compaction|Idle compaction/, "other plugins' settings are on their pages");
+		assert.match(ui.screen(), /Enter\/Space to change · Tab\/Shift\+Tab to switch pages · Esc to close/);
+		assert.doesNotMatch(ui.screen(), /Esc to cancel/, "one hint line, the panel's");
+
+		ui.panel.handleInput(DOWN);
+		ui.panel.handleInput(TAB);
+		assert.match(page()[1], /^Loop & Monitor \/ \*Plugins\* \/ Compact/);
+		assert.match(ui.screen(), /→ Draft recall +on/);
+		assert.match(ui.screen(), /\n {2}Turn summary +on/);
+		assert.doesNotMatch(ui.screen(), /Message style|CC compaction/);
+
+		ui.panel.handleInput(TAB);
+		assert.match(page()[1], /^Loop & Monitor \/ Plugins \/ \*Compact\*/);
+		assert.match(ui.screen(), /→ CC compaction +on/);
+		ui.panel.handleInput(DOWN);
+		ui.panel.handleInput(SPACE);
+		assert.match(ui.screen(), /→ Idle compaction +off/);
+		assert.deepEqual(readJson(file), { idleCompaction: false }, "saved at once, its own key only");
+
+		ui.panel.handleInput(TAB);
+		assert.match(page()[1], /^\*Loop & Monitor\*/, "Tab wraps around");
+		assert.match(ui.screen(), /→ Footer summary +on/, "each page keeps its selection");
+		ui.panel.handleInput(SHIFT_TAB);
+		assert.match(ui.screen(), /→ Idle compaction +off/, "Shift+Tab goes back");
+
+		ui.panel.handleInput(ESC);
+		await ui.closed;
+	});
+});
+
+test("the values line up across pages, and the file is named on the tab bar when there is room", async () => {
+	const file = tempConfig({});
+	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
+		const h = await start(makeHarness());
+		const ui = openPanel(h);
+		const column = () => ui.screen().split("\n").find((line) => line.startsWith("→")).search(/(compact|on|off)$/);
+		const first = column();
+		ui.panel.handleInput(TAB);
+		assert.equal(column(), first);
+		ui.panel.handleInput(TAB);
+		assert.equal(column(), first);
+		const wide = ui.panel.render(file.length + 60).join("\n").split("\n")[1];
+		assert.ok(wide.endsWith(file.replace(os.homedir(), "~")), wide);
+		const narrow = ui.panel.render(50).join("\n").split("\n")[1];
+		assert.equal(narrow.trimEnd(), "Loop & Monitor / Plugins / Compact", "no room: the tabs alone");
+		ui.panel.handleInput(ESC);
+		await ui.closed;
+	});
+});
+
 test("in the panel, a setting a variable overrides shows its value in effect, names the variable, and stays put", async () => {
 	const file = tempConfig({});
 	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_FOOTER: "0" }, async () => {
@@ -154,8 +212,8 @@ test("in the panel, a setting a variable overrides shows its value in effect, na
 	});
 });
 
-test("outside the TUI, /loop settings prints the summary as before", async () => {
-	await withEnv({}, async () => {
+test("outside the TUI, /pi_cc prints the summary, page by page", async () => {
+	await withEnv({ PI_CC_CONFIG_FILE: tempConfig({}) }, async () => {
 		const h = await start(makeHarness());
 		h.ctx.mode = "rpc";
 		let opened = false;
@@ -165,6 +223,10 @@ test("outside the TUI, /loop settings prints the summary as before", async () =>
 		await piCc(h).handler("", h.ctx);
 		assert.equal(opened, false);
 		assert.match(h.notifications.at(-1).message, /pi-cc settings/);
+		assert.match(
+			h.notifications.at(-1).message,
+			/\nLoop & Monitor\n {2}messages: +compact\n {2}footer: +summary\nPlugins\n {2}draft: +on\n {2}summary: +on\nCompact\n {2}compact: +on\n {2}idle: +on\n/,
+		);
 	});
 });
 

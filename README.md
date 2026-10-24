@@ -38,7 +38,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
 | 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
-| 界面设置 | 和 Pi 的 `/settings` 一样的面板，本地命令，不进对话 | `/pi_cc` |
+| 界面设置 | 按插件分页的设置面板，本地命令，不进对话 | `/pi_cc` |
 
 ## 命令
 
@@ -101,28 +101,30 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 
 draft、turnSummary 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compact 读取；没装对应包的会话里，面板中的这些项不生效，值原样保留。
 
-在 TUI 里输入 `/pi_cc` 会打开设置面板，样子和操作都和 Pi 的 `/settings` 一样：上下键选择，Enter/空格切换，Esc 关闭；
-改动立即保存，所有 pi-cc 扩展同时生效。Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
+在 TUI 里输入 `/pi_cc` 会打开设置面板，和 pi-cc-extensions 的 `/ccstyle` 一样按页组织，每个插件一页：
+**Loop & Monitor**（消息样式、底部摘要，两个包共用）、**Plugins**（pi-cc-plugins）、**Compact**（pi-cc-compact）。
+Tab / Shift+Tab 切换页，上下键选择，Enter/空格切换，Esc 关闭；改动立即保存，所有 pi-cc 扩展同时生效。
+Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
 
 `/pi_cc` 由四个 pi-cc 包（loop、monitor、plugins、compact）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
 （Pi 会把不同扩展的同名命令变成 `/pi_cc:1`、`/pi_cc:2`，所以由最先加载的包认领注册，会话结束时释放，`/reload` 会重新认领）。
 
 ```text
-─────────────────────────────────────────────────────────────
-pi-cc settings · ~/.pi/agent/pi-cc.json
-
-→ Message style   compact
-  Footer summary  on
+──────────────────────────────────────────────────────────────────────
+Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
+──────────────────────────────────────────────────────────────────────
+→ Message style    compact
+  Footer summary   on
 
   How scheduled fires and Monitor events are drawn. compact: ✻ header
   and indented body; card: the old padded card.
-
-  Enter/Space to change · Esc to cancel
-─────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────
+  Enter/Space to change · Tab/Shift+Tab to switch pages · Esc to close
+──────────────────────────────────────────────────────────────────────
 ```
 
 也可以用文字命令：`/pi_cc messages on|off`、`/pi_cc footer on|off`，适合脚本和 RPC；
-非 TUI 模式下，不带参数的 `/pi_cc` 输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
+非 TUI 模式下，不带参数的 `/pi_cc` 按页输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
 
 环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES`（pi-cc-plugins 的两项是 `PI_CC_DRAFT`、`PI_CC_TURN_SUMMARY`，pi-cc-compact 的两项是 `PI_CC_COMPACTION`、`PI_CC_IDLE_COMPACTION`）优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
 说明里写出是哪个变量；文字输出会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；用文字命令切换会写进文件，但提示会说明变量还在覆盖它。
