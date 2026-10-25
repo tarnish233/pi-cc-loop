@@ -106,7 +106,7 @@ draft、turnSummary 只被 pi-cc-plugins 读取，compaction、idleCompaction �
 Tab / Shift+Tab 切换页，上下键选择，Enter/空格切换，Esc 关闭；改动立即保存，所有 pi-cc 扩展同时生效。
 Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
 
-`/pi_cc` 由四个 pi-cc 包（loop、monitor、plugins、compact）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
+`/pi_cc` 由四个 pi-cc 包（loop、monitor、plugins、compaction）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
 （Pi 会把不同扩展的同名命令变成 `/pi_cc:1`、`/pi_cc:2`，所以由最先加载的包认领注册，会话结束时释放，`/reload` 会重新认领）。
 
 ```text
@@ -170,7 +170,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 
 ```bash
 node --test tests/*.test.mjs
-npx --yes typescript@5.9.3 tsc --noEmit -p tsconfig.json
+npx --yes -p typescript@5.9.3 tsc --noEmit -p tsconfig.json
 node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
 
