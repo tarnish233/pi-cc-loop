@@ -69,6 +69,8 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | `cron_list` | `CronList` | 列出任务和实际的下次运行时间（已含错峰） |
 | `schedule_wakeup` | `ScheduleWakeup` | 自定步调：`delaySeconds`（限制在 60–3600）、`reason`（必填，显示在触发块表头）、`prompt`；`stop: true` 结束 |
 
+四个工具都声明了 `outputSchema`：开了 codemode 时，脚本里 `tools.cron_create(...)`、`tools.cron_list()` 拿到的是结构化结果（`{ id, nextFireAt, … }`、`{ jobs: [...] }`），一个脚本里就能列任务、按条件批量取消，不用从文本里抠 id。没开 codemode 时没有影响。
+
 ## 渲染
 
 定时触发只显示任务本身，给模型看的信封不上屏：

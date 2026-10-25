@@ -143,6 +143,14 @@ function normalizePrompt(prompt: string): string {
 	return prompt.trim().replace(/^\/loop\s+/i, "").trim();
 }
 
+/** A stored job as a codemode script sees it: every field, minus those holding no value (the value is JSON). */
+function jobValue(job: LoopJob): Record<string, string | number | boolean> {
+	return Object.fromEntries(Object.entries(storedJob(job)).filter(([, value]) => value !== undefined)) as Record<
+		string,
+		string | number | boolean
+	>;
+}
+
 /** The live scheduler, for tests. */
 let activeScheduler: LoopScheduler | null = null;
 
@@ -681,6 +689,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			),
 		}),
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+		// What a codemode script gets: values, not the text (Pi sends the shape, not this).
+		outputSchema: Type.Object({
+			id: Type.String(),
+			cron: Type.String(),
+			recurring: Type.Boolean(),
+			durable: Type.Boolean(),
+			nextFireAt: Type.Optional(Type.Number()),
+			prompt: Type.String(),
+			runsHere: Type.Boolean(),
+		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 			if (!parseCron(params.cron)) {
@@ -731,17 +749,21 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// Asked for in plain words, not through /loop: do it once now, as /loop would.
 			if (recurring && !currentRun.loopRequest && !currentRun.cronId && !currentRun.chainId) lines.push(RUN_NOW_HINT);
 
+			const value = {
+				id: job.id,
+				cron: job.cron ?? params.cron.trim(),
+				recurring: job.recurring,
+				durable: job.durable,
+				...(nextAt !== undefined ? { nextFireAt: nextAt } : {}),
+				prompt: job.prompt,
+				runsHere: placement.runsHere,
+			};
+
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
-				details: {
-					id: job.id,
-					cron: job.cron,
-					recurring: job.recurring,
-					durable: job.durable,
-					nextFireAt: nextAt,
-					prompt: job.prompt,
-					runsHere: placement.runsHere,
-				},
+				// Shared with codemode scripts; no key holds undefined, so it is JSON.
+				details: value,
+				structuredContent: value,
 			};
 		},
 	});
@@ -755,6 +777,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			id: Type.String({ description: "The job id returned by cron_create, or the id of a self-paced loop." }),
 		}),
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+		outputSchema: Type.Object({ cancelled: Type.Boolean(), id: Type.String() }),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 			const job = scheduler.get(params.id);
@@ -763,14 +786,18 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				if (job.kind === "wakeup") retireChain(job, "cancelled with cron_delete");
 				else removeJob(job);
 			} else if (!durable?.remove(params.id)) {
+				const value = { cancelled: false, id: params.id };
 				return {
 					content: [{ type: "text" as const, text: `No scheduled job with id ${params.id}.` }],
-					details: { cancelled: false, id: params.id },
+					details: value,
+					structuredContent: value,
 				};
 			}
+			const value = { cancelled: true, id: params.id };
 			return {
 				content: [{ type: "text" as const, text: `Cancelled job ${params.id}.` }],
-				details: { cancelled: true, id: params.id },
+				details: value,
+				structuredContent: value,
 			};
 		},
 	});
@@ -782,13 +809,40 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		promptSnippet: CRON_LIST_SNIPPET,
 		parameters: Type.Object({}),
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+		outputSchema: Type.Object({
+			jobs: Type.Array(
+				Type.Object({
+					id: Type.String(),
+					kind: Type.Union([Type.Literal("cron"), Type.Literal("wakeup")]),
+					cron: Type.Optional(Type.String()),
+					prompt: Type.String(),
+					recurring: Type.Boolean(),
+					createdAt: Type.Number(),
+					nextFireAt: Type.Optional(Type.Number()),
+					scheduledFor: Type.Optional(Type.Number()),
+					chainStartedAt: Type.Optional(Type.Number()),
+					keepaliveUsed: Type.Optional(Type.Boolean()),
+					fireCount: Type.Optional(Type.Number()),
+					tickCount: Type.Optional(Type.Number()),
+					lastFiredAt: Type.Optional(Type.Number()),
+					maxFires: Type.Optional(Type.Number()),
+					durable: Type.Boolean(),
+					createdInProject: Type.Optional(Type.String()),
+					label: Type.Optional(Type.String()),
+					reason: Type.Optional(Type.String()),
+					source: Type.String(),
+				}),
+			),
+		}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 			const jobs = listJobs();
+			const values = jobs.map(jobValue);
 			if (!jobs.length) {
 				return {
 					content: [{ type: "text" as const, text: "No scheduled jobs." }],
-					details: { jobs: [] },
+					details: { jobs: values },
+					structuredContent: { jobs: values },
 				};
 			}
 			const text = jobs
@@ -802,7 +856,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				.join("\n");
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { jobs: jobs.map((job) => storedJob(job)) },
+				details: { jobs: values },
+				structuredContent: { jobs: values },
 			};
 		},
 	});
@@ -836,6 +891,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			),
 		}),
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+		// Every return is one of these shapes: a stop, a suppression, an age-out, or a schedule.
+		outputSchema: Type.Object({
+			stopped: Type.Boolean(),
+			cancelledWakeups: Type.Optional(Type.Number()),
+			agedOut: Type.Optional(Type.Boolean()),
+			suppressed: Type.Optional(Type.String()),
+			id: Type.Optional(Type.String()),
+			scheduledFor: Type.Optional(Type.Number()),
+			clampedDelaySeconds: Type.Optional(Type.Number()),
+			wasClamped: Type.Optional(Type.Boolean()),
+		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 
@@ -845,6 +911,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				const named = params.prompt ? scheduler.findChain(normalizePrompt(params.prompt)) : undefined;
 				const chains = current ? [current] : named ? [named] : scheduler.byKind("wakeup");
 				for (const chain of chains) retireChain(chain, "stopped by the agent");
+				const value = { stopped: true, cancelledWakeups: chains.length };
 				return {
 					content: [
 						{
@@ -856,7 +923,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 									"If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call \u2014 cancel it with cron_delete.",
 						},
 					],
-					details: { stopped: true, cancelledWakeups: chains.length },
+					details: value,
+					structuredContent: value,
 				};
 			}
 
@@ -876,6 +944,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				// Returning it as a result (instead of throwing) keeps the transcript
 				// calm and tells the model nothing is missing.
 				const cronJob = scheduler.get(currentRun.cronId);
+				const value = { suppressed: "fixed-interval", id: currentRun.cronId, stopped: false };
 				return {
 					content: [
 						{
@@ -886,7 +955,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 								`Nothing was scheduled. To end the loop, call cron_delete with id ${currentRun.cronId}.`,
 						},
 					],
-					details: { suppressed: "fixed-interval", id: currentRun.cronId, stopped: false },
+					details: value,
+					structuredContent: value,
 				};
 			}
 
@@ -904,6 +974,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				const limit = maxAgeMs();
 				if (limit > 0 && now - (chain.chainStartedAt ?? chain.createdAt) >= limit) {
 					retireChain(chain, `reached its ${maxAgeDays()}-day limit`);
+					const value = { stopped: true, agedOut: true, id: chain.id, cancelledWakeups: 1 };
 					return {
 						content: [
 							{
@@ -913,7 +984,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 									"do not re-issue. Tell the user they can start a new /loop.",
 							},
 						],
-						details: { stopped: true, agedOut: true, id: chain.id, cancelledWakeups: 1 },
+						details: value,
+						structuredContent: value,
 					};
 				}
 			} else {
@@ -950,6 +1022,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 			const note = wasClamped ? ` (clamped to ${delay}s from your requested value)` : "";
 			const clock = new Date(scheduledFor).toTimeString().slice(0, 8);
+			const value = {
+				id: chain.id,
+				scheduledFor,
+				clampedDelaySeconds: delay,
+				wasClamped,
+				stopped: false,
+			};
 			return {
 				content: [
 					{
@@ -959,13 +1038,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 							"This turn ends when this call returns \u2014 you are re-invoked when the wakeup fires or a monitor event arrives.",
 					},
 				],
-				details: {
-					id: chain.id,
-					scheduledFor,
-					clampedDelaySeconds: delay,
-					wasClamped,
-					stopped: false,
-				},
+				details: value,
+				structuredContent: value,
 				// Claude Code ends the turn when ScheduleWakeup returns (on models
 				// that support it); the guidelines ask for the update first. Pi only
 				// ends the turn when every tool in the batch agrees.
