@@ -100,9 +100,9 @@ test("under PI_CC_FOOTER=0, footer on is saved for later but the variable still 
 		assert.match(notice.message, /PI_CC_FOOTER=0/);
 
 		await piCc(h).handler("", h.ctx);
-		assert.match(h.notifications.at(-1).message, /footer: +hidden \(PI_CC_FOOTER=0\)/);
+		assert.match(h.notifications.at(-1).message, /footer: +off \(PI_CC_FOOTER=0\)/);
 		await piCc(h).handler("footer", h.ctx);
-		assert.match(h.notifications.at(-1).message, /footer: +hidden \(PI_CC_FOOTER=0\)/, "a bare /pi_cc footer prints the summary");
+		assert.match(h.notifications.at(-1).message, /footer: +off \(PI_CC_FOOTER=0\)/, "a bare /pi_cc footer prints the summary");
 	});
 });
 
@@ -225,7 +225,12 @@ test("outside the TUI, /pi_cc prints the summary, page by page", async () => {
 		assert.match(h.notifications.at(-1).message, /pi-cc settings/);
 		assert.match(
 			h.notifications.at(-1).message,
-			/\nLoop & Monitor\n {2}messages: +compact\n {2}footer: +summary\nPlugins\n {2}draft: +on\n {2}summary: +on\nCompact\n {2}compact: +on\n {2}idle: +on\n/,
+			/\nLoop & Monitor\n {2}messages: +compact\n {2}footer: +on\nPlugins\n {2}draft: +on\n {2}summary: +on\n {2}keys: +on\nCompact\n {2}compact: +on\n {2}idle: +on\n/,
+		);
+		assert.match(
+			h.notifications.at(-1).message,
+			/Usage: \/pi_cc <item> on\|off +\(messages, footer, draft, summary, keys, compact, idle\)/,
+			"every setting the panel has is named",
 		);
 	});
 });
