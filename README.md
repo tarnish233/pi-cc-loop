@@ -96,12 +96,13 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
   "footer": true,            // 底部摘要：loop 的一行和 Monitor 的 `monitor N`
   "draft": true,             // pi-cc-plugins：Ctrl+C 找回
   "turnSummary": true,       // pi-cc-plugins：回合摘要一行
+  "ccKeys": true,            // pi-cc-plugins：Enter 排队、Ctrl+Enter 直发
   "compaction": true,        // pi-cc-compaction：Claude Code 的压缩
   "idleCompaction": true     // pi-cc-compaction：空闲压缩
 }
 ```
 
-draft、turnSummary 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compaction 读取；没装对应包的会话里，面板中的这些项不生效，值原样保留。
+draft、turnSummary、ccKeys 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compaction 读取；没装对应包的会话里，面板中的这些项不生效，值原样保留。
 
 在 TUI 里输入 `/pi_cc` 会打开设置面板，和 pi-cc-extensions 的 `/ccstyle` 一样按页组织，每个插件一页：
 **Loop & Monitor**（消息样式、底部摘要，两个包共用）、**Plugins**（pi-cc-plugins）、**Compact**（pi-cc-compaction）。
@@ -128,7 +129,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 也可以用文字命令：`/pi_cc messages on|off`、`/pi_cc footer on|off`，适合脚本和 RPC；
 非 TUI 模式下，不带参数的 `/pi_cc` 按页输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
 
-环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES`（pi-cc-plugins 的两项是 `PI_CC_DRAFT`、`PI_CC_TURN_SUMMARY`，pi-cc-compaction 的两项是 `PI_CC_COMPACTION`、`PI_CC_IDLE_COMPACTION`）优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
+环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES`（pi-cc-plugins 的三项是 `PI_CC_DRAFT`、`PI_CC_TURN_SUMMARY`、`PI_CC_KEYS`，pi-cc-compaction 的两项是 `PI_CC_COMPACTION`、`PI_CC_IDLE_COMPACTION`）优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
 说明里写出是哪个变量；文字输出会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；用文字命令切换会写进文件，但提示会说明变量还在覆盖它。
 
 ## 底部摘要
