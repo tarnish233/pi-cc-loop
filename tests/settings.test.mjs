@@ -282,3 +282,21 @@ test("the old /loop settings words redirect instead of starting a loop", async (
 	assert.equal(h.sent.length, 0, "still no loop started");
 	assert.match(h.notifications.at(-1).message, /under \/pi_cc/);
 });
+
+test("every setting is read from the file, and a variable wins for any of them", async () => {
+	const all = {
+		compactMessages: false,
+		footer: false,
+		draft: false,
+		turnSummary: false,
+		ccKeys: false,
+		compaction: false,
+		idleCompaction: false,
+	};
+	await withEnv({ PI_CC_CONFIG_FILE: tempConfig(all) }, async () => {
+		assert.deepEqual(config.loadConfig(), all, "each key in the file is read: none falls back to its default");
+	});
+	await withEnv({ PI_CC_CONFIG_FILE: tempConfig({ footer: true }), PI_CC_FOOTER: "0" }, async () => {
+		assert.equal(config.loadConfig().footer, false, "the variable wins over the file");
+	});
+});
