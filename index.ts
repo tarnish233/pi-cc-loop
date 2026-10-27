@@ -1101,8 +1101,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {
 			// A monitor bound to a loop woke the agent: the run belongs to that loop.
+			// The monitor stores the prompt the model gave it; the chain is keyed
+			// without a leading `/loop`, so both spellings find it.
 			const loopPrompt = (event.message.details as { loopPrompt?: unknown } | undefined)?.loopPrompt;
-			const chain = typeof loopPrompt === "string" ? scheduler.findChain(loopPrompt) : undefined;
+			const chain = typeof loopPrompt === "string" ? scheduler.findChain(normalizePrompt(loopPrompt)) : undefined;
 			if (chain) currentRun.chainId = chain.id;
 			return;
 		}

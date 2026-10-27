@@ -65,6 +65,19 @@ test("Esc during a turn woken by the loop's monitor cancels that loop", async ()
 	assert.equal(h.scheduler().get(chain.id), undefined);
 });
 
+test("a monitor's loopPrompt may quote the request with its /loop prefix and still name the chain", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 1200);
+	await runTurn(h);
+	// schedule_wakeup strips the prefix before it keys the chain; a model that
+	// passes the request back verbatim includes it.
+	const monitorEvent = {
+		message: { customType: "Monitor", content: "monitor abc \u00b7 ci\nFAILED", details: { loopPrompt: "/loop watch CI" } },
+	};
+	await runTurn(h, { aborted: true, start: monitorEvent });
+	assert.equal(h.scheduler().get(chain.id), undefined);
+});
+
 test("Esc on an unrelated turn keeps the loops; fixed-interval jobs are never stopped by Esc", async () => {
 	const h = await start(makeHarness());
 	await createCron(h, { cron: "*/5 * * * *", prompt: "check the build" });
