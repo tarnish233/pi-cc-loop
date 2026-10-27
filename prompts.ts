@@ -46,18 +46,11 @@ const DELAY_ADVICE = [
 ].join("\n");
 
 /**
- * The rules for a `/loop <prompt>` whose interval the command layer could not
- * parse. Claude Code's /loop is a skill: the model reads the input and works
- * the schedule out itself, so an interval written in any language works.
- */
-/**
  * The instructions for one `/loop` request. Claude Code's `/loop` is a skill:
  * the command turns into a user message carrying these rules, and the model
  * drives CronCreate / CronList / CronDelete / ScheduleWakeup itself. Nothing is
  * created by code, so the conversation shows what was asked and what was done.
  */
-const LOOP_FILE_SENTINEL_PLACEHOLDER = "__loop_md_sentinel__";
-
 const LOOP_COMMAND_GUIDELINES = [
 	"This is a `/loop` request from the user: {raw}",
 	"",
@@ -91,7 +84,7 @@ const LOOP_COMMAND_GUIDELINES = [
 	"- `--max N`: pass `maxFires: N`.",
 	"",
 	"## loop.md",
-	"When the request has no task of its own (bare `/loop`, or an interval alone), pass the literal sentinel " + LOOP_FILE_SENTINEL_PLACEHOLDER + " as the prompt: it expands at fire time to `.pi/loop.md`, or to the built-in maintenance pass when there is no loop.md.",
+	"When the request has no task of its own (bare `/loop`, or an interval alone), pass the literal sentinel {sentinel} as the prompt: it expands at fire time to `.pi/loop.md`, or to the built-in maintenance pass when there is no loop.md.",
 	"For the run you do right now, read `.pi/loop.md` (or `~/.pi/loop.md`) yourself and do those tasks; the sentinel only expands on later fires.",
 ].join("\n");
 
@@ -155,12 +148,12 @@ export function scheduledTaskProvenance(id: string, schedule: string): string {
 }
 
 export function loopCommandGuidelines(raw: string): string {
-	const quoted = quote(raw || LOOP_FILE_SENTINEL);
 	return fill(LOOP_COMMAND_GUIDELINES, {
 		raw: raw ? `${quote(raw)}` : "(empty: the loop.md tasks)",
-		quoted,
+		quoted: quote(raw || LOOP_FILE_SENTINEL),
 		delayAdvice: DELAY_ADVICE,
-	}).replace(LOOP_FILE_SENTINEL_PLACEHOLDER, quote(LOOP_FILE_SENTINEL));
+		sentinel: quote(LOOP_FILE_SENTINEL),
+	});
 }
 
 export function loopGuidelines(prompt: string): string {

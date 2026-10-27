@@ -158,27 +158,6 @@ export function isUnreachable(expression: string): boolean {
 	return nextFireAfter(fields, new Date(), 366) === null;
 }
 
-/**
- * The divisor of `total` closest to `n`.
- *
- * Claude Code rounds a non-dividing interval to the nearest clean one: "If the
- * interval doesn't cleanly divide its unit, round to the nearest clean interval
- * and tell the user what you rounded to."
- */
-function nearestDivisor(n: number, total: number): number {
-	let best = 1;
-	let bestDistance = Number.POSITIVE_INFINITY;
-	for (let d = 1; d <= total; d++) {
-		if (total % d !== 0) continue;
-		const distance = Math.abs(d - n);
-		if (distance < bestDistance) {
-			best = d;
-			bestDistance = distance;
-		}
-	}
-	return best;
-}
-
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 

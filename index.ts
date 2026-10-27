@@ -36,7 +36,7 @@ import {
 	parseCron,
 } from "./cron.ts";
 import { DurableRuntime, type Placement } from "./durable.ts";
-import { displayPrompt, isLoopFileSentinel, LoopFileDelivery, type TickMode } from "./loopfile.ts";
+import { displayPrompt, isLoopFileSentinel, LoopFileDelivery } from "./loopfile.ts";
 import {
 	CRON_CREATE_DESCRIPTION,
 	CRON_CREATE_SNIPPET,
@@ -453,8 +453,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	/** The text the model gets for a prompt: the loop.md sentinel expands at fire time. */
-	function resolvePrompt(prompt: string, mode: TickMode): string {
-		return isLoopFileSentinel(prompt) ? loopFile.resolve(lastCtx?.cwd ?? process.cwd(), mode) : prompt;
+	function resolvePrompt(prompt: string): string {
+		return isLoopFileSentinel(prompt) ? loopFile.resolve(lastCtx?.cwd ?? process.cwd()) : prompt;
 	}
 
 	/**
@@ -464,7 +464,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	function deliverTick(job: LoopJob): void {
 		const tick = Math.max(tickCounters.get(job.prompt) ?? 0, job.tickCount ?? 0) + 1;
-		const body = resolvePrompt(job.prompt, job.kind === "cron" ? "cron" : "wakeup");
+		const body = resolvePrompt(job.prompt);
 		// A fixed-interval tick is what it is - a scheduled task - and a
 		// self-paced tick keeps the loop framing. The rules for the run are
 		// rebuilt from `details` in before_agent_start.
@@ -574,7 +574,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			lastCtx = ctx;
 			const raw = args.trim();
-			const [head, ...rest] = raw.split(/\s+/);
+			const [head] = raw.split(/\s+/);
 
 			// Settings moved to /pi_cc: these words stay recognized so they cannot
 			// start a loop by mistake (everything else is a loop request).

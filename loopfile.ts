@@ -59,8 +59,6 @@ function truncate(content: string): string {
 	return `${content.slice(0, cut > 0 ? cut : LOOP_FILE_MAX_CHARS)}\n> WARNING: loop.md was truncated to ${LOOP_FILE_MAX_CHARS} bytes. Keep the task list concise.`;
 }
 
-export type TickMode = "cron" | "wakeup";
-
 /** Remembers what a session was last given, so unchanged tasks are not resent. */
 export class LoopFileDelivery {
 	private lastDelivered: string | null = null;
@@ -71,7 +69,7 @@ export class LoopFileDelivery {
 	}
 
 	/** The text of one tick for the loop.md sentinel. */
-	resolve(cwd: string, mode: TickMode): string {
+	resolve(cwd: string): string {
 		const file = readLoopFile(cwd);
 		if (file) {
 			if (this.lastDelivered === file.content) {
