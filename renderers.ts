@@ -5,7 +5,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { bodyLines, contentText, formatStamp, renderBlock, renderCard, stripProvenance } from "./render.ts";
+import { bodyLines, contentText, formatStamp, renderBlock, renderCard } from "./render.ts";
 import { loadConfig } from "./config.ts";
 import { humanSchedule } from "./cron.ts";
 import { displayPrompt } from "./loopfile.ts";
@@ -56,7 +56,8 @@ export interface ScheduledDetails {
  */
 export function renderScheduledMessage(message: any, options: any, theme: Theme): any {
 	const details = (message.details ?? {}) as ScheduledDetails;
-	const prompt = details.prompt ?? stripProvenance(contentText(message.content), /^\[[^\]]*\]\n?/);
+	// The provenance line is addressed to the model, not the reader.
+	const prompt = details.prompt ?? contentText(message.content).replace(/^\[[^\]]*\]\n?/, "");
 	// A fixed interval fires a scheduled task; only a self-paced tick is a loop.
 	const label = details.missed
 		? "\u273b loop \u00b7 missed jobs"

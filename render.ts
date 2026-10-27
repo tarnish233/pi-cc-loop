@@ -36,11 +36,6 @@ export function contentText(content: unknown): string {
 	return "";
 }
 
-/** Remove the provenance line the model needs but the reader does not. */
-export function stripProvenance(text: string, pattern: RegExp): string {
-	return text.replace(pattern, "");
-}
-
 /** Cap a string for a display line, with an ellipsis. */
 export function truncate(text: string, max: number): string {
 	const flat = text.replace(/\s+/g, " ").trim();
