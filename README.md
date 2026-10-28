@@ -96,7 +96,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
   "footer": true,            // 底部摘要：loop 的一行和 Monitor 的 `monitor N`
   "draft": true,             // pi-cc-plugins：Ctrl+C 找回
   "turnSummary": true,       // pi-cc-plugins：回合摘要一行
-  "ccKeys": true,            // pi-cc-plugins：Enter 排队、Ctrl+Enter 直发
+  "ccKeys": true,            // pi-cc-plugins：Enter 排队、↑ 取回待发消息
   "compaction": true,        // pi-cc-compaction：Claude Code 的压缩
   "idleCompaction": true     // pi-cc-compaction：空闲压缩
 }
