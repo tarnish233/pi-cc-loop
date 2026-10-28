@@ -3,6 +3,7 @@
  * session that holds .pi/scheduled_tasks.lock.
  */
 import assert from "node:assert";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import test from "node:test";
 import { makeHarness, start, stateEntries } from "./harness.mjs";
 import { loadModule } from "./helpers.mjs";
 
-const { DurableRuntime } = await loadModule("durable.ts");
+const { DurableRuntime, DurableStore } = await loadModule("durable.ts");
 const { DEFAULT_TIMING, LoopScheduler } = await loadModule("schedule.ts");
 
 const tempProject = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-durable-"));
@@ -163,12 +164,57 @@ test("a job copied from another folder is listed but not run", () => {
 	assert.deepEqual(a.runtime.foreignJobs().map((job) => [job.id, job.foreignReason]), [["copied", "other-folder"]]);
 });
 
-test("a symlinked .pi refuses durable jobs, like Claude Code", () => {
+test("a symlinked .pi refuses all durable mutations, including deleting a job", () => {
 	const cwd = tempProject();
 	const elsewhere = tempProject();
+	fs.writeFileSync(path.join(elsewhere, "scheduled_tasks.json"), JSON.stringify({ version: 1, jobs: [cronJob("a1")] }));
 	fs.symlinkSync(elsewhere, path.join(cwd, ".pi"));
 	const a = session(cwd, 1001);
-	assert.throws(() => a.runtime.add(cronJob("a1")), /symlink/);
+	assert.throws(() => a.runtime.add(cronJob("a2")), /symlink/);
+	assert.throws(() => a.runtime.remove("a1"), /symlink/);
+	assert.deepEqual(readFile(cwd).map((job) => job.id), ["a1"], "the symlink target was never edited");
+	assert.throws(() => a.runtime.start(), /symlink/, "startup must not create a scheduler lock through the symlink");
+	assert.equal(fs.existsSync(path.join(elsewhere, "scheduled_tasks.lock")), false);
+});
+
+test("concurrent durable writers do not overwrite jobs saved by another process", async () => {
+	const cwd = tempProject();
+	const dir = path.join(cwd, ".pi");
+	const file = path.join(dir, "scheduled_tasks.json");
+	fs.mkdirSync(dir);
+	fs.writeFileSync(file, JSON.stringify({ version: 1, jobs: [] }));
+	const ready = path.join(dir, "writer-ready");
+	const otherJob = cronJob("other");
+	const script = `const fs=require('node:fs'),os=require('node:os');
+		const [file,ready,job]=process.argv.slice(1),lock=file+'.write.lock';
+		fs.writeFileSync(lock,JSON.stringify({pid:process.pid,hostname:os.hostname()}));
+		fs.writeFileSync(ready,'ready');
+		setTimeout(()=>{fs.writeFileSync(file,JSON.stringify({version:1,jobs:[JSON.parse(job)]}));fs.unlinkSync(lock)},250);`;
+	const child = spawn(process.execPath, ["-e", script, file, ready, JSON.stringify(otherJob)], { stdio: "ignore" });
+	try {
+		const until = Date.now() + 3000;
+		while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+		assert.ok(fs.existsSync(ready), "the other process holds the writer lock");
+		new DurableStore(cwd).upsert(cronJob("mine"));
+		await new Promise((resolve) => child.once("exit", resolve));
+		assert.deepEqual(readFile(cwd).map((job) => job.id).sort(), ["mine", "other"]);
+	} finally {
+		if (child.exitCode === null) child.kill();
+	}
+});
+
+test("a symlinked durable store does not stop session-only schedules", async () => {
+	const cwd = tempProject();
+	const elsewhere = tempProject();
+	fs.writeFileSync(path.join(elsewhere, "scheduled_tasks.json"), JSON.stringify({ version: 1, jobs: [cronJob("a1")] }));
+	fs.symlinkSync(elsewhere, path.join(cwd, ".pi"));
+	const h = await start(makeHarness(cwd));
+	try {
+		await h.tools.get("cron_create").execute("c", { cron: "*/5 * * * *", prompt: "session-only" }, undefined, undefined, h.ctx);
+		assert.equal(h.scheduler().list().some((job) => job.prompt === "session-only"), true);
+	} finally {
+		h.scheduler().stop();
+	}
 });
 
 test("the runtime files are added to .git/info/exclude", () => {

@@ -20,9 +20,11 @@
  *   - The runtime files are added to `.git/info/exclude`.
  */
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withFileLock } from "./config.ts";
 import { nextRunTime, storedJob, type LoopJob, type LoopScheduler, type TimingConfig } from "./schedule.ts";
 
 export const DURABLE_FILE = path.join(".pi", "scheduled_tasks.json");
@@ -37,9 +39,13 @@ interface DurableFileData {
 }
 
 function writeAtomic(file: string, text: string): void {
-	const temp = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(temp, text, "utf8");
-	fs.renameSync(temp, file);
+	const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		fs.writeFileSync(temp, text, "utf8");
+		fs.renameSync(temp, file);
+	} finally {
+		fs.rmSync(temp, { force: true });
+	}
 }
 
 function isSymlink(file: string): boolean {
@@ -94,17 +100,26 @@ export class DurableStore {
 	/** Insert or replace one job, keeping every other job in the file. */
 	upsert(job: LoopJob): void {
 		this.assertWritable();
-		const jobs = this.read().filter((other) => other.id !== job.id);
-		jobs.push(storedJob(job));
-		this.write(jobs);
+		fs.mkdirSync(this.dir, { recursive: true });
+		withFileLock(this.file, () => {
+			this.assertWritable();
+			const jobs = this.read().filter((other) => other.id !== job.id);
+			jobs.push(storedJob(job));
+			this.write(jobs);
+		});
 	}
 
 	remove(id: string): boolean {
-		const jobs = this.read();
-		const kept = jobs.filter((job) => job.id !== id);
-		if (kept.length === jobs.length) return false;
-		this.write(kept);
-		return true;
+		this.assertWritable();
+		if (!this.exists()) return false;
+		return withFileLock(this.file, () => {
+			this.assertWritable();
+			const jobs = this.read();
+			const kept = jobs.filter((job) => job.id !== id);
+			if (kept.length === jobs.length) return false;
+			this.write(kept);
+			return true;
+		});
 	}
 
 	private write(jobs: LoopJob[]): void {
@@ -257,7 +272,7 @@ export function ensureGitExclude(cwd: string): void {
 		const file = path.join(common, "info", "exclude");
 		const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 		const lines = current.split("\n").map((line) => line.trim());
-		const wanted = ["**/.pi/scheduled_tasks.json", "**/.pi/scheduled_tasks.lock"];
+		const wanted = ["**/.pi/scheduled_tasks.json", "**/.pi/scheduled_tasks.lock", "**/.pi/scheduled_tasks.json.write.lock"];
 		const missing = wanted.filter((entry) => !lines.includes(entry));
 		if (!missing.length) return;
 		fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -310,7 +325,10 @@ export class DurableRuntime {
 
 	/** Take the lock if the project has durable jobs, then load them. */
 	start(now = Date.now()): void {
-		if (this.store.exists()) this.acquireAndLoad(now);
+		if (this.store.exists()) {
+			this.store.assertWritable();
+			this.acquireAndLoad(now);
+		}
 	}
 
 	stop(): void {
@@ -321,6 +339,7 @@ export class DurableRuntime {
 	maintain(now = Date.now()): void {
 		if (now - this.lastMaintenance < this.options.syncMs()) return;
 		this.lastMaintenance = now;
+		this.store.assertWritable();
 		if (!this.owner) {
 			if (this.store.exists()) this.acquireAndLoad(now);
 			return;

@@ -177,6 +177,8 @@ npx --yes -p typescript@5.9.3 tsc --noEmit -p tsconfig.json
 node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
 
+四个仓库共同使用的 `config.ts`、`settings.ts`（以及 loop/monitor 的 `render.ts`）以本仓库为维护源。修改后在本仓库运行 `node scripts/sync-shared.mjs` 同步到同级仓库；`node scripts/sync-shared.mjs --check` 只检查，不改文件。各仓库的 `tests/shared.test.mjs` 也会检查副本一致。
+
 ### 缓存约束
 
 提示缓存按前缀匹配（工具 → system prompt → 消息），扩展只能往对话末尾追加：

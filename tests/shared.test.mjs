@@ -5,6 +5,7 @@
  * comparison is skipped when that sibling checkout is missing.
  */
 import assert from "node:assert";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -18,6 +19,12 @@ const SHARED = {
 	"settings.ts": SIBLINGS,
 	"render.ts": SIBLINGS.filter((name) => name !== "pi-cc-plugins" && name !== "pi-cc-compaction"),
 };
+
+test("the shared source has a check-only sync command", () => {
+	const script = path.join(extensionDir, "scripts", "sync-shared.mjs");
+	const result = spawnSync(process.execPath, [script, "--check"], { cwd: extensionDir, encoding: "utf8" });
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+});
 
 for (const [file, siblings] of Object.entries(SHARED)) {
 	// pi-cc-plugins and pi-cc-compaction carry no render.ts: they render nothing

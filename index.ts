@@ -1135,7 +1135,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		durable?.stop();
 		restoreState(ctx, (event as { reason?: string } | undefined)?.reason);
 		durable = createDurable(ctx.cwd);
-		durable.start();
+		try {
+			durable.start();
+		} catch (error) {
+			// Refusing a symlinked or unreadable durable store must not disable
+			// this session's ordinary (non-durable) scheduled jobs.
+			notify(ctx, `Durable jobs unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		scheduler.start();
 	});
 
