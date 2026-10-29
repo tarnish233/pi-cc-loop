@@ -16,7 +16,8 @@
  *   - The session holding the lock runs the durable jobs and picks up jobs
  *     other sessions add or remove. The lock carries a heartbeat; a lock whose
  *     heartbeat is older than a minute (or whose process is gone) is stale and
- *     can be taken over.
+ *     can be taken over. A PID identifies a process, not a session: main and
+ *     subagent sessions in that process each get their own ownership token.
  *   - The runtime files are added to `.git/info/exclude`.
  */
 
@@ -132,6 +133,8 @@ export class DurableStore {
 interface LockInfo {
 	pid: number;
 	hostname: string;
+	/** Absent on legacy locks, which remain valid until released or stale. */
+	ownerToken?: string;
 	acquiredAt: number;
 	heartbeatAt: number;
 }
@@ -159,6 +162,7 @@ export class SchedulerLock {
 	owned = false;
 	private readonly pid: number;
 	private readonly hostname: string;
+	private readonly ownerToken = randomUUID();
 	private readonly isAlive: (pid: number) => boolean;
 	private readonly staleMs: number;
 
@@ -184,57 +188,76 @@ export class SchedulerLock {
 		return info.hostname === this.hostname && !this.isAlive(info.pid);
 	}
 
-	tryAcquire(now = Date.now()): boolean {
-		if (this.owned) return true;
-		for (let attempt = 0; attempt < 2; attempt++) {
-			try {
-				fs.mkdirSync(path.dirname(this.file), { recursive: true });
-				const fd = fs.openSync(this.file, "wx");
-				const info: LockInfo = { pid: this.pid, hostname: this.hostname, acquiredAt: now, heartbeatAt: now };
-				fs.writeSync(fd, `${JSON.stringify(info)}\n`);
-				fs.closeSync(fd);
-				this.owned = true;
-				return true;
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-				const info = this.holder();
-				// The same process after /reload, a dead process, or a missed heartbeat.
-				const takeOver = !info || info.pid === this.pid || this.isStale(info, now);
-				if (!takeOver) return false;
-				try {
-					fs.rmSync(this.file, { force: true });
-				} catch {
-					return false;
-				}
-			}
-		}
-		return false;
+	private matches(info: LockInfo | null): boolean {
+		return info?.pid === this.pid && info.hostname === this.hostname && info.ownerToken === this.ownerToken;
 	}
 
-	heartbeat(now = Date.now()): void {
-		if (!this.owned) return;
-		const info = this.holder();
-		if (!info || info.pid !== this.pid) {
-			// Someone took the lock over (we were considered stale).
-			this.owned = false;
-			return;
-		}
+	/** Check the file, not only the instance's last acquisition result. */
+	owns(): boolean {
+		if (this.owned && !this.matches(this.holder())) this.owned = false;
+		return this.owned;
+	}
+
+	/** Serialize takeovers, heartbeats and releases across processes too. */
+	private guarded<T>(action: () => T): T {
+		fs.mkdirSync(path.dirname(this.file), { recursive: true });
+		return withFileLock(this.file, action);
+	}
+
+	tryAcquire(now = Date.now()): boolean {
 		try {
-			writeAtomic(this.file, `${JSON.stringify({ ...info, heartbeatAt: now })}\n`);
+			return this.guarded(() => {
+				const held = this.holder();
+				if (this.matches(held)) return (this.owned = true);
+				this.owned = false;
+				// /reload releases the old instance first. Sharing its PID does not
+				// let a concurrent child session steal its still-live lock.
+				if (held && !this.isStale(held, now)) return false;
+				fs.rmSync(this.file, { force: true });
+				const fd = fs.openSync(this.file, "wx");
+				try {
+					const info: LockInfo = { pid: this.pid, hostname: this.hostname, ownerToken: this.ownerToken, acquiredAt: now, heartbeatAt: now };
+					fs.writeSync(fd, `${JSON.stringify(info)}\n`);
+				} finally {
+					fs.closeSync(fd);
+				}
+				return (this.owned = true);
+			});
 		} catch {
-			// a missed heartbeat only matters after a minute
+			this.owned = false;
+			return false;
+		}
+	}
+
+	/** Renew only our own lease; a failed renewal must not permit dispatch. */
+	heartbeat(now = Date.now()): boolean {
+		if (!this.owned) return false;
+		try {
+			return this.guarded(() => {
+				const info = this.holder();
+				if (!this.matches(info)) {
+					this.owned = false;
+					return false;
+				}
+				writeAtomic(this.file, `${JSON.stringify({ ...info, heartbeatAt: now })}\n`);
+				return true;
+			});
+		} catch {
+			this.owned = false;
+			return false;
 		}
 	}
 
 	release(): void {
 		if (!this.owned) return;
-		this.owned = false;
-		if (this.holder()?.pid === this.pid) {
-			try {
-				fs.rmSync(this.file, { force: true });
-			} catch {
-				// a stale lock is taken over after a minute anyway
-			}
+		try {
+			this.guarded(() => {
+				if (this.matches(this.holder())) fs.rmSync(this.file, { force: true });
+			});
+		} catch {
+			// a stale lock is taken over after a minute anyway
+		} finally {
+			this.owned = false;
 		}
 	}
 }
@@ -272,7 +295,7 @@ export function ensureGitExclude(cwd: string): void {
 		const file = path.join(common, "info", "exclude");
 		const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 		const lines = current.split("\n").map((line) => line.trim());
-		const wanted = ["**/.pi/scheduled_tasks.json", "**/.pi/scheduled_tasks.lock", "**/.pi/scheduled_tasks.json.write.lock"];
+		const wanted = ["**/.pi/scheduled_tasks.json", "**/.pi/scheduled_tasks.lock", "**/.pi/scheduled_tasks.json.write.lock", "**/.pi/scheduled_tasks.lock.write.lock"];
 		const missing = wanted.filter((entry) => !lines.includes(entry));
 		if (!missing.length) return;
 		fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -316,7 +339,15 @@ export class DurableRuntime {
 	}
 
 	get owner(): boolean {
-		return this.lock.owned;
+		return this.lock.owns();
+	}
+
+	/** Revalidate and renew immediately before a durable fire, even when sync is throttled. */
+	canDispatch(): boolean {
+		this.lastHeartbeat = Date.now();
+		if (this.lock.heartbeat(this.lastHeartbeat)) return true;
+		this.dropLoadedJobs();
+		return false;
 	}
 
 	holderPid(): number | undefined {
@@ -341,6 +372,7 @@ export class DurableRuntime {
 		this.lastMaintenance = now;
 		this.store.assertWritable();
 		if (!this.owner) {
+			this.dropLoadedJobs();
 			if (this.store.exists()) this.acquireAndLoad(now);
 			return;
 		}
@@ -383,6 +415,10 @@ export class DurableRuntime {
 
 	/** Record a fire: update the job in the file, or remove it after its last run. */
 	afterFire(job: LoopJob, finished: boolean): void {
+		if (!this.owner) {
+			this.dropLoadedJobs();
+			return;
+		}
 		try {
 			if (finished) this.store.remove(job.id);
 			else this.store.upsert(job);

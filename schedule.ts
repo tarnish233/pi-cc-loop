@@ -149,8 +149,8 @@ export interface SchedulerHooks {
 	afterDispatch?: (job: LoopJob, finished: boolean) => void;
 	/** Called whenever the job set changes, so state can be persisted. */
 	onChange?: (jobs: LoopJob[]) => void;
-	/** True when the agent is idle and has nothing queued: a tick may go out. */
-	canDispatch?: () => boolean;
+	/** True when idle and this job may fire (durable jobs also need their live lock). */
+	canDispatch?: (job: LoopJob) => boolean;
 	/** The offsets to apply to run times. */
 	timing?: () => TimingConfig;
 	/** Max age of a recurring job in ms; 0 disables the limit. */
@@ -321,7 +321,7 @@ export class LoopScheduler {
 			.filter((candidate) => candidate.pending)
 			.sort((a, b) => (a.dueAt ?? 0) - (b.dueAt ?? 0))[0];
 		if (!job) return;
-		if (this.hooks.canDispatch && !this.hooks.canDispatch()) return;
+		if (this.hooks.canDispatch && !this.hooks.canDispatch(job)) return;
 
 		job.pending = false;
 		job.dueAt = undefined;

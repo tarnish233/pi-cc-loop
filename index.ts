@@ -194,11 +194,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			persist(jobs);
 			refreshStatus(jobs);
 		},
-		canDispatch: () => {
+		canDispatch: (job) => {
 			const ctx = lastCtx;
 			if (!ctx) return false;
 			try {
-				return ctx.isIdle() && !ctx.hasPendingMessages();
+				if (!ctx.isIdle() || ctx.hasPendingMessages()) return false;
+				return !job.durable || durable?.canDispatch() === true;
 			} catch {
 				return false;
 			}
