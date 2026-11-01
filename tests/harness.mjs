@@ -32,6 +32,9 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 	const statuses = new Map();
 	const statusCalls = [];
 	let registeredToolNames = [];
+	// Most unit tests invoke tool id "c" directly, without generating a model
+	// response. Boundary tests replace this finalized assistant batch.
+	let toolCalls = [{ type: "toolCall", id: "c", name: "schedule_wakeup", arguments: {} }];
 
 	// One slot in `handlers` runs every handler registered for that key, the
 	// way Pi dispatches an event to all of a session's extensions.
@@ -124,7 +127,10 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 		hasUI: true,
 		mode: "tui",
 		cwd: workdir,
-		sessionManager: { getEntries: () => [] },
+		sessionManager: {
+			getEntries: () => [],
+			getBranch: () => [{ type: "message", message: { role: "assistant", content: toolCalls } }],
+		},
 		isIdle: () => state.idle,
 		hasPendingMessages: () => state.pending,
 		abort: () => {},
@@ -155,6 +161,10 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 		/** Pretend another extension registered a tool. */
 		setRegisteredTools(names) {
 			registeredToolNames = names;
+		},
+		/** The finalized tool-call batch of the current assistant response. */
+		setToolCalls(calls) {
+			toolCalls = calls;
 		},
 		/** The scheduler the extension just created. */
 		scheduler: () => mod.getScheduler(),

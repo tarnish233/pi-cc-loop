@@ -67,13 +67,18 @@ function makeCtx(workdir) {
 		hasUI: true,
 		mode: "tui",
 		cwd: workdir,
-		sessionManager: { getEntries: () => [] },
+		sessionManager: {
+			getEntries: () => [],
+			// These tests call tools directly; supply the finalized singleton
+			// assistant response that a real model-issued wakeup would have.
+			getBranch: () => [{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c", name: "schedule_wakeup", arguments: {} }] } }],
+		},
 		isIdle: () => true,
 		hasPendingMessages: () => false,
 	};
 }
 
-test("/loop stop takes the chain's monitor down with it", async () => {
+test("/loop stop takes the chain's monitor down with it", async (t) => {
 	const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-integ-"));
 	process.chdir(workdir);
 
@@ -84,6 +89,18 @@ test("/loop stop takes the chain's monitor down with it", async () => {
 	monitorMod.default(pi);
 
 	const ctx = makeCtx(workdir);
+	t.after(async () => {
+		try {
+			const list = await tools.get("monitor_list").execute("cleanup", {}, undefined, undefined, ctx);
+			for (const monitor of list.details.monitors) {
+				if (monitor.status === "running") await tools.get("monitor_stop").execute("cleanup", { id: monitor.id }, undefined, undefined, ctx);
+			}
+		} finally {
+			loopMod.getScheduler()?.stop();
+			loopMod.getScheduler()?.clear(false);
+			fs.rmSync(workdir, { recursive: true, force: true });
+		}
+	});
 
 	// 1. the model starts a self-paced loop
 	const armedLoop = await tools

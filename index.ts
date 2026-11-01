@@ -143,6 +143,22 @@ function normalizePrompt(prompt: string): string {
 	return prompt.trim().replace(/^\/loop\s+/i, "").trim();
 }
 
+/** Pi only terminates a batch when every call agrees; never arm from a mixed or nested call. */
+function requireStandaloneWakeup(toolCallId: string, ctx: Pick<ExtensionContext, "sessionManager">): void {
+	const branch = ctx.sessionManager.getBranch?.() ?? [];
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const calls = entry.message.content.filter((block) => block.type === "toolCall");
+		if (calls.length === 1 && calls[0].id === toolCallId && calls[0].name === "schedule_wakeup") return;
+		break;
+	}
+	throw new Error(
+		"No wakeup was scheduled: schedule_wakeup must be called directly as the only tool call in its assistant response, " +
+			"not through codemode or in a batch. Finish other tools and write your update first, then call it alone.",
+	);
+}
+
 /** A stored job as a codemode script sees it: every field, minus those holding no value (the value is JSON). */
 function jobValue(job: LoopJob): Record<string, string | number | boolean> {
 	return Object.fromEntries(Object.entries(storedJob(job)).filter(([, value]) => value !== undefined)) as Record<
@@ -866,6 +882,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "schedule_wakeup",
 		label: "ScheduleWakeup",
+		// A turn-control tool: codemode cannot propagate its terminate flag.
+		exposure: "model-only",
 		description: SCHEDULE_WAKEUP_DESCRIPTION,
 		promptSnippet: SCHEDULE_WAKEUP_SNIPPET,
 		parameters: Type.Object({
@@ -960,6 +978,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					structuredContent: value,
 				};
 			}
+
+			// Check the finalized assistant batch before changing any chain or timer.
+			requireStandaloneWakeup(_toolCallId, ctx);
 
 			// Claude Code rounds and clamps; only a change after rounding counts as clamped.
 			const requested = params.delaySeconds;

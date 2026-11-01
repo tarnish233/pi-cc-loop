@@ -69,10 +69,10 @@ const LOOP_COMMAND_GUIDELINES = [
 	"4. Never call `schedule_wakeup` for this loop: the cron fires its own ticks. Scheduling one would run the task twice.",
 	"",
 	"## Self-paced (no interval)",
-	"1. Do the task now, then write your update for the user.",
-	"2. Then call `schedule_wakeup` with `delaySeconds` (60-3600), a one-sentence `reason`, and `prompt` set to the same `/loop` input verbatim ({quoted}). The turn ends as soon as it returns, so call it last.",
+	"1. Do the task now.",
+	"2. If the next iteration waits on an external event and no monitor is running for it, arm `Monitor` once with `loopPrompt` set to {quoted}; keep `delaySeconds` at 1200-1800 as the fallback heartbeat.",
+	"3. Write your update for the user, then call `schedule_wakeup` directly with `delaySeconds` (60-3600), a one-sentence `reason`, and `prompt` set to the same `/loop` input verbatim ({quoted}). It must be the only tool call in that assistant response, not through codemode or in a batch. The turn ends as soon as it returns, so call it last.",
 	"{delayAdvice}",
-	"3. If the next iteration waits on an external event and no monitor is running for it, arm `Monitor` once with `loopPrompt` set to {quoted}; keep `delaySeconds` at 1200-1800 as the fallback heartbeat.",
 	"4. If the task is complete or cannot progress without the user, call `schedule_wakeup` with `stop: true` and say why.",
 	"",
 	"## status and stop",
@@ -94,6 +94,8 @@ const LOOP_GUIDELINES = [
 	"- To continue, call the `schedule_wakeup` tool with `delaySeconds` (60-3600), a one-sentence `reason`,",
 	"  and `prompt` set to the same /loop prompt verbatim: {quoted}",
 	"- Write your update for the user before you call `schedule_wakeup`: the turn ends as soon as it returns.",
+	"- Call it directly as the only tool call in that assistant response, never through codemode or in a batch.",
+	"  Finish any Monitor or other tool calls in earlier responses, before this final wakeup call.",
 	DELAY_ADVICE,
 	"- If the task is complete, or the loop cannot move further without the user, call `schedule_wakeup`",
 	"  with `stop: true` instead and say why.",
@@ -112,7 +114,7 @@ const MONITOR_GUIDELINES = [
 	"this step while a monitor for it is still running.",
 	"While a monitor is armed, keep `delaySeconds` at 1200-1800: the monitor is the wake signal and the",
 	"`schedule_wakeup` delay is only the fallback heartbeat. When a monitor event wakes you, handle the event,",
-	"then decide whether the loop continues.",
+	"then decide whether the loop continues. Finish monitor calls before the final, standalone `schedule_wakeup` call.",
 ].join("\n");
 
 /**
@@ -215,8 +217,8 @@ Returns a job ID you can pass to cron_delete.`;
  * /loop request, not a scheduled tick). Claude Code's /loop skill says "Then
  * immediately run it now ... Don't wait for the first cron fire", and its model
  * reaches that skill for "every 5 minutes ..." typed without /loop: the skill is
- * listed every turn and CronCreate is a deferred tool. Pi has no deferred tools,
- * so the model calls cron_create directly and the result says it instead. A
+ * listed every turn and CronCreate is a deferred tool. This package exposes
+ * cron_create directly, so its result supplies that guidance instead. A
  * tool result is appended at the end of the transcript; the cache is untouched.
  */
 export const RUN_NOW_HINT =
@@ -229,7 +231,7 @@ export const CRON_DELETE_DESCRIPTION =
 export const CRON_LIST_DESCRIPTION =
 	"List the scheduled jobs, both durable (.pi/scheduled_tasks.json) and session-only, with their ids, schedules, actual next run times and prompts.";
 
-export const SCHEDULE_WAKEUP_DESCRIPTION = `Schedule when to resume work in a self-paced /loop \u2014 the user invoked /loop without an interval, asking you to self-pace iterations of a task. Call it as the last thing in the turn to keep the loop alive: the turn ends as soon as it returns, so write your update for the user first. To end the loop, call it with stop: true (omit every other field).
+export const SCHEDULE_WAKEUP_DESCRIPTION = `Schedule when to resume work in a self-paced /loop \u2014 the user invoked /loop without an interval, asking you to self-pace iterations of a task. Call it as the last thing in the turn to keep the loop alive: the turn ends as soon as it returns, so write your update for the user first. Call it directly as the only tool call in that assistant response, never through codemode or in a batch. Finish Monitor and other tools in earlier responses; unsafe arm calls are rejected without scheduling. To end the loop, call it with stop: true (omit every other field); stopping does not force the turn to end, so explain the outcome afterward.
 
 Pass the same /loop prompt back via \`prompt\` each turn so the next firing repeats the task. For a bare /loop (no prompt), pass the literal sentinel "${LOOP_FILE_SENTINEL}": it expands at fire time to the current loop.md tasks, or to the built-in maintenance pass when there is no loop.md.
 

@@ -11,15 +11,13 @@ const { Compile } = await import(pathToFileURL(path.join(install.root, "typebox"
 
 const check = (schema, value) => Compile(schema).Check(value);
 
-test("every tool gives codemode scripts structuredContent that matches its outputSchema", async () => {
+test("the callable cron tools give scripts structuredContent matching their outputSchema", async () => {
 	const h = await start(makeHarness());
 	const created = await h.tools.get("cron_create").execute("c", { cron: "*/5 * * * *", prompt: "check the deploy" }, undefined, undefined, h.ctx);
 	const calls = [
 		["cron_create", { cron: "0 9 * * *", prompt: "morning report" }, created],
 		["cron_list", {}, created],
 		["cron_delete", { id: created.structuredContent.id }, created],
-		["schedule_wakeup", { delaySeconds: 600, reason: "waiting for CI", prompt: "check CI" }, created],
-		["schedule_wakeup", { stop: true }, created],
 	];
 	for (const [name, args, first] of calls) {
 		const tool = h.tools.get(name);
@@ -57,4 +55,9 @@ test("a wakeup reports its schedule as values", async () => {
 	assert.equal(armed.structuredContent.wasClamped, false);
 	assert.ok(armed.structuredContent.scheduledFor > Date.now());
 	assert.equal(typeof armed.structuredContent.id, "string");
+	const tool = h.tools.get("schedule_wakeup");
+	assert.equal(tool.exposure, "model-only", "the structured output does not make a control tool script-callable");
+	assert.equal(check(tool.outputSchema, armed.structuredContent), true);
+	const stopped = await tool.execute("c", { stop: true }, undefined, undefined, h.ctx);
+	assert.equal(check(tool.outputSchema, stopped.structuredContent), true);
 });

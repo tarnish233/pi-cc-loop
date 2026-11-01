@@ -78,7 +78,9 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | `cron_list` | `CronList` | 列出任务和实际的下次运行时间（已含错峰） |
 | `schedule_wakeup` | `ScheduleWakeup` | 自定步调：`delaySeconds`（限制在 60–3600）、`reason`（必填，显示在触发块表头）、`prompt`；`stop: true` 结束 |
 
-四个工具都声明了 `outputSchema`：开了 codemode 时，脚本里 `tools.cron_create(...)`、`tools.cron_list()` 拿到的是结构化结果（`{ id, nextFireAt, … }`、`{ jobs: [...] }`），一个脚本里就能列任务、按条件批量取消，不用从文本里抠 id。没开 codemode 时没有影响。
+四个工具都声明了 `outputSchema`。三个 cron 工具保持可从 codemode 调用：`tools.cron_create(...)`、`tools.cron_list()` 返回结构化结果（`{ id, nextFireAt, … }`、`{ jobs: [...] }`），可以在脚本中批量查询/取消。
+
+`schedule_wakeup` 是 **model-only 的回合控制工具**：仍直接向模型声明，但不能通过 codemode 或其他工具间接调用。新建/续期必须是当前 assistant 响应中的唯一工具调用；先完成 Monitor 等操作并向用户更新，再单独调用。运行时无法确认独立调用、或发现同批有其他调用时，会拒绝且不创建/修改 wakeup。`stop: true` 不强制结束回合，仍可向用户说明停止结果；固定 cron tick 的重复 wakeup 仍保持无操作。
 
 ## 渲染
 
@@ -206,7 +208,7 @@ node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免
 
 - Esc 只取消被打断回合所属的自定步调 loop；CC 按 Esc（包括空闲时、打断无关回合时）会取消所有自定步调 loop。其他情况用 `/loop stop`。
 - 固定间隔的触发里调用 `schedule_wakeup` 会被当作空操作并返回说明，防止同一个任务又被自定步调重复调度；CC 没有这条硬规则。
-- 不带 `/loop` 的请求（比如"每分钟打印一次hello"）也会在建好任务后立即做一次。CC 靠模型自己调用 loop 技能做到（`CronCreate` 在 CC 里是延迟加载的工具，模型会先走技能）；Pi 没有延迟加载工具，这里改为在 `cron_create` 的结果里加一句提示，只在普通对话里建周期任务时出现。
+- 不带 `/loop` 的请求（比如"每分钟打印一次hello"）也会在建好任务后立即做一次。CC 靠模型自己调用 loop 技能做到（`CronCreate` 在 CC 里是延迟加载的工具，模型会先走技能）；本包默认直接声明 cron 工具，这里改为在 `cron_create` 的结果里加一句提示，只在普通对话里建周期任务时出现。
 - 底部摘要和 `maxFires` 次数上限是额外加的；CC 主会话不显示 loop 状态，也没有次数上限。
 - 自定步调 loop 结束（stop、Esc、`cron_delete`、兜底心跳用完）时，绑定的 Monitor 会被静默停止；CC 靠模型自己调用 `TaskStop`。
 - Monitor 事件不会取消待触发的 wakeup，它始终是兜底心跳（与 CC 一致）。
