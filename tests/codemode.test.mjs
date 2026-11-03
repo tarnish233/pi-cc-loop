@@ -1,15 +1,12 @@
-import assert from "node:assert";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
+import assert from "node:assert/strict";
 import test from "node:test";
-import { findPiInstall } from "./helpers.mjs";
+import { assertJsonRoundTrip, loadValidators } from "./helpers.mjs";
 import { makeHarness, start } from "./harness.mjs";
 
-// TypeBox's own validator, from the Pi installation the extension runs on.
-const install = findPiInstall();
-const { Compile } = await import(pathToFileURL(path.join(install.root, "typebox", "build", "compile", "index.mjs")).href);
+// Use the installation's engine: TypeBox before 1.5.0, pi-schema since 1.5.0.
+const { compile } = await loadValidators();
 
-const check = (schema, value) => Compile(schema).Check(value);
+const check = (schema, value) => compile(schema).check(value);
 
 test("the callable cron tools give scripts structuredContent matching their outputSchema", async () => {
 	const h = await start(makeHarness());
@@ -25,7 +22,7 @@ test("the callable cron tools give scripts structuredContent matching their outp
 		const result = first && name === "cron_create" ? first : await tool.execute("c", args, undefined, undefined, h.ctx);
 		assert.ok(result.structuredContent, `${name} returns structuredContent`);
 		assert.equal(check(tool.outputSchema, result.structuredContent), true, `${name}: ${JSON.stringify(result.structuredContent)}`);
-		assert.deepEqual(result.structuredContent, JSON.parse(JSON.stringify(result.structuredContent)), `${name} is JSON`);
+		assertJsonRoundTrip(result.structuredContent, `${name}.structuredContent`);
 	}
 });
 
