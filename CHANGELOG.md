@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-11-03
+
 ### Added
 - Repository-side `scripts/compat-check.mjs` checks this package and its siblings against an installed Pi release: all host aliases, runtime imports, real extension loading, tool schemas, and themes. It supports Pi 1.4.0 and 1.5.0, rejects inspection failures instead of silently skipping them, and can be invoked through a symlink.
 - Regression coverage for canonical and legacy host imports, incompatible schemas, Pi 1.4's compatibility exports, and single-release test environments.
