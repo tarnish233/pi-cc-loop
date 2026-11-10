@@ -18,6 +18,8 @@ const SHARED = {
 	"config.ts": SIBLINGS,
 	"settings.ts": SIBLINGS,
 	"render.ts": SIBLINGS.filter((name) => name !== "pi-cc-plugins" && name !== "pi-cc-compaction"),
+	// The /cc-tasks overlay is shared by exactly the two task-owning packages.
+	"tasks.ts": ["pi-cc-monitor"].filter((name) => name !== self),
 };
 
 test("the shared source has a check-only sync command", () => {

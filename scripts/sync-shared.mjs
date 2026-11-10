@@ -11,7 +11,7 @@ let different = false;
 for (const name of siblings) {
 	const target = path.resolve(source, "..", name);
 	if (!fs.existsSync(path.join(target, "package.json"))) continue;
-	for (const file of name === "pi-cc-monitor" ? ["config.ts", "settings.ts", "render.ts"] : ["config.ts", "settings.ts"]) {
+	for (const file of name === "pi-cc-monitor" ? ["config.ts", "settings.ts", "render.ts", "tasks.ts"] : ["config.ts", "settings.ts"]) {
 		const from = path.join(source, file);
 		const to = path.join(target, file);
 		if (fs.existsSync(to) && fs.readFileSync(from).equals(fs.readFileSync(to))) continue;

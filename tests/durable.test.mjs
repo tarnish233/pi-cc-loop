@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { makeHarness, start, stateEntries } from "./harness.mjs";
+import { createCron, makeHarness, start, stateEntries } from "./harness.mjs";
 import { loadModule } from "./helpers.mjs";
 
 const { DurableRuntime, DurableStore, SchedulerLock, LOCK_FILE, LOCK_STALE_MS } = await loadModule("durable.ts");
@@ -62,6 +62,55 @@ test("only the session holding the lock runs durable jobs", () => {
 		["a1", "other-session"],
 		["b1", "other-session"],
 	]);
+});
+
+test("a newly added durable job persists its armed jittered nextFireAt for foreign views", async () => {
+	const dir = tempProject();
+	const main = await start(makeHarness(dir));
+	try {
+		const created = await createCron(main, { cron: "*/5 * * * *", prompt: "future foreign view", durable: true });
+		const ownerNext = main.scheduler().get(created.id).nextFireAt;
+		assert.ok(Number.isFinite(ownerNext));
+		const stored = readFile(dir).find((job) => job.id === created.id);
+		assert.equal(stored.nextFireAt, ownerNext, "the owner's armed time is stored, not recomputed later");
+
+		const child = await start(makeHarness(dir));
+		try {
+			const foreign = child.tools.get("cron_list").execute("list", {}, undefined, undefined, child.ctx);
+			const snapshot = (await foreign).details.jobs.find((job) => job.id === created.id);
+			assert.equal(snapshot.nextFireAt, ownerNext, "a foreign read keeps the stored time after the cron minute opens");
+		} finally {
+			await child.handlers.get("session_shutdown")({ reason: "quit" }, child.ctx);
+		}
+	} finally {
+		await main.handlers.get("session_shutdown")({ reason: "quit" }, main.ctx);
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("foreign durable snapshots prefer stored times, including an overdue pending fire, and fall back only when missing/broken", () => {
+	const cwd = tempProject();
+	const { runtime } = session(cwd, 1001);
+	const store = new DurableStore(cwd);
+	const future = Date.now() + 300_000;
+	const overdue = Date.now() - 60_000;
+	try {
+		store.upsert(cronJob("future", { nextFireAt: future, createdInProject: cwd }));
+		store.upsert(cronJob("overdue", { nextFireAt: overdue, createdInProject: cwd }));
+		const missing = cronJob("missing", { createdInProject: cwd });
+		delete missing.nextFireAt;
+		store.upsert(missing);
+		store.upsert(cronJob("invalid", { nextFireAt: "soon", createdInProject: cwd }));
+
+		const byId = new Map(runtime.foreignJobs().map((job) => [job.id, job]));
+		assert.equal(byId.get("future").nextFireAt, future, "a future jittered time is authoritative");
+		assert.equal(byId.get("overdue").nextFireAt, overdue, "an overdue pending fire stays overdue, not invented into the future");
+		assert.ok(Number.isFinite(byId.get("missing").nextFireAt), "an old file without a stored time gets a fallback");
+		assert.ok(byId.get("missing").nextFireAt > Date.now(), "the fallback is the next cron slot");
+		assert.ok(Number.isFinite(byId.get("invalid").nextFireAt), "a broken stored time gets a fallback");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("main and subagent sessions sharing a PID never both run the same durable job", () => {

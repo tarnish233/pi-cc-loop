@@ -167,7 +167,7 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 			toolCalls = calls;
 		},
 		/** The scheduler the extension just created. */
-		scheduler: () => mod.getScheduler(),
+		scheduler: () => mod.getScheduler(h.pi),
 		/** Footer status text set through ctx.ui.setStatus. */
 		status: (key) => statuses.get(key),
 		statusCalls,
@@ -183,7 +183,7 @@ export async function start(h, event = {}) {
 	process.env.PI_LOOP_DURABLE_SYNC_MS = "0";
 	factory(h.pi);
 	// Keep this harness's own scheduler: another harness may be created later.
-	const scheduler = mod.getScheduler();
+	const scheduler = mod.getScheduler(h.pi);
 	h.scheduler = () => scheduler;
 	await h.handlers.get("session_start")(event, h.ctx);
 	return h;

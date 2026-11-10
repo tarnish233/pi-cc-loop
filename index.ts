@@ -58,6 +58,7 @@ import {
 } from "./prompts.ts";
 import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
 import { CONFIG_CHANNEL, registerPiCcCommand } from "./settings.ts";
+import { registerTaskProvider, type TaskDetail, type TaskItem, type TaskStopResult } from "./tasks.ts";
 import {
 	DEFAULT_TIMING,
 	generateId,
@@ -143,6 +144,15 @@ function normalizePrompt(prompt: string): string {
 	return prompt.trim().replace(/^\/loop\s+/i, "").trim();
 }
 
+/** A clock time for the task panel: today gets "6:16pm", an older date its month and day. */
+function dateTime(epochMs: number | undefined): string {
+	if (epochMs === undefined || !Number.isFinite(epochMs)) return "\u2014";
+	const date = new Date(epochMs);
+	if (Number.isNaN(date.getTime())) return "?";
+	if (date.toDateString() === new Date().toDateString()) return formatClock(epochMs);
+	return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${formatClock(epochMs)}`;
+}
+
 /** Pi only terminates a batch when every call agrees; never arm from a mixed or nested call. */
 function requireStandaloneWakeup(toolCallId: string, ctx: Pick<ExtensionContext, "sessionManager">): void {
 	const branch = ctx.sessionManager.getBranch?.() ?? [];
@@ -167,11 +177,15 @@ function jobValue(job: LoopJob): Record<string, string | number | boolean> {
 	>;
 }
 
-/** The live scheduler, for tests. */
-let activeScheduler: LoopScheduler | null = null;
+/**
+ * The scheduler of one extension instance, keyed by its own `pi` object. Tests
+ * and the task-panel provider use this instead of a process-global "last
+ * scheduler": several sessions or subagents in one process must not mix.
+ */
+const schedulers = new WeakMap<ExtensionAPI, LoopScheduler>();
 
-export function getScheduler(): LoopScheduler | null {
-	return activeScheduler;
+export function getScheduler(pi: ExtensionAPI): LoopScheduler | undefined {
+	return schedulers.get(pi);
 }
 
 export default function piCcLoopExtension(pi: ExtensionAPI): void {
@@ -209,6 +223,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		onChange: (jobs) => {
 			persist(jobs);
 			refreshStatus(jobs);
+			tasks.changed();
 		},
 		canDispatch: (job) => {
 			const ctx = lastCtx;
@@ -236,7 +251,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			refreshStatus();
 		},
 	});
-	activeScheduler = scheduler;
+	schedulers.set(pi, scheduler);
 
 	// ---------------------------------------------------------------- helpers
 
@@ -661,6 +676,151 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		].join("\n");
 		notify(ctx, help, "info");
 	}
+
+	// ------------------------------------------------------------- task panel
+
+	/** One job by id, including a durable job another session runs. */
+	function jobFor(id: string): (LoopJob & { foreignReason?: "other-session" | "other-folder" }) | undefined {
+		return scheduler.get(id) ?? durable?.foreignJobs().find((job) => job.id === id);
+	}
+
+	/** The live state a pending/wakeup job is in right now. */
+	function jobState(job: LoopJob & { foreignReason?: string }, now: number): string {
+		if (job.foreignReason) return job.foreignReason === "other-folder" ? "foreign (other folder)" : "foreign (other session)";
+		if (job.pending) return "pending (waiting for idle)";
+		if (job.kind === "wakeup") {
+			if (job.keepaliveTurn) return "keepalive turn";
+			if (job.awaitingReschedule) {
+				try {
+					return lastCtx?.isIdle() === false ? "active (turn running)" : "active / awaiting reschedule";
+				} catch {
+					return "active / awaiting reschedule";
+				}
+			}
+		}
+		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
+		if (at !== undefined && at <= now) return "due";
+		return at !== undefined ? "scheduled" : "armed";
+	}
+
+	function jobItem(job: LoopJob & { foreignReason?: string }, now: number): TaskItem {
+		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
+		const meta: string[] = [];
+		if (job.pending) meta.push("waiting for idle");
+		else if (job.foreignReason) meta.push(job.foreignReason === "other-folder" ? "other folder" : "other session");
+		else if (at !== undefined) meta.push(`${at <= now ? "due" : "next"} ${at <= now ? "now" : formatEta(at - now)}`);
+		meta.push(`${job.fireCount ?? 0} fire${job.fireCount === 1 ? "" : "s"}`);
+		if (job.durable) meta.push("durable");
+		return {
+			id: job.id,
+			title: displayPrompt(job.prompt),
+			state: jobState(job, now).replace(/ \(.*$/, ""),
+			active: true,
+			meta: meta.join(" · "),
+			order: job.createdAt,
+		};
+	}
+
+	function jobDetail(job: LoopJob & { foreignReason?: string }, now: number): TaskDetail {
+		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
+		const state = jobState(job, now);
+		const ownership = job.foreignReason
+			? job.foreignReason === "other-folder"
+				? "durable · copied from another folder (listed, not run here)"
+				: "durable · run by another Pi session in this project"
+			: job.durable
+				? durable?.owner
+					? "durable · run by this session"
+					: "durable · loaded, but another session holds the scheduler lock"
+				: "session only";
+		const fires = `${job.fireCount ?? 0}${job.maxFires !== undefined ? `/${job.maxFires}` : ""}` +
+			(job.lastFiredAt !== undefined ? ` · last ${dateTime(job.lastFiredAt)}` : "");
+		const rows = [
+			{ label: "Kind", value: job.kind === "cron" ? "fixed interval (cron)" : "self-paced wakeup" },
+			{ label: "State", value: state },
+			{
+				label: "Schedule",
+				value: job.kind === "cron" ? `${job.cron ?? "?"} (${humanSchedule(job.cron ?? "")})` : "self-paced: the model picks the next delay",
+			},
+			{
+				label: "Next run",
+				value:
+					at === undefined
+						? "unscheduled"
+						: `${dateTime(at)} · ${at <= now ? "due now" : `in ${formatEta(at - now)}`} · ${at} ms`,
+			},
+			{ label: "Reason", value: job.reason ?? "—" },
+			{ label: "Fires", value: fires },
+			{
+				label: "Pending",
+				value: job.pending
+					? `yes · since ${dateTime(job.dueAt)} · waiting for the agent to go idle`
+					: "no",
+			},
+			{
+				label: "Chain",
+				value:
+					job.kind === "wakeup"
+						? job.awaitingReschedule
+							? "active · the turn is running or waiting to reschedule"
+							: job.keepaliveUsed
+								? "keepalive used"
+								: "armed"
+						: "fixed interval · fires its own next tick",
+			},
+			{ label: "Ownership", value: ownership },
+			{ label: "Prompt", value: displayPrompt(job.prompt) },
+			{ label: "Source", value: job.source },
+			{ label: "Created", value: dateTime(job.createdAt) },
+			{ label: "Project", value: job.createdInProject ?? "—" },
+			{ label: "Keepalive", value: job.keepaliveUsed ? (job.keepaliveTurn ? "this turn is the keepalive" : "used once") : "not used" },
+		] satisfies TaskDetail["rows"];
+		return {
+			rows,
+			note: job.foreignReason
+				? "Not running here. x removes it from .pi/scheduled_tasks.json; it does not abort another session's turn."
+				: "x removes the schedule (and any Monitor bound to a stopped self-paced loop). It does not abort the main agent.",
+		};
+	}
+
+	function stopTask(id: string): TaskStopResult {
+		const job = scheduler.get(id);
+		if (job) {
+			if (job.kind === "wakeup") retireChain(job, "stopped from task panel");
+			else removeJob(job);
+			tasks.changed();
+			return { stopped: true, message: `Cancelled ${job.kind === "wakeup" ? "self-paced loop" : "scheduled job"} ${id}.` };
+		}
+		// A durable job this session does not run: cancel its store entry, as
+		// cron_delete does, without touching any session's current turn.
+		const foreign = durable?.foreignJobs().find((candidate) => candidate.id === id);
+		if (foreign && durable?.remove(id)) {
+			tasks.changed();
+			return {
+				stopped: true,
+				message: `Cancelled durable job ${id} (${foreign.foreignReason === "other-folder" ? "copied from another folder" : "run by another session"}).`,
+			};
+		}
+		return { stopped: false, message: `No scheduled job with id ${id}.` };
+	}
+
+	// The shared task overlay. The provider reads the live LoopJob objects
+	// (never cron_list's text, which drops pending/awaitingReschedule), so the
+	// next run is the already-jittered time the scheduler will actually use.
+	const tasks = registerTaskProvider(pi, {
+		id: "loop",
+		label: "Loop",
+		list(): TaskItem[] {
+			const now = Date.now();
+			return listJobs().map((job) => jobItem(job, now));
+		},
+		detail(item: TaskItem): TaskDetail {
+			const job = jobFor(item.id);
+			if (!job) throw new Error("this job is no longer listed");
+			return jobDetail(job, Date.now());
+		},
+		stop: stopTask,
+	});
 
 	// The shared pi-cc settings and their /pi_cc command. The first pi-cc
 	// package to load registers it; this one re-claims its own claim on /reload.
@@ -1168,6 +1328,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		// Close an open task overlay while the context is still valid.
+		tasks.close();
 		// Pi clears extension statuses when it unloads, but a reload should not
 		// leave a stale count behind until then.
 		try {
@@ -1179,6 +1341,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		durable?.stop();
 		durable = undefined;
 		scheduler.clear(false);
+		schedulers.delete(pi);
 	});
 
 	// -------------------------------------------------------------- restoring

@@ -402,6 +402,11 @@ export class DurableRuntime {
 			this.save(job);
 		} else {
 			this.acquireAndLoad(now);
+			// The new job was loaded from the file and armed in the scheduler.
+			// Persist that already-jittered time so another session's read-only
+			// view does not have to recompute it from a later clock.
+			const loaded = this.options.scheduler.get(job.id);
+			if (loaded) this.save(loaded);
 		}
 		return this.owner ? { runsHere: true } : { runsHere: false, holderPid: this.holderPid() };
 	}
@@ -433,11 +438,22 @@ export class DurableRuntime {
 		return this.store
 			.read()
 			.filter((job) => !this.options.scheduler.get(job.id))
-			.map((job) => ({
-				...job,
-				nextFireAt: nextRunTime(job, job.recurring ? Date.now() : job.createdAt, this.options.timing()) ?? undefined,
-				foreignReason: this.ownsProject(job) ? ("other-session" as const) : ("other-folder" as const),
-			}));
+			.map((job) => {
+				// Prefer the owner's persisted, already-jittered run time. It may be
+				// in the past when the owner is busy and the fire is waiting for
+				// idle: keeping it is the honest read-only snapshot. Only old or
+				// broken files need a computed fallback.
+				const storedNext = typeof job.nextFireAt === "number" && Number.isFinite(job.nextFireAt) ? job.nextFireAt : undefined;
+				const nextFireAt =
+					storedNext ??
+					nextRunTime(job, job.recurring ? Date.now() : job.createdAt, this.options.timing()) ??
+					undefined;
+				return {
+					...job,
+					nextFireAt,
+					foreignReason: this.ownsProject(job) ? ("other-session" as const) : ("other-folder" as const),
+				};
+			});
 	}
 
 	private ownsProject(job: LoopJob): boolean {

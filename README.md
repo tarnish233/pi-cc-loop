@@ -37,6 +37,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 过期 | 周期任务 7 天后最后执行一次再删除；一次性任务不过期 | 自动 |
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
+| 任务面板 | 一个原生的 TUI 浮层，统一查看本会话的 Loop 和 Monitor 任务；本地命令，不进对话 | `/tasks`（重名时改用 `/cc-tasks`，二选一） |
 | 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
 | 界面设置 | 按插件分页的设置面板，本地命令，不进对话 | `/pi_cc` |
 
@@ -50,9 +51,11 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 /loop stop [id]           停止一个或全部
 /loop help                本地：帮助
 /pi_cc                    本地：pi-cc 设置面板（见下）
+/tasks                    本地：任务面板（All / Monitor / Loop），名称空闲时注册
+/cc-tasks                 本地：/tasks 已占用时改用；不与 /tasks 同时注册
 ```
 
-前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；后两个只改界面，不进对话。
+前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；`/loop help`、`/pi_cc` 和选中的任务面板入口（`/tasks` 或 `/cc-tasks`）只改界面，不进对话。
 旧的 `/loop footer`、`/loop settings` 会提示改用 `/pi_cc`，不会当成 loop 请求。
 
 间隔写法没有约束，模型自己解析：`30s`、`5m`、`2h`、`1d`、`check the deploy every 20m`、
@@ -68,6 +71,39 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 
 `/reload` 先由旧实例释放锁，新实例再获取；持锁进程退出或心跳超过 60 秒未更新时，其他实例可以接管。
 旧实例不会续写或删除新实例的锁。旧版没有实例令牌的锁仍被尊重，释放或过期后才换成新版格式；任务文件无需迁移。
+
+## 任务面板 `/tasks`
+
+启动时二选一注册：`/tasks` 未被占用就只注册 `/tasks`；已被占用就只注册 `/cc-tasks`（连字符），不再注册旧的 `/cc_tasks`（下划线）。选中的入口打开原生的 Pi 浮层（`ctx.ui.custom(..., { overlay: true })`），不是编辑器里的快捷键，也不经过模型：
+打开、刷新、关闭都不会发消息、不会开新一轮、不会改工具集，模型正在回复时也可以打开。RPC 模式通过 `ctx.ui.notify` 输出一段文字摘要；print/JSON 模式是安全 no-op（不调用 TUI 方法，也不输出摘要）。
+
+```text
+╭──────────────────────────────────────────────────────────────────╮
+│ Tasks                                                  Esc close │
+│ All 3  /  Monitor 2  /  Loop 1                                   │
+├──────────────────────────────────────────────────────────────────┤
+│ ▸ M running deploy errors · 4 ev · 1m 12s                        │
+│   M exited  health check · 2 ev · 5s                             │
+│   L scheduled watch CI · next 2m · 3 fires                       │
+├──────────────────────────────────────────────────────────────────┤
+│ Tab switch · ↑↓ select · Enter detail · x stop · Esc close       │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+- **范围**：只列本会话的任务；本项目的 durable 任务按锁的归属显示，别的会话执行的任务标成 foreign，不会说成“正在这里运行”。不做跨会话的全局面板。
+- **Tab / Shift+Tab**：All / Monitor / Loop 三页。上下键走 Pi 的 `tui.select.up/down` 命名动作，所以会跟随你的 keybindings；PgUp/PgDn 翻页。选中项用 `provider + id` 记录，刷新或增删任务后不会跳到别的任务上。
+- **Enter**：详情。Esc 先回列表，再按一次才关面板；关面板只关 UI，不取消任何任务，也不会把 Esc 传给 app.interrupt。
+- **Loop 详情**：cron 还是自定步调、实际的下次时间（`nextFireAt` / `scheduledFor`，已含错峰，不是从 `cron_list` 文本里猜的）、模型给的 reason、触发次数、是否 pending 等待 agent 空闲、是否 active / 等待重新调度、durable 归属；还会区分 `--durable` 里别的会话执行或从别的目录复制来的任务。
+- **Monitor 详情**：状态、命令或 WebSocket、事件数与限流丢弃数、已运行时间、超时/常驻、退出码、绑定的 loop；stdout/stderr 只读**有上限的尾部**（约最后 8KB / 60 行），ANSI 和控制字符会被剥掉。日志不存在或读不了只显示说明，不影响 monitor；读日志也不会喂给 Monitor 的事件流。
+- **刷新**：任务变化会通知面板，但会按 250ms 合并；时间显示每秒走一次。不会每来一行 stdout 就重绘。窗口窄、调整终端大小、宽字符（中文/emoji）、主题切换都有处理，正文高度有上限并可滚动。
+- **`x` 停止**：先本地确认（`y` / `n`），不经过模型。它复用各包自己的停止逻辑：
+  - Monitor 走 `endMonitor`：结束进程树或关闭 socket，并照常发一条 `[Monitor stopped]`。
+  - 自定步调 loop 走 `retireChain`：记下已停止的 prompt 防止迟到的 `schedule_wakeup` 复活，并通过 `loop:stopped` 连带停止绑定的 Monitor。
+  - cron / durable 走 `removeJob` / durable store 删除；别的会话执行的 durable 任务只删存储里的那一条。
+  - **停止的是计划，不是主 agent**：不会 abort 当前回复，也不会结束正在运行的 turn；要中断模型请照常按 Esc 或用 Pi 的 abort。
+- 已结束的 Monitor 记录仍会列出，但停止动作禁用。v1 不做暂停/恢复、不改 cron、不做每个 loop 的独立 transcript，也不保留已结束 loop 的历史。
+
+两个包共用一套命令注册：只装 loop 或只装 monitor 都能使用；两个都装时也只注册一个面板入口。所有 `session_start` 处理完成、构建补全列表之前，会检查当时已加载的扩展命令和 prompt 模板（包括已重名的 `/tasks:1` 等入口）：名称空闲时只注册 `/tasks`；已占用时不抢占、不新增 `/tasks:1`，只注册 `/cc-tasks`。无法安全查询命令列表的旧版宿主也只提供 `/cc-tasks`。同一运行时不因再次资源发现而切换或补注册别名；`/reload` 会为新的扩展实例重新检查。检查不覆盖其他插件之后动态新增的命令。任务面板入口不是 `/pi_cc`（设置面板），也不改变 `/loop` 的语义。
 
 ## 工具
 
@@ -175,7 +211,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 ## 兼容性
 
 - Node.js `>=22.19.0`
-- Pi 1.3.0、1.4.0（测试通过）
+- Pi 1.5.0、1.5.1（本次发版检查通过）；Pi 1.3.0 / 1.4.0 本次未重新验收
 - `pi-cc-monitor` 可选：自定步调 loop 需要等外部事件时会用它，loop 结束时连带停止；两者通过 `pi.events` 通信
 - 与 `pi-cc-extensions` 共存。本扩展不写其他插件的配置文件；旧版本在 `pi-cc-extensions.json` 里加过的
   `cron_create`、`cron_delete`、`cron_list`、`schedule_wakeup` 这几条 `excludeRenderers` 可以删掉
@@ -188,7 +224,7 @@ npx --yes -p typescript@5.9.3 tsc --noEmit -p tsconfig.json
 node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
 
-四个仓库共同使用的 `config.ts`、`settings.ts`（以及 loop/monitor 的 `render.ts`）以本仓库为维护源。修改后在本仓库运行 `node scripts/sync-shared.mjs` 同步到同级仓库；`node scripts/sync-shared.mjs --check` 只检查，不改文件。各仓库的 `tests/shared.test.mjs` 也会检查副本一致。
+四个仓库共同使用的 `config.ts`、`settings.ts`（以及 loop/monitor 的 `render.ts`、`tasks.ts`）以本仓库为维护源。修改后在本仓库运行 `node scripts/sync-shared.mjs` 同步到同级仓库；`node scripts/sync-shared.mjs --check` 只检查，不改文件。各仓库的 `tests/shared.test.mjs` 也会检查副本一致。
 
 ### 缓存约束
 

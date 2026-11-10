@@ -96,8 +96,8 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 				if (monitor.status === "running") await tools.get("monitor_stop").execute("cleanup", { id: monitor.id }, undefined, undefined, ctx);
 			}
 		} finally {
-			loopMod.getScheduler()?.stop();
-			loopMod.getScheduler()?.clear(false);
+			loopMod.getScheduler(pi)?.stop();
+			loopMod.getScheduler(pi)?.clear(false);
 			fs.rmSync(workdir, { recursive: true, force: true });
 		}
 	});
@@ -162,6 +162,6 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 	);
 
 	// 7. and no chain is left behind
-	const scheduler = loopMod.getScheduler();
+	const scheduler = loopMod.getScheduler(pi);
 	assert.equal(scheduler.list().length, 0, "no loop job is left");
 });
