@@ -47,7 +47,7 @@ test("a fixed interval is explained to the model, including the no-wakeup rule",
 	assert.ok(text.includes('"5m check the deploy"'), "the request is quoted for the model");
 });
 
-test("a request without an interval is explained as self-paced", async () => {
+test("a standalone request without an interval is self-paced without inventing a Monitor tool", async () => {
 	const h = await start(makeHarness());
 	await loop(h).handler("check the deploy", h.ctx);
 	const event = runEvent(h.sent[0]);
@@ -55,7 +55,32 @@ test("a request without an interval is explained as self-paced", async () => {
 	const text = guidelinesOf(event);
 	assert.match(text, /Self-paced/);
 	assert.match(text, /schedule_wakeup/);
-	assert.match(text, /Monitor/);
+	assert.doesNotMatch(text, /arm `Monitor`/);
+	assert.doesNotMatch(text, /loopPrompt/);
+});
+
+test("the initial self-paced run includes Monitor only when the tool is available", async () => {
+	const h = await start(makeHarness());
+	h.setRegisteredTools(["Monitor"]);
+	await loop(h).handler("check the deploy", h.ctx);
+	const event = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	const text = guidelinesOf(event);
+	assert.match(text, /arm `Monitor` once/);
+	assert.ok(text.includes('loopPrompt` set to "check the deploy"'));
+});
+
+test("hourly cron examples agree on an offset minute", async () => {
+	const h = await start(makeHarness());
+	await loop(h).handler("1h check the deploy", h.ctx);
+	const event = runEvent(h.sent[0]);
+	await h.handlers.get("before_agent_start")(event, h.ctx);
+	const text = guidelinesOf(event);
+	assert.ok(text.includes("hourly is `7 * * * *`"));
+	assert.ok(!text.includes("hourly is `0 * * * *`"));
+	const description = h.tools.get("cron_create").description;
+	assert.ok(description.includes('"7 * * * *" (hourly, offset from :00)'));
+	assert.ok(!description.includes('"0 * * * *" (hourly)'));
 });
 
 test("/loop typed mid-turn waits for a clean turn instead of splitting the request", async () => {
@@ -97,19 +122,32 @@ test("a bare /loop points at loop.md", async () => {
 	assert.match(guidelinesOf(event), /<<loop\.md>>/);
 });
 
-test("stop and status are forwarded too, and tell the model which tools to use", async () => {
+test("stop and status use short management rules instead of the full loop tutorial", async () => {
 	const h = await start(makeHarness());
 	await loop(h).handler("stop", h.ctx);
 	assert.equal(h.sent[0].content, "/loop stop");
 	const stopEvent = runEvent(h.sent[0]);
 	await h.handlers.get("before_agent_start")(stopEvent, h.ctx);
-	assert.match(guidelinesOf(stopEvent), /cron_list/);
-	assert.match(guidelinesOf(stopEvent), /cron_delete/);
+	const stopText = guidelinesOf(stopEvent);
+	assert.match(stopText, /cron_list/);
+	assert.match(stopText, /cron_delete/);
+	assert.match(stopText, /both fixed and self-paced loops/);
+	assert.match(stopText, /Do not use `schedule_wakeup` for a `\/loop stop` request/);
+	assert.doesNotMatch(stopText, /## Fixed interval|## Self-paced|## Flags and loop.md/);
 
 	await loop(h).handler("status", h.ctx);
 	const statusEvent = runEvent(h.sent.at(-1));
 	await h.handlers.get("before_agent_start")(statusEvent, h.ctx);
-	assert.match(guidelinesOf(statusEvent), /cron_list/);
+	const statusText = guidelinesOf(statusEvent);
+	assert.match(statusText, /cron_list/);
+	assert.doesNotMatch(statusText, /## Fixed interval|## Self-paced|## Flags and loop.md/);
+
+	await loop(h).handler("5m check the deploy", h.ctx);
+	const ordinaryEvent = runEvent(h.sent.at(-1));
+	await h.handlers.get("before_agent_start")(ordinaryEvent, h.ctx);
+	const ordinaryText = guidelinesOf(ordinaryEvent);
+	assert.ok(stopText.length < ordinaryText.length / 3, "stop no longer carries unrelated scheduling instructions");
+	assert.ok(statusText.length < ordinaryText.length / 3, "status no longer carries unrelated scheduling instructions");
 });
 
 test("settings and help stay in code: they are not loop requests", async () => {
@@ -183,6 +221,46 @@ test("a recurring job asked for in plain words is done once now too; /loop runs,
 
 	await userTurn("every 2 minutes print the time");
 	assert.match((await create({ cron: "*/2 * * * *", prompt: "print the time" })).text, hint, "a plain turn after a /loop run");
+});
+
+test("cron_create reports the configured expiry policy, including disabled expiry", async (t) => {
+	const previous = process.env.PI_LOOP_MAX_AGE_DAYS;
+	t.after(() => {
+		if (previous === undefined) delete process.env.PI_LOOP_MAX_AGE_DAYS;
+		else process.env.PI_LOOP_MAX_AGE_DAYS = previous;
+	});
+	const h = await start(makeHarness());
+	process.env.PI_LOOP_MAX_AGE_DAYS = "0";
+	const disabled = await createCron(h, { cron: "*/5 * * * *", prompt: "no expiry" });
+	assert.match(disabled.result.content[0].text, /do not expire \(PI_LOOP_MAX_AGE_DAYS=0\)/);
+	assert.doesNotMatch(disabled.result.content[0].text, /0 days/);
+
+	process.env.PI_LOOP_MAX_AGE_DAYS = "14";
+	const configured = await createCron(h, { cron: "*/5 * * * *", prompt: "configured expiry" });
+	assert.match(configured.result.content[0].text, /auto-expire after 14 days/);
+	assert.doesNotMatch(configured.result.content[0].text, /7 days/);
+});
+
+test("a failed loop.md/maintenance delivery retries with the full body", async () => {
+	const h = await start(makeHarness());
+	const send = h.pi.sendMessage;
+	let attempts = 0;
+	h.pi.sendMessage = (message, options) => {
+		attempts++;
+		if (attempts === 1) throw new Error("transient send failure");
+		send(message, options);
+	};
+	const job = await createCron(h, { cron: "0 9 22 10 *", prompt: "<<loop.md>>", recurring: false });
+	makeDue(h, job.id);
+	h.scheduler().tick();
+	assert.ok(h.scheduler().get(job.id), "the rejected one-shot remains scheduled");
+	assert.equal(h.sent.length, 0);
+
+	h.scheduler().tick();
+	assert.equal(h.sent.length, 1);
+	assert.match(textOf(h.sent[0]), /scheduled maintenance pass/);
+	assert.doesNotMatch(textOf(h.sent[0]), /instructions established earlier/, "the retry cannot refer to a body Pi never accepted");
+	assert.equal(h.scheduler().get(job.id), undefined);
 });
 
 test("a scheduled fire says it fires on its own, and the reader sees no provenance", async () => {

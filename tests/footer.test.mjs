@@ -35,6 +35,16 @@ test("the next run under a minute reads as <1m", async () => {
 	assert.equal(h.status("loop"), "1 loop · next <1m");
 });
 
+test("a job pending behind a busy agent reads as waiting, not next <1m", async () => {
+	const h = await start(makeHarness());
+	const job = await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
+	h.state.idle = false;
+	h.scheduler().update(job.id, { nextFireAt: Date.now() - 1 });
+	h.scheduler().tick();
+	assert.equal(h.scheduler().get(job.id).pending, true);
+	assert.equal(h.status("loop"), "1 loop · waiting");
+});
+
 test("several loops collapse into one count with the earliest run", async () => {
 	const h = await start(makeHarness());
 	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });

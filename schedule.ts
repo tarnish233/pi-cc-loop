@@ -16,9 +16,11 @@
  *     expire.
  *   - Run times carry Claude Code's fixed per-job offset (see nextRunTime).
  *
- * There is no delivery confirmation or retry: Pi marks the session busy as
- * soon as a tick starts a turn, so the idle check alone keeps ticks one at a
- * time, and a tick that fails to start is dropped (Claude Code drops it too).
+ * There is no delivery confirmation after Pi accepts a message: Pi marks the
+ * session busy as soon as a tick starts a turn, so the idle check alone keeps
+ * ticks one at a time. If delivery itself throws, a recurring tick is dropped
+ * (Claude Code drops it too) without consuming a fire; one-shots and wakeups
+ * stay due so a later scan can retry them.
  */
 
 import { nextFireAfter, parseCron } from "./cron.ts";
@@ -159,7 +161,7 @@ export interface SchedulerHooks {
 	onExpire?: (job: LoopJob) => void;
 	/** Runs at the start of every scan (housekeeping such as durable jobs). */
 	onScan?: (now: number) => void;
-	/** A delivery threw (Pi's API is stale once the session is replaced); the tick is dropped. */
+	/** Delivery threw before Pi accepted the tick; no fire was consumed. */
 	onDispatchError?: (job: LoopJob, error: Error) => void;
 }
 
@@ -323,8 +325,18 @@ export class LoopScheduler {
 		if (!job) return;
 		if (this.hooks.canDispatch && !this.hooks.canDispatch(job)) return;
 
+		const dueAt = job.dueAt ?? now;
+		const previous = {
+			fireCount: job.fireCount,
+			lastFiredAt: job.lastFiredAt,
+			nextFireAt: job.nextFireAt,
+			awaitingReschedule: job.awaitingReschedule,
+			keepaliveTurn: job.keepaliveTurn,
+		};
 		job.pending = false;
 		job.dueAt = undefined;
+		// deliverTick reads this tentative count for its cap notice. A delivery
+		// exception rolls it back along with every other pre-delivery mutation.
 		job.fireCount = (job.fireCount ?? 0) + 1;
 		job.lastFiredAt = now;
 
@@ -346,10 +358,27 @@ export class LoopScheduler {
 		try {
 			this.hooks.dispatch(job);
 		} catch (error) {
-			// Dropped, like any tick that fails to start; the job keeps its next
-			// run. Not rethrown: this runs from a timer, where an exception would
-			// take Pi down with it.
+			if (previous.fireCount === undefined) delete job.fireCount; else job.fireCount = previous.fireCount;
+			if (previous.lastFiredAt === undefined) delete job.lastFiredAt; else job.lastFiredAt = previous.lastFiredAt;
+			if (job.kind === "wakeup") {
+				// markDue consumed the wakeup before dispatch. Restore a past due
+				// time so the next scan can retry without creating another chain.
+				job.scheduledFor = dueAt;
+				if (previous.awaitingReschedule === undefined) delete job.awaitingReschedule;
+				else job.awaitingReschedule = previous.awaitingReschedule;
+				if (previous.keepaliveTurn === undefined) delete job.keepaliveTurn;
+				else job.keepaliveTurn = previous.keepaliveTurn;
+			} else if (job.recurring) {
+				// Preserve the existing dropped-tick semantics, but ignore the
+				// tentative cap/expiry result: no successful fire may delete the job.
+				job.nextFireAt = nextRunTime(job, now, this.timing()) ?? previous.nextFireAt;
+			} else {
+				// A one-shot remains due and is removed only after an accepted fire.
+				job.nextFireAt = previous.nextFireAt;
+			}
 			this.hooks.onDispatchError?.(job, error instanceof Error ? error : new Error(String(error)));
+			this.changed();
+			return;
 		}
 		if (finished) this.jobs.delete(job.id);
 		this.hooks.afterDispatch?.(job, finished);

@@ -449,13 +449,13 @@ test("non-TUI modes report text and never touch TUI methods; standalone plugins 
 	await armMonitor(monitorOnly, { command: "sleep 30", description: "only monitor", persistent: true });
 	assert.deepEqual(ccTasksCommands(monitorOnly), ["cc-tasks"]);
 	const overlay = openTasks(monitorOnly);
-	// Only loaded providers get tabs: All -> Monitor -> All.
+	// One provider has one named view, not two identical All/Monitor tabs.
+	assert.match(monitorOnly.text(), /Monitor 1/);
+	assert.doesNotMatch(monitorOnly.text(), /All \d|Tab switch|Loop \d/);
 	monitorOnly.input("tab");
+	assert.match(monitorOnly.text(), /Monitor 1/);
 	assert.match(monitorOnly.text(), /only monitor/);
-	assert.doesNotMatch(monitorOnly.text(), /Loop \d/);
-	monitorOnly.input("tab");
-	assert.match(monitorOnly.text(), /All 1/);
-	assert.doesNotMatch(monitorOnly.text(), /Loop \d/);
+	assert.doesNotMatch(monitorOnly.text(), /All \d|Loop \d/);
 	monitorOnly.input("escape");
 	await overlay;
 
@@ -801,6 +801,9 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 		eventsBefore,
 		"reading logs did not feed Monitor's event stream",
 	);
+	const cachedLog = runtime.state.component.logs[0];
+	await sleep(1100);
+	assert.strictEqual(runtime.state.component.logs[0], cachedLog, "an unchanged file reuses its parsed tail across clock refreshes");
 
 	// Grow the log past the byte cap while the overlay is open. The next
 	// throttled refresh keeps only the bounded tail.
@@ -810,6 +813,11 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 	assert.match(bounded, /last \d+ lines?/, "the tail is labelled with its actual line count");
 	assert.ok(bounded.includes("last line"), "the most recent line survives the byte cap");
 	assert.ok(!tuiPkg.stripTerminalSequences(bounded).includes("\x1b"));
+	assert.notStrictEqual(runtime.state.component.logs[0], cachedLog, "a changed file is parsed again");
+
+	fs.appendFileSync(armed.details.outputPath, `${"B".repeat(300)} FINAL-MARKER\n`);
+	await sleep(1100);
+	assert.match(detailText(runtime), /FINAL-MARKER/, "width wrapping keeps the end of a long line reachable through scrolling");
 	runtime.input("escape");
 	runtime.input("escape");
 	await overlay;

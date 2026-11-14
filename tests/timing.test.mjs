@@ -17,14 +17,16 @@ const { DEFAULT_TIMING, LoopScheduler, nextRunTime } = schedule;
 const at = (iso) => new Date(iso).getTime();
 const job = (id, cronExpr, recurring = true) => ({ id, cron: cronExpr, recurring });
 
-test("a delivery that throws is dropped and reported, without escaping the scan", () => {
+test("a recurring delivery that throws is dropped without consuming a fire or escaping the scan", () => {
 	const errors = [];
+	const after = [];
 	const scheduler = new LoopScheduler({
 		dispatch: () => {
 			throw new Error("This extension ctx is stale");
 		},
 		canDispatch: () => true,
 		onDispatchError: (job, error) => errors.push(`${job.id}: ${error.message}`),
+		afterDispatch: (job, finished) => after.push([job.id, finished]),
 	});
 	const added = scheduler.add({
 		id: "j1",
@@ -40,8 +42,91 @@ test("a delivery that throws is dropped and reported, without escaping the scan"
 
 	assert.doesNotThrow(() => scheduler.tick(), "an exception in a timer callback would crash Pi");
 	assert.deepEqual(errors, ["j1: This extension ctx is stale"]);
-	assert.ok(!added.pending, "dropped, like any tick that fails to start");
+	assert.ok(!added.pending, "dropped, like any recurring tick that fails to start");
 	assert.ok(added.nextFireAt > Date.now(), "the job keeps its next run");
+	assert.equal(added.fireCount, undefined, "a failed delivery is not a fire");
+	assert.equal(added.lastFiredAt, undefined);
+	assert.deepEqual(after, [], "a failed delivery is not persisted as a fire");
+});
+
+test("a one-shot whose first delivery throws stays due and is deleted only after a successful retry", () => {
+	const attempts = [];
+	const after = [];
+	const errors = [];
+	const scheduler = new LoopScheduler({
+		dispatch: (job) => {
+			attempts.push(job.fireCount);
+			if (attempts.length === 1) throw new Error("transient delivery failure");
+		},
+		canDispatch: () => true,
+		onDispatchError: (job) => errors.push(job.id),
+		afterDispatch: (job, finished) => after.push([job.id, finished]),
+	});
+	const added = scheduler.add({
+		id: "once-retry", kind: "cron", cron: "0 9 22 10 *", prompt: "once", recurring: false,
+		createdAt: Date.now() - 1000, nextFireAt: Date.now() - 1, durable: false, source: "t", maxFires: 1,
+	});
+	added.nextFireAt = Date.now() - 1;
+	assert.doesNotThrow(() => scheduler.tick());
+	assert.equal(scheduler.get(added.id), added, "the failed one-shot was not deleted");
+	assert.equal(added.fireCount, undefined);
+	assert.ok(added.nextFireAt <= Date.now(), "it remains due");
+	assert.deepEqual(after, [], "durable removal is not requested for a failed delivery");
+
+	scheduler.tick();
+	assert.deepEqual(attempts, [1, 1], "the retry sees its first real fire, not fire number two");
+	assert.equal(scheduler.get(added.id), undefined, "the accepted one-shot is removed");
+	assert.deepEqual(after, [["once-retry", true]]);
+	assert.deepEqual(errors, ["once-retry"]);
+});
+
+test("a capped recurring job retries after a failed final-fire delivery", () => {
+	let attempts = 0;
+	const scheduler = new LoopScheduler({
+		dispatch: () => {
+			attempts++;
+			if (attempts === 1) throw new Error("try again");
+		},
+		canDispatch: () => true,
+	});
+	const added = scheduler.add({
+		id: "capped-retry", kind: "cron", cron: "* * * * *", prompt: "p", recurring: true,
+		createdAt: Date.now(), nextFireAt: Date.now() - 1, durable: false, source: "t", maxFires: 1,
+	});
+	added.nextFireAt = Date.now() - 1;
+	scheduler.tick();
+	assert.equal(scheduler.get(added.id), added, "a tentative cap cannot delete the job");
+	assert.equal(added.fireCount, undefined);
+	assert.ok(added.nextFireAt > Date.now(), "the failed recurring tick advances without consuming its cap");
+	added.nextFireAt = Date.now() - 1;
+	scheduler.tick();
+	assert.equal(attempts, 2);
+	assert.equal(added.fireCount, 1);
+	assert.equal(scheduler.get(added.id), undefined, "the successful first fire reaches the cap");
+});
+
+test("a failed wakeup delivery remains due without entering awaiting-reschedule limbo", () => {
+	let attempts = 0;
+	const scheduler = new LoopScheduler({
+		dispatch: () => {
+			attempts++;
+			if (attempts === 1) throw new Error("try again");
+		},
+		canDispatch: () => true,
+	});
+	const added = scheduler.add({
+		id: "wake-retry", kind: "wakeup", prompt: "p", recurring: false,
+		createdAt: Date.now(), scheduledFor: Date.now() - 1, durable: false, source: "t",
+	});
+	scheduler.tick();
+	assert.equal(added.awaitingReschedule, undefined);
+	assert.ok(added.scheduledFor <= Date.now(), "the wakeup is still due");
+	assert.equal(added.fireCount, undefined);
+	scheduler.tick();
+	assert.equal(attempts, 2);
+	assert.equal(added.fireCount, 1);
+	assert.equal(added.awaitingReschedule, true, "the accepted wakeup now belongs to its active turn");
+	assert.equal(added.scheduledFor, undefined);
 });
 
 test("a failing housekeeping step does not stop due jobs or escape the scan", () => {

@@ -6,23 +6,11 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { bodyLines, contentText, formatStamp, renderBlock, renderCard } from "./render.ts";
+export { formatClock } from "./render.ts";
 import { loadConfig } from "./config.ts";
 import { humanSchedule } from "./cron.ts";
 import { displayPrompt } from "./loopfile.ts";
 
-
-/**
- * A clock time the way Claude Code writes it: "6:16pm". Formatted here rather
- * than through the locale, so the transcript reads the same everywhere.
- */
-export function formatClock(epochMs: number | undefined): string {
-	if (!epochMs) return "unknown";
-	const date = new Date(epochMs);
-	const hour = date.getHours();
-	const suffix = hour < 12 ? "am" : "pm";
-	const twelve = hour % 12 === 0 ? 12 : hour % 12;
-	return `${twelve}:${String(date.getMinutes()).padStart(2, "0")}${suffix}`;
-}
 
 /**
  * A countdown for the footer: "3m", "<1m", "2h 15m". Rounded up and coarse on

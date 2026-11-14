@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-14
+
+### Added
+- Simplify the shared task UI: a sole provider no longer gets a duplicate All tab, settings show only loaded-package pages, log details cache unchanged files and wrap long lines, and pending loops display `waiting` in the footer.
+
+### Changed
+- Shorten model-facing loop and tool prompts with dedicated stop/status rules, conditional Monitor guidance, consistent offset cron examples and fixed-only durable/max-fire flags. `/loop stop/status` remain model-driven and Monitor's default mode is unchanged.
+- Scope `/pi_cc` ownership and capabilities to each Pi runtime. Independent sessions each get the command, mixed-version registries remain compatible, and text commands can still preconfigure unloaded packages.
+- Consolidate shared time formatting, remove unused task/stream fields, and use portable Pi/TypeScript discovery for repository type checking.
+
+### Fixed
+- Route `/loop stop <id>` through `cron_delete` for both cron and self-paced jobs instead of risking cancellation of every self-paced loop.
+- Roll back fire counts when delivery fails, keep one-shots and wakeups retryable, preserve durable records, and resend complete loopfile/maintenance content after a rejected delivery.
+- Report the configured recurring expiry policy, including disabled expiry, and truncate loop.md by UTF-8 bytes without splitting multibyte characters.
+
 ## [0.9.0] - 2026-11-14
 
 ### Added

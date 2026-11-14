@@ -19,8 +19,8 @@ import os from "node:os";
 import path from "node:path";
 import { LOOP_FILE_SENTINEL, MAINTENANCE_PROMPT } from "./prompts.ts";
 
-/** Claude Code truncates loop.md beyond this length. */
-export const LOOP_FILE_MAX_CHARS = 25_000;
+/** Claude Code truncates loop.md beyond this many UTF-8 bytes. */
+export const LOOP_FILE_MAX_BYTES = 25_000;
 
 const MAINTENANCE_MARKER = "\u0000maintenance";
 
@@ -54,9 +54,16 @@ export function readLoopFile(cwd: string): { path: string; content: string } | n
 }
 
 function truncate(content: string): string {
-	if (content.length <= LOOP_FILE_MAX_CHARS) return content;
-	const cut = content.lastIndexOf("\n", LOOP_FILE_MAX_CHARS);
-	return `${content.slice(0, cut > 0 ? cut : LOOP_FILE_MAX_CHARS)}\n> WARNING: loop.md was truncated to ${LOOP_FILE_MAX_CHARS} bytes. Keep the task list concise.`;
+	const bytes = Buffer.from(content, "utf8");
+	if (bytes.length <= LOOP_FILE_MAX_BYTES) return content;
+	// Start at the byte limit and back off only when it splits a UTF-8 code
+	// point. fs.readFileSync has already normalized the input to valid Unicode.
+	let end = LOOP_FILE_MAX_BYTES;
+	while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+	const prefix = bytes.subarray(0, end).toString("utf8");
+	const newline = prefix.lastIndexOf("\n");
+	const kept = newline > 0 ? prefix.slice(0, newline) : prefix;
+	return `${kept}\n> WARNING: loop.md was truncated to ${LOOP_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
 }
 
 /** Remembers what a session was last given, so unchanged tasks are not resent. */

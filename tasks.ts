@@ -40,7 +40,9 @@ import {
 	type KeybindingsManager,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { statSync } from "node:fs";
 import { readLogTail, sanitizeDisplay } from "./log-tail.ts";
+import { formatDateTime as dateTime } from "./render.ts";
 export { readLogTail, sanitizeDisplay, type LogTail } from "./log-tail.ts";
 
 /** Preferred entry when no loaded command or prompt already owns the name. */
@@ -134,8 +136,6 @@ export interface TaskItem {
 	parentId?: string;
 	/** Scope of the locally confirmed stop, supplied by the resource owner. */
 	stopConfirmation?: string;
-	/** Stable within a provider; lower comes first. */
-	order?: number;
 }
 
 /** The overlay's list entry: the provider identity is part of the key. */
@@ -364,9 +364,14 @@ function orderedProviders(registry: TaskRegistry): Array<[string, TaskProvider]>
 }
 
 function taskTabs(registry: TaskRegistry): TaskTab[] {
+	const providers = orderedProviders(registry);
+	if (!providers.length) return [{ id: "all", label: "All" }];
+	// All and a sole provider would show the same rows. Keep the provider's
+	// name on one tab instead of presenting two identical views.
+	if (providers.length === 1) return [{ id: "all", label: providers[0]![1].label || providers[0]![0] }];
 	return [
 		{ id: "all", label: "All" },
-		...orderedProviders(registry).map(([id, provider]) => ({ id, label: provider.label || id })),
+		...providers.map(([id, provider]) => ({ id, label: provider.label || id })),
 	];
 }
 
@@ -459,6 +464,16 @@ function oneLine(value: unknown): string {
 	return sanitizeDisplay(value).replace(/\s+/g, " ").trim();
 }
 
+function logSignature(filePath: string): string {
+	try {
+		const stat = statSync(filePath);
+		if (!stat.isFile()) return "not-a-file";
+		return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+	} catch {
+		return "unreadable";
+	}
+}
+
 interface OverlayOptions {
 	tui: TUI;
 	theme: Theme;
@@ -471,6 +486,8 @@ interface OverlayOptions {
 interface DetailLogView {
 	label: string;
 	path: string;
+	/** Cheap change key used to avoid reopening an unchanged log every second. */
+	signature: string;
 	note?: string;
 	lines: string[];
 }
@@ -523,23 +540,6 @@ function shortDuration(ms: number): string {
 	if (minutes < 60) return `${minutes}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
 	const hours = Math.floor(minutes / 60);
 	return `${hours}h${minutes % 60 ? ` ${minutes % 60}m` : ""}`;
-}
-
-function clock(ms: number): string {
-	const date = new Date(ms);
-	if (Number.isNaN(date.getTime())) return "?";
-	const hour = date.getHours();
-	const twelve = hour % 12 === 0 ? 12 : hour % 12;
-	return `${twelve}:${String(date.getMinutes()).padStart(2, "0")}${hour < 12 ? "am" : "pm"}`;
-}
-
-function dateTime(ms: number | undefined): string {
-	if (ms === undefined || !Number.isFinite(ms)) return "\u2014";
-	const date = new Date(ms);
-	if (Number.isNaN(date.getTime())) return "?";
-	const today = new Date();
-	if (date.toDateString() === today.toDateString()) return clock(ms);
-	return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${clock(ms)}`;
 }
 
 function eta(ms: number): string {
@@ -696,7 +696,7 @@ class TasksOverlay {
 
 	private refreshNow(render: boolean): void {
 		if (this.disposed) return;
-		if (this.tab !== "all" && !providerFor(this.options.registry, this.tab)) {
+		if (!taskTabs(this.options.registry).some((tab) => tab.id === this.tab)) {
 			this.tab = "all";
 			this.listScroll = 0;
 		}
@@ -773,14 +773,18 @@ class TasksOverlay {
 			return;
 		}
 		const refs = detail.logs ?? [];
-		// Re-read the bounded tails on every refresh: a live monitor's log grows
-		// while the detail is open. The refresh is already throttled and each read
-		// is capped by bytes and lines.
+		const previous = new Map(this.logs.map((log) => [log.path, log]));
+		// The one-second clock only stats live logs. Reopen and parse a bounded
+		// tail when its identity, size or timestamps actually changed.
 		this.logs = refs.map((log) => {
+			const signature = logSignature(log.path);
+			const cached = previous.get(log.path);
+			if (cached?.signature === signature && cached.label === log.label) return cached;
 			const tail = readLogTail(log.path);
 			return {
 				label: log.label,
 				path: log.path,
+				signature,
 				note: tail.note,
 				lines: tail.text ? tail.text.split("\n") : [],
 			};
@@ -1163,7 +1167,11 @@ class TasksOverlay {
 					lines.push(fitWidth(theme.fg("dim", "  (empty)"), width));
 				}
 				for (const line of log.lines) {
-					lines.push(fitWidth(theme.fg("text", `  ${line}`), width));
+					// Long log lines must remain readable through detail scrolling;
+					// truncating here would hide the ending readLogTail kept deliberately.
+					for (const part of wrapTextWithAnsi(line, Math.max(1, width - 2))) {
+						lines.push(fitWidth(theme.fg("text", `  ${part}`), width));
+					}
 				}
 			}
 		}
@@ -1205,10 +1213,10 @@ class TasksOverlay {
 			return fitWidth(theme.fg("dim", `\u2191\u2193 scroll \u00b7 pgUp/pgDn page \u00b7 x stop \u00b7 Esc back${scroll}`), width);
 		}
 		const newTask = this.recentTask ? theme.fg("warning", `new ${oneLine(this.recentTask)} \u00b7 `) : "";
-		return fitWidth(
-			newTask + theme.fg("dim", "Tab switch \u00b7 \u2191\u2193 select \u00b7 Enter detail \u00b7 x stop \u00b7 Esc close"),
-			width,
-		);
+		const controls = taskTabs(this.options.registry).length > 1
+			? "Tab switch \u00b7 \u2191\u2193 select \u00b7 Enter detail \u00b7 x stop \u00b7 Esc close"
+			: "\u2191\u2193 select \u00b7 Enter detail \u00b7 x stop \u00b7 Esc close";
+		return fitWidth(newTask + theme.fg("dim", controls), width);
 	}
 
 	private singleLine(width: number): string {

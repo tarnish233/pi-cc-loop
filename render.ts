@@ -60,22 +60,32 @@ export function bodyLines(text: string): string[] {
 		.filter((line) => line.trim().length > 0);
 }
 
+/** A clock time the way Claude Code writes it: "6:16pm". */
+export function formatClock(epochMs: number | undefined): string {
+	if (epochMs === undefined) return "unknown";
+	const date = new Date(epochMs);
+	if (Number.isNaN(date.getTime())) return "unknown";
+	const hour = date.getHours();
+	return `${hour % 12 === 0 ? 12 : hour % 12}:${String(date.getMinutes()).padStart(2, "0")}${hour < 12 ? "am" : "pm"}`;
+}
+
 /**
  * Format a timestamp the way Claude Code does: just the time for today,
- * "Oct 21 4:13 PM" for an older message.
+ * "Oct 21 4:13pm" for an older message.
  */
 export function formatStamp(epochMs: number | undefined): string {
 	const date = new Date(epochMs ?? Date.now());
 	if (Number.isNaN(date.getTime())) return "";
-	const now = new Date();
-	// Claude Code's clock style: "6:16pm", lowercase, no space.
-	const hour = date.getHours();
-	const time = `${hour % 12 === 0 ? 12 : hour % 12}:${String(date.getMinutes()).padStart(2, "0")}${
-		hour < 12 ? "am" : "pm"
-	}`;
-	if (date.toDateString() === now.toDateString()) return time;
+	const time = formatClock(date.getTime());
+	if (date.toDateString() === new Date().toDateString()) return time;
 	const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 	return `${day} ${time}`;
+}
+
+/** The task panel's nullable timestamp, shared by Loop, Monitor and the overlay. */
+export function formatDateTime(epochMs: number | undefined): string {
+	if (epochMs === undefined || !Number.isFinite(epochMs)) return "\u2014";
+	return formatStamp(epochMs) || "?";
 }
 
 /**

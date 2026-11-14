@@ -68,7 +68,7 @@ import {
 	type LoopJob,
 	type TimingConfig,
 } from "./schedule.ts";
-import { truncate } from "./render.ts";
+import { formatDateTime as dateTime, truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 /** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
@@ -142,15 +142,6 @@ function durableSyncMs(): number {
 /** Models used to Claude Code may echo the prompt with its `/loop ` prefix. */
 function normalizePrompt(prompt: string): string {
 	return prompt.trim().replace(/^\/loop\s+/i, "").trim();
-}
-
-/** A clock time for the task panel: today gets "6:16pm", an older date its month and day. */
-function dateTime(epochMs: number | undefined): string {
-	if (epochMs === undefined || !Number.isFinite(epochMs)) return "\u2014";
-	const date = new Date(epochMs);
-	if (Number.isNaN(date.getTime())) return "?";
-	if (date.toDateString() === new Date().toDateString()) return formatClock(epochMs);
-	return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${formatClock(epochMs)}`;
 }
 
 /** Pi only terminates a batch when every call agrees; never arm from a mixed or nested call. */
@@ -243,7 +234,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		},
 		onDispatchError: (job, error) => {
 			const ctx = lastCtx;
-			if (ctx) notify(ctx, `loop ${job.id}: this tick could not be delivered and was skipped (${error.message})`, "warning");
+			if (!ctx) return;
+			const outcome = job.kind === "wakeup" || !job.recurring ? "it remains due for retry" : "this tick was skipped without consuming a fire";
+			notify(ctx, `loop ${job.id}: delivery failed; ${outcome} (${error.message})`, "warning");
 		},
 		onScan: (now) => {
 			durable?.maintain(now);
@@ -324,15 +317,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	function statusText(jobs: LoopJob[]): string | undefined {
 		if (!jobs.length) return undefined;
+		const label = jobs.length === 1 ? "loop" : "loops";
+		if (jobs.some((job) => job.pending)) return `${jobs.length} ${label} \u00b7 waiting`;
 		const now = Date.now();
 		const next = Math.min(
 			...jobs.map((job) => {
-				if (job.pending) return now;
 				const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
 				return at ?? now;
 			}),
 		);
-		const label = jobs.length === 1 ? "loop" : "loops";
 		return `${jobs.length} ${label} \u00b7 next ${formatEta(Math.max(0, next - now))}`;
 	}
 
@@ -503,24 +496,32 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		// rebuilt from `details` in before_agent_start.
 		const cadence = job.kind === "cron" ? humanSchedule(job.cron ?? "* * * * *") : undefined;
 		const stamp = cadence ? scheduledTaskProvenance(job.id, cadence) : provenance(tick);
-		pi.sendMessage(
-			{
-				customType: TICK_MESSAGE_TYPE,
-				content: `${stamp}\n${body}`,
-				display: true,
-				details: {
-					kind: job.kind,
-					tickCount: tick,
-					jobId: job.id,
-					cron: job.cron,
-					prompt: body,
-					reason: job.reason,
+		try {
+			pi.sendMessage(
+				{
+					customType: TICK_MESSAGE_TYPE,
+					content: `${stamp}\n${body}`,
+					display: true,
+					details: {
+						kind: job.kind,
+						tickCount: tick,
+						jobId: job.id,
+						cron: job.cron,
+						prompt: body,
+						reason: job.reason,
+					},
 				},
-			},
-			// `triggerTurn` is what starts the run: without it the message is
-			// only recorded and nothing ever happens.
-			{ deliverAs: "followUp", triggerTurn: true },
-		);
+				// `triggerTurn` is what starts the run: without it the message is
+				// only recorded and nothing ever happens.
+				{ deliverAs: "followUp", triggerTurn: true },
+			);
+		} catch (error) {
+			// resolve() remembers a loop.md/maintenance body as delivered. If Pi
+			// rejected the message, a one-shot/wakeup retry must send the full
+			// body again rather than a reminder that refers to a missing message.
+			loopFile.reset();
+			throw error;
+		}
 		// Counted only once the message is in: a throw here means the tick never
 		// happened, so it must not use up a number.
 		tickCounters.set(job.prompt, tick);
@@ -632,7 +633,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// drives cron_create / cron_list / cron_delete / schedule_wakeup itself.
 			// The per-run rules travel with the run through before_agent_start.
 			const text = raw ? `/loop ${raw}` : "/loop";
-			const guidelines = [loopCommandGuidelines(raw)];
+			const guidelines = [loopCommandGuidelines(raw, { monitorAvailable: monitorToolAvailable() })];
 			const send = () => {
 				// The user asking for this loop again is a new loop: the mark that
 				// keeps a late schedule_wakeup from reviving a stopped chain must
@@ -718,7 +719,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			state: jobState(job, now).replace(/ \(.*$/, ""),
 			active: true,
 			meta: meta.join(" · "),
-			order: job.createdAt,
+
 		};
 	}
 
@@ -850,7 +851,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			recurring: Type.Optional(
 				Type.Boolean({
 					description:
-						"true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete.",
+						"true (default) = fire on every cron match until deleted or past the configured age limit (7 days by default). false = fire once at the next match, then auto-delete.",
 				}),
 			),
 			durable: Type.Optional(
@@ -921,7 +922,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				lines.push("Session-only: restored if this session is resumed, gone otherwise.");
 			}
 			if (recurring) {
-				lines.push(`Recurring jobs auto-expire after ${maxAgeDays()} days: the job runs one final time, then it is deleted.`);
+				const days = maxAgeDays();
+				lines.push(days > 0
+					? `Recurring jobs auto-expire after ${days} days: the job runs one final time, then it is deleted.`
+					: "Recurring jobs do not expire (PI_LOOP_MAX_AGE_DAYS=0).");
 			}
 			lines.push(`Cancel it with cron_delete { "id": "${job.id}" }.`);
 			// Asked for in plain words, not through /loop: do it once now, as /loop would.

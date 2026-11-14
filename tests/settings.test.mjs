@@ -77,6 +77,14 @@ function openPanel(h, theme = { fg: (_color, text) => text, bold: (text) => text
 	return { panel, closed, screen: () => panel.render(100).join("\n"), renders: () => renders };
 }
 
+/** Add other packages' capabilities without registering a second command. */
+async function installCompanions(h, ...owners) {
+	const { registerPiCcCommand } = await loadModule("settings.ts");
+	for (const owner of owners) {
+		registerPiCcCommand({ events: h.pi.events, on: () => {}, registerCommand: () => {} }, owner);
+	}
+}
+
 test("a setting writes only its own key: other keys stay, an environment override never reaches the file", async () => {
 	const file = tempConfig({ compactMessages: true, footer: true, mine: "kept" });
 	await withEnv({ PI_CC_CONFIG_FILE: file, PI_CC_COMPACT_MESSAGES: "0" }, async () => {
@@ -141,6 +149,7 @@ test("one page per plugin, like /ccstyle: Loop & Monitor / Plugins / Compact; Ta
 	const file = tempConfig({});
 	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
 		const h = await start(makeHarness());
+		await installCompanions(h, "pi-cc-plugins", "pi-cc-compaction");
 		const ui = openPanel(h, { fg: (_color, text) => text, bold: (text) => `*${text}*` });
 		const page = () => ui.screen().split("\n");
 		assert.match(page()[1], /^\*Loop & Monitor\* \/ Plugins \/ Compact/, "the tab bar, the open page in bold");
@@ -180,6 +189,7 @@ test("the values line up across pages, and the file is named on the tab bar when
 	const file = tempConfig({});
 	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
 		const h = await start(makeHarness());
+		await installCompanions(h, "pi-cc-plugins", "pi-cc-compaction");
 		const ui = openPanel(h);
 		const column = () => ui.screen().split("\n").find((line) => line.startsWith("→")).search(/(compact|on|off)$/);
 		const first = column();
@@ -217,6 +227,7 @@ test("in the panel, a setting a variable overrides shows its value in effect, na
 test("outside the TUI, /pi_cc prints the summary, page by page", async () => {
 	await withEnv({ PI_CC_CONFIG_FILE: tempConfig({}) }, async () => {
 		const h = await start(makeHarness());
+		await installCompanions(h, "pi-cc-plugins", "pi-cc-compaction");
 		h.ctx.mode = "rpc";
 		let opened = false;
 		h.ctx.ui.custom = async () => {
@@ -237,6 +248,31 @@ test("outside the TUI, /pi_cc prints the summary, page by page", async () => {
 	});
 });
 
+test("standalone settings show only loaded packages while text commands stay compatible", async () => {
+	const file = tempConfig({});
+	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
+		const h = await start(makeHarness());
+		const ui = openPanel(h);
+		assert.match(ui.screen(), /Loop & Monitor/);
+		assert.match(ui.screen(), /Message style/);
+		assert.doesNotMatch(ui.screen(), /Plugins|Compact|Draft recall|CC compaction/);
+		assert.doesNotMatch(ui.screen(), /Tab\/Shift\+Tab/);
+		ui.panel.handleInput(ESC);
+		await ui.closed;
+
+		h.ctx.mode = "rpc";
+		await piCc(h).handler("", h.ctx);
+		const summary = h.notifications.at(-1).message;
+		assert.match(summary, /Loop & Monitor/);
+		assert.doesNotMatch(summary, /Plugins|Compact|draft:|idle:/);
+		assert.match(summary, /\(messages, footer\)/);
+
+		await piCc(h).handler("draft off", h.ctx);
+		assert.equal(readJson(file).draft, false, "text commands can still preconfigure an unloaded package");
+		assert.deepEqual(readJson(file), { draft: false }, "no unrelated setting is written");
+	});
+});
+
 test("the settings file lives in Pi's agent directory, so PI_CODING_AGENT_DIR moves it with Pi's own settings", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-agent-"));
 	await withEnv({ PI_CC_CONFIG_FILE: undefined, PI_CODING_AGENT_DIR: agentDir }, async () => {
@@ -248,31 +284,65 @@ test("the settings file lives in Pi's agent directory, so PI_CODING_AGENT_DIR mo
 	});
 });
 
-test("only one /pi_cc however many pi-cc packages load: the claim is first come, released at shutdown", async () => {
+test("one shared runtime has one /pi_cc, with live-token ownership across same-package reloads", async () => {
 	const { registerPiCcCommand } = await loadModule("settings.ts");
-	const claim = Symbol.for("pi-cc:slash-command");
-	globalThis[claim] = undefined;
+	const first = makeHarness();
+	const second = makeHarness();
+	const again = makeHarness();
+	const third = makeHarness();
+	// Separate command maps simulate separate extension facades; the shared
+	// event bus makes them packages in one Pi runtime, not independent sessions.
+	second.pi.events = first.pi.events;
+	again.pi.events = first.pi.events;
+	third.pi.events = first.pi.events;
+
+	registerPiCcCommand(first.pi, "pi-cc-loop");
+	registerPiCcCommand(second.pi, "pi-cc-monitor");
+	assert.ok(first.commands.has("pi_cc"));
+	assert.ok(!second.commands.has("pi_cc"), "the later package leaves /pi_cc to the first");
+
+	registerPiCcCommand(again.pi, "pi-cc-loop");
+	assert.ok(again.commands.has("pi_cc"), "a same-package reload can re-register");
+	await first.handlers.get("session_shutdown")({ type: "session_shutdown" }, first.ctx);
+	registerPiCcCommand(third.pi, "pi-cc-monitor");
+	assert.ok(!third.commands.has("pi_cc"), "the older instance cannot release the reloaded owner's claim");
+
+	await again.handlers.get("session_shutdown")({ type: "session_shutdown" }, again.ctx);
+	registerPiCcCommand(third.pi, "pi-cc-monitor");
+	assert.ok(third.commands.has("pi_cc"), "the last live owner releases the runtime claim");
+	await third.handlers.get("session_shutdown")({ type: "session_shutdown" }, third.ctx);
+});
+
+test("a legacy registry without package capabilities is upgraded safely", async () => {
+	const { registerPiCcCommand } = await loadModule("settings.ts");
+	const h = makeHarness();
+	const legacy = { owners: new Map([[{}, "pi-cc-loop"]]), disposed: false };
+	const off = h.pi.events.on("pi-cc:settings:probe", (data) => data.reply(legacy));
 	try {
-		const first = makeHarness();
-		registerPiCcCommand(first.pi, "pi-cc-loop");
-		const second = makeHarness();
-		registerPiCcCommand(second.pi, "pi-cc-monitor");
-		assert.ok(first.commands.has("pi_cc"));
-		assert.ok(!second.commands.has("pi_cc"), "the later package leaves /pi_cc to the first");
-
-		// A package re-loading over its own claim re-claims it (/reload re-runs the module).
-		const again = makeHarness();
-		registerPiCcCommand(again.pi, "pi-cc-loop");
-		assert.ok(again.commands.has("pi_cc"));
-
-		// Shutdown releases the name: the next package can take it.
-		await first.handlers.get("session_shutdown")({ type: "session_shutdown" }, first.ctx);
-		const third = makeHarness();
-		registerPiCcCommand(third.pi, "pi-cc-monitor");
-		assert.ok(third.commands.has("pi_cc"), "the claim is released at shutdown");
+		registerPiCcCommand(h.pi, "pi-cc-monitor");
+		assert.ok(!h.commands.has("pi_cc"), "the existing owner still wins");
+		assert.deepEqual(new Set(legacy.packages.values()), new Set(["pi-cc-loop", "pi-cc-monitor"]));
 	} finally {
-		globalThis[claim] = undefined;
+		off();
 	}
+});
+
+test("independent sessions each register /pi_cc and never release each other's ownership", async () => {
+	const { registerPiCcCommand } = await loadModule("settings.ts");
+	const first = makeHarness();
+	const second = makeHarness();
+	registerPiCcCommand(first.pi, "pi-cc-loop");
+	registerPiCcCommand(second.pi, "pi-cc-monitor");
+	assert.ok(first.commands.has("pi_cc"));
+	assert.ok(second.commands.has("pi_cc"), "a different session is not blocked by a process-global claim");
+
+	await first.handlers.get("session_shutdown")({ type: "session_shutdown" }, first.ctx);
+	assert.ok(second.commands.has("pi_cc"), "the other session keeps its command after the first shuts down");
+	const third = makeHarness();
+	registerPiCcCommand(third.pi, "pi-cc-plugins");
+	assert.ok(third.commands.has("pi_cc"), "a later independent session is also unaffected");
+	await second.handlers.get("session_shutdown")({ type: "session_shutdown" }, second.ctx);
+	await third.handlers.get("session_shutdown")({ type: "session_shutdown" }, third.ctx);
 });
 
 test("the old /loop settings words redirect instead of starting a loop", async () => {

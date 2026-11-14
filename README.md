@@ -91,7 +91,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 ```
 
 - **范围**：只列本会话的任务；本项目的 durable 任务按锁的归属显示，别的会话执行的任务标成 foreign，不会说成“正在这里运行”。不做跨会话的全局面板。
-- **Tab / Shift+Tab**：All / Monitor / Loop 三页。上下键走 Pi 的 `tui.select.up/down` 命名动作，所以会跟随你的 keybindings；PgUp/PgDn 翻页。选中项用 `provider + id` 记录，刷新或增删任务后不会跳到别的任务上。
+- **Tab / Shift+Tab**：两个及以上 provider 时显示 All / Monitor / Loop 等页面；只有一个 provider 时只显示该 provider，不重复显示 All，也不显示 Tab 切换提示。上下键走 Pi 的 `tui.select.up/down` 命名动作，所以会跟随你的 keybindings；PgUp/PgDn 翻页。选中项用 `provider + id` 记录，刷新或增删任务后不会跳到别的任务上。
 - **Enter**：详情。Esc 先回列表，再按一次才关面板；关面板只关 UI，不取消任何任务，也不会把 Esc 传给 app.interrupt。
 - **Loop 详情**：cron 还是自定步调、实际的下次时间（`nextFireAt` / `scheduledFor`，已含错峰，不是从 `cron_list` 文本里猜的）、模型给的 reason、触发次数、是否 pending 等待 agent 空闲、是否 active / 等待重新调度、durable 归属；还会区分 `--durable` 里别的会话执行或从别的目录复制来的任务。
 - **Monitor 详情**：状态、命令或 WebSocket、事件数与限流丢弃数、已运行时间、超时/常驻、退出码、绑定的 loop；stdout/stderr 只读**有上限的尾部**（约最后 8KB / 60 行），ANSI 和控制字符会被剥掉。日志不存在或读不了只显示说明，不影响 monitor；读日志也不会喂给 Monitor 的事件流。
@@ -101,7 +101,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
   - 自定步调 loop 走 `retireChain`：记下已停止的 prompt 防止迟到的 `schedule_wakeup` 复活，并通过 `loop:stopped` 连带停止绑定的 Monitor。
   - cron / durable 走 `removeJob` / durable store 删除；别的会话执行的 durable 任务只删存储里的那一条。
   - **停止的是计划，不是主 agent**：不会 abort 当前回复，也不会结束正在运行的 turn；要中断模型请照常按 Esc 或用 Pi 的 abort。
-- 已结束的 Monitor 记录仍会列出，但停止动作禁用。v1 不做暂停/恢复、不改 cron、不做每个 loop 的独立 transcript，也不保留已结束 loop 的历史。
+- 已结束的 Monitor 记录在终态通知投递且资源释放后保留最近 50 条，停止动作禁用；活跃、待通知、清理中或仍被订阅引用的记录不会因数量上限被淘汰。v1 不做暂停/恢复、不改 cron、不做每个 loop 的独立 transcript，也不保留已结束 loop 的历史。
 
 两个包共用一套命令注册：只装 loop 或只装 monitor 都能使用；两个都装时也只注册一个面板入口。所有 `session_start` 处理完成、构建补全列表之前，会检查当时已加载的扩展命令和 prompt 模板（包括已重名的 `/tasks:1` 等入口）：名称空闲时只注册 `/tasks`；已占用时不抢占、不新增 `/tasks:1`，只注册 `/cc-tasks`。无法安全查询命令列表的旧版宿主也只提供 `/cc-tasks`。同一运行时不因再次资源发现而切换或补注册别名；`/reload` 会为新的扩展实例重新检查。检查不覆盖其他插件之后动态新增的命令。任务面板入口不是 `/pi_cc`（设置面板），也不改变 `/loop` 的语义。
 
@@ -149,11 +149,11 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 }
 ```
 
-draft、turnSummary、ccKeys 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compaction 读取；没装对应包的会话里，面板中的这些项不生效，值原样保留。
+draft、turnSummary、ccKeys 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compaction 读取。面板和非 TUI 摘要只显示已加载包的页面；未安装包的值仍原样保留，文字命令仍可用来预配置。
 
 在 TUI 里输入 `/pi_cc` 会打开设置面板，和 pi-cc-extensions 的 `/ccstyle` 一样按页组织，每个插件一页：
 **Loop & Monitor**（消息样式、底部摘要，两个包共用）、**Plugins**（pi-cc-plugins）、**Compact**（pi-cc-compaction）。
-Tab / Shift+Tab 切换页，上下键选择，Enter/空格切换，Esc 关闭；改动立即保存，所有 pi-cc 扩展同时生效。
+有多个页面时用 Tab / Shift+Tab 切换，上下键选择，Enter/空格切换，Esc 关闭；改动立即保存，所有 pi-cc 扩展同时生效。
 Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
 
 `/pi_cc` 由四个 pi-cc 包（loop、monitor、plugins、compaction）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
@@ -187,6 +187,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 | --- | --- |
 | 没有任务 | 不设置状态，footer 不会被多占一行 |
 | 有任务 | `3 loops · next 4m`（数量 + 最近一次触发） |
+| 到点但等待 agent 空闲 | `1 loop · waiting`，不再显示成即将触发 |
 | 一分钟内 | `1 loop · next <1m` |
 | 超过一小时 | `1 loop · next 2h 15m` |
 
@@ -220,11 +221,13 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 
 ```bash
 node --test tests/*.test.mjs
-npx --yes -p typescript@5.9.3 tsc --noEmit -p tsconfig.json
+npm run typecheck
 node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
 
 四个仓库共同使用的 `config.ts`、`settings.ts`（以及 loop/monitor 的 `render.ts`、`tasks.ts`）以本仓库为维护源。修改后在本仓库运行 `node scripts/sync-shared.mjs` 同步到同级仓库；`node scripts/sync-shared.mjs --check` 只检查，不改文件。各仓库的 `tests/shared.test.mjs` 也会检查副本一致。
+
+类型检查使用本地 TypeScript 开发依赖，并自动定位本地 peer dependencies 或当前安装的 Pi release；`tsconfig.json` 不再包含个人目录或旧 release 的绝对路径。可用 `PI_AGENT_DIR` 选择隔离的 Pi 安装，用 `PI_TYPESCRIPT_PATH` 指向已有的 `typescript/lib/typescript.js`。
 
 ### 缓存约束
 

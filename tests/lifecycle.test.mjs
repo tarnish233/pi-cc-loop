@@ -6,6 +6,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { loadModule } from "./helpers.mjs";
 import {
 	createCron,
 	guidelinesOf,
@@ -20,6 +21,7 @@ import {
 } from "./harness.mjs";
 
 const LOOP_SENTINEL = "<<loop.md>>";
+const { LOOP_FILE_MAX_BYTES, readLoopFile } = await loadModule("loopfile.ts");
 
 const rawWakeup = (h, args) => h.tools.get("schedule_wakeup").execute("c", args, undefined, undefined, h.ctx);
 /** Call the tool the way the model does, with the now-required reason. */
@@ -260,6 +262,21 @@ test("a long loop.md is truncated like Claude Code's", async () => {
 	const content = textOf(h.sent.at(-1));
 	assert.ok(content.length < 26_000, `${content.length} characters`);
 	assert.match(content, /loop\.md was truncated to 25000 bytes/);
+});
+
+test("loop.md truncation counts UTF-8 bytes and never splits a multibyte character", async () => {
+	const h = await start(makeHarness());
+	const file = path.join(h.ctx.cwd, ".pi", "loop.md");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, "你".repeat(9000), "utf8"); // 27,000 bytes; 25,000 cuts inside the next 你
+	const result = readLoopFile(h.ctx.cwd);
+	assert.ok(result);
+	const [body, warning] = result.content.split("\n> WARNING: ");
+	assert.ok(Buffer.byteLength(body, "utf8") <= LOOP_FILE_MAX_BYTES);
+	assert.equal(Buffer.byteLength(body, "utf8"), 24_999, "the cut backs up to the preceding complete 你");
+	assert.ok(!body.includes("\ufffd"), "no replacement character is introduced");
+	assert.equal(Buffer.from(body, "utf8").toString("utf8"), body, "the kept text is valid UTF-8");
+	assert.match(warning, /loop\.md was truncated to 25000 bytes/);
 });
 
 test("a bare /loop tells the model to run the loop.md tasks", async () => {
