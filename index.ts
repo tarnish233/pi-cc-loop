@@ -319,14 +319,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		if (!jobs.length) return undefined;
 		const label = jobs.length === 1 ? "loop" : "loops";
 		if (jobs.some((job) => job.pending)) return `${jobs.length} ${label} \u00b7 waiting`;
-		const now = Date.now();
-		const next = Math.min(
-			...jobs.map((job) => {
-				const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
-				return at ?? now;
-			}),
-		);
-		return `${jobs.length} ${label} \u00b7 next ${formatEta(Math.max(0, next - now))}`;
+		const scheduled = jobs
+			.map((job) => job.kind === "cron" ? job.nextFireAt : job.scheduledFor)
+			.filter((at): at is number => at !== undefined);
+		if (!scheduled.length) return `${jobs.length} ${label} \u00b7 active`;
+		const next = Math.min(...scheduled);
+		return `${jobs.length} ${label} \u00b7 next ${formatEta(Math.max(0, next - Date.now()))}`;
 	}
 
 	let lastStatusText: string | undefined;

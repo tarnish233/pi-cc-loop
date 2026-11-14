@@ -188,6 +188,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 | 没有任务 | 不设置状态，footer 不会被多占一行 |
 | 有任务 | `3 loops · next 4m`（数量 + 最近一次触发） |
 | 到点但等待 agent 空闲 | `1 loop · waiting`，不再显示成即将触发 |
+| 自定步调回合进行中、尚未重调度 | `1 loop · active`；若另有已排定任务，倒计时只计算那些任务 |
 | 一分钟内 | `1 loop · next <1m` |
 | 超过一小时 | `1 loop · next 2h 15m` |
 

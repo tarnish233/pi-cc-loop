@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-14
+
+### Fixed
+- Show self-paced loops as `active` while awaiting reschedule instead of inventing `next <1m`, and calculate mixed-task countdowns from genuinely scheduled jobs only.
+
 ## [0.10.0] - 2026-11-14
 
 ### Added

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createCron, makeHarness, start, startSelfPaced } from "./harness.mjs";
+import { createCron, makeDue, makeHarness, start, startSelfPaced } from "./harness.mjs";
 
 const statusFile = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 // The helper's throwaway settings file. Tests that point elsewhere put this
@@ -43,6 +43,32 @@ test("a job pending behind a busy agent reads as waiting, not next <1m", async (
 	h.scheduler().tick();
 	assert.equal(h.scheduler().get(job.id).pending, true);
 	assert.equal(h.status("loop"), "1 loop · waiting");
+});
+
+test("a dispatched self-paced tick reads as active until re-armed", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch ci", 1200);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	assert.equal(chain.pending, false);
+	assert.equal(chain.awaitingReschedule, true);
+	assert.equal(chain.scheduledFor, undefined);
+	assert.equal(h.status("loop"), "1 loop · active", "no wakeup is scheduled yet");
+
+	await startSelfPaced(h, "watch ci", 1200);
+	assert.equal(h.status("loop"), "1 loop · next 20m");
+});
+
+test("an active chain does not hide another job's real next run", async () => {
+	const h = await start(makeHarness());
+	const fixed = await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
+	const chain = await startSelfPaced(h, "watch ci", 1200);
+	h.scheduler().update(fixed.id, { nextFireAt: Date.now() + 3 * 60_000 });
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	assert.equal(chain.awaitingReschedule, true);
+	assert.equal(chain.scheduledFor, undefined);
+	assert.equal(h.status("loop"), "2 loops · next 3m", "only armed jobs contribute to the ETA");
 });
 
 test("several loops collapse into one count with the earliest run", async () => {
