@@ -25,14 +25,14 @@ test("the footer shows how many loops are armed and when the next one runs", asy
 	const h = await start(makeHarness());
 	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	schedule(h, h.scheduler().list()[0].id, 3 * 60_000 + 30_000);
-	assert.equal(h.status("loop"), "loop 1 · next 4m");
+	assert.equal(h.status("loop"), "1 loop · next 4m");
 });
 
 test("the next run under a minute reads as <1m", async () => {
 	const h = await start(makeHarness());
 	await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 	schedule(h, h.scheduler().list()[0].id, 40_000);
-	assert.equal(h.status("loop"), "loop 1 · next <1m");
+	assert.equal(h.status("loop"), "1 loop · next <1m");
 });
 
 test("several loops collapse into one count with the earliest run", async () => {
@@ -43,7 +43,7 @@ test("several loops collapse into one count with the earliest run", async () => 
 	h.scheduler().update(fixed.id, { nextFireAt: Date.now() + 3 * 60_000 });
 	h.scheduler().tick();
 	assert.equal(h.scheduler().size, 2);
-	assert.equal(h.status("loop"), "loop 2 · next 3m", "the earliest run wins");
+	assert.equal(h.status("loop"), "2 loops · next 3m", "the earliest run wins");
 });
 
 test("the footer is repainted only when its text changes", async () => {
@@ -58,7 +58,7 @@ test("the footer is repainted only when its text changes", async () => {
 	assert.equal(h.statusCalls.length, calls, "an unchanged minute is not repainted");
 	schedule(h, id, 7 * 60_000);
 	assert.equal(h.statusCalls.length, calls + 1, "a new minute is");
-	assert.equal(h.status("loop"), "loop 1 · next 7m");
+	assert.equal(h.status("loop"), "1 loop · next 7m");
 });
 
 test("no loops means no status line at all", async () => {
@@ -95,7 +95,7 @@ test("/pi_cc footer on|off turns the footer summary off for every pi-cc package"
 		assert.equal(h.statusCalls.length, calls, "and nothing is repainted while it is off");
 
 		await h.commands.get("pi_cc").handler("footer on", h.ctx);
-		assert.equal(h.status("loop"), "loop 1 · next 3m");
+		assert.equal(h.status("loop"), "1 loop · next 3m");
 		assert.equal(statusFile(configFile).footer, true);
 	} finally {
 		process.env.PI_CC_CONFIG_FILE = isolatedConfig;

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-14
+
+### Added
+- Source-aware Monitor task/subscription grouping and role labels in the shared task panel, with provider-isolated selection and stable parent/sibling order.
+- Semantic Monitor detail sections and resource-specific local stop confirmation; Loop's existing flat-row details and stop lifecycle remain unchanged.
+
+### Changed
+- Prefer sectioned provider details without rendering their legacy flat fallback twice; retain compatibility with providers using flat rows only.
+- Highlight normal stopped/exited states with the theme accent color; completed remains success, failures error, and abnormal endings warning.
+- Share bounded sanitized log-tail reading with Monitor and synchronize the common settings parser and panel.
+- Generate task-panel tabs from loaded providers so Monitor and Loop can share one overlay without empty tabs for packages that are not installed.
+- Use CC-style count-first footer labels: `1 loop` / `2 loops`, aligned with `1 monitor` / `2 monitors`.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added

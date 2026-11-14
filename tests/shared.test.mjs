@@ -1,7 +1,8 @@
 /**
  * The files copied verbatim between the pi-cc packages (they are separate npm
- * packages): config.ts and settings.ts in all four, render.ts in pi-cc-loop
- * and pi-cc-monitor. This test fails when the copies drift apart; each
+ * packages): config.ts and settings.ts in the configured siblings, render.ts,
+ * tasks.ts and log-tail.ts in pi-cc-loop/pi-cc-monitor. This test fails when
+ * the copies drift apart; each
  * comparison is skipped when that sibling checkout is missing.
  */
 import assert from "node:assert";
@@ -13,13 +14,14 @@ import { extensionDir, siblingExtensionDir } from "./helpers.mjs";
 
 const self = path.basename(extensionDir);
 const SIBLINGS = ["pi-cc-loop", "pi-cc-monitor", "pi-cc-plugins", "pi-cc-compaction"].filter((name) => name !== self);
+const TASK_OWNERS = ["pi-cc-loop", "pi-cc-monitor"].filter((name) => name !== self);
 /** Which packages carry which shared file. */
 const SHARED = {
 	"config.ts": SIBLINGS,
 	"settings.ts": SIBLINGS,
-	"render.ts": SIBLINGS.filter((name) => name !== "pi-cc-plugins" && name !== "pi-cc-compaction"),
-	// The /cc-tasks overlay is shared by exactly the two task-owning packages.
-	"tasks.ts": ["pi-cc-monitor"].filter((name) => name !== self),
+	"render.ts": SIBLINGS.filter((name) => name === "pi-cc-loop" || name === "pi-cc-monitor"),
+	"tasks.ts": TASK_OWNERS,
+	"log-tail.ts": TASK_OWNERS,
 };
 
 test("the shared source has a check-only sync command", () => {
@@ -29,9 +31,6 @@ test("the shared source has a check-only sync command", () => {
 });
 
 for (const [file, siblings] of Object.entries(SHARED)) {
-	// pi-cc-plugins and pi-cc-compaction carry no render.ts: they render nothing
-	// from the shared settings, so the file being absent there is not drift.
-	if (!fs.existsSync(path.join(extensionDir, file))) continue;
 	for (const sibling of siblings) {
 		const theirs = siblingExtensionDir(sibling);
 		const present = fs.existsSync(path.join(theirs, "package.json"));

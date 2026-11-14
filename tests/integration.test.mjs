@@ -93,7 +93,7 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 		try {
 			const list = await tools.get("monitor_list").execute("cleanup", {}, undefined, undefined, ctx);
 			for (const monitor of list.details.monitors) {
-				if (monitor.status === "running") await tools.get("monitor_stop").execute("cleanup", { id: monitor.id }, undefined, undefined, ctx);
+				if (["running", "stopping", "stop_timeout"].includes(monitor.status)) await tools.get("monitor_stop").execute("cleanup", { id: monitor.id }, undefined, undefined, ctx);
 			}
 		} finally {
 			loopMod.getScheduler(pi)?.stop();
@@ -132,14 +132,19 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 	const sentBeforeStop = shared.sent.length;
 	await tools.get("cron_delete").execute("d", { id: armedLoop.details.id }, undefined, undefined, ctx);
 
-	// 5. the monitor that belonged to the chain is stopped too
-	const list = await tools.get("monitor_list").execute("c", {}, undefined, undefined, ctx);
+	// 5. loop retirement starts cleanup synchronously; actual exit is confirmed asynchronously.
+	let list = await tools.get("monitor_list").execute("c", {}, undefined, undefined, ctx);
 	assert.equal(list.details.monitors.length, 1);
-	assert.equal(
-		list.details.monitors[0].status,
-		"stopped",
-		"the monitor must go down with the loop, otherwise it keeps waking the agent",
-	);
+	assert.ok(["stopping", "stopped"].includes(list.details.monitors[0].status), "the chain must stop accepting events immediately");
+	const deadline = Date.now() + 5000;
+	while (list.details.monitors[0].status !== "stopped" && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		list = await tools.get("monitor_list").execute("c", {}, undefined, undefined, ctx);
+	}
+	assert.equal(list.details.monitors[0].status, "stopped", "the owned resource must really exit after loop retirement");
+	if (process.platform !== "win32") {
+		assert.throws(() => process.kill(-list.details.monitors[0].pid, 0), (error) => error.code === "ESRCH", "the process group must be gone, not just its UI record");
+	}
 
 	// 5b. silently: nothing wakes the agent right after the user stopped the loop
 	await new Promise((resolve) => setTimeout(resolve, 500));

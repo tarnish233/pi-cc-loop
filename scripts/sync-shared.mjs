@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** pi-cc-loop is the source for the files copied into its three sibling repos. */
+/** pi-cc-loop is the source for files copied into its sibling repos. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,10 @@ let different = false;
 for (const name of siblings) {
 	const target = path.resolve(source, "..", name);
 	if (!fs.existsSync(path.join(target, "package.json"))) continue;
-	for (const file of name === "pi-cc-monitor" ? ["config.ts", "settings.ts", "render.ts", "tasks.ts"] : ["config.ts", "settings.ts"]) {
+	const shared = name === "pi-cc-monitor"
+		? ["config.ts", "settings.ts", "render.ts", "tasks.ts", "log-tail.ts"]
+		: ["config.ts", "settings.ts"];
+	for (const file of shared) {
 		const from = path.join(source, file);
 		const to = path.join(target, file);
 		if (fs.existsSync(to) && fs.readFileSync(from).equals(fs.readFileSync(to))) continue;

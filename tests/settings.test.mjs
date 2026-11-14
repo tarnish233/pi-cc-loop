@@ -24,7 +24,7 @@ import { loadModule } from "./helpers.mjs";
 
 const config = await loadModule("config.ts");
 
-const ENV_KEYS = ["PI_CC_CONFIG_FILE", "PI_CC_FOOTER", "PI_CC_COMPACT_MESSAGES", "PI_CODING_AGENT_DIR"];
+const ENV_KEYS = ["PI_CC_CONFIG_FILE", "PI_CC_FOOTER", "PI_CC_COMPACT_MESSAGES", "PI_CC_IDLE_COMPACTION", "PI_CODING_AGENT_DIR"];
 
 function setEnv(vars) {
 	for (const [key, value] of Object.entries(vars)) {
@@ -187,6 +187,8 @@ test("the values line up across pages, and the file is named on the tab bar when
 		assert.equal(column(), first);
 		ui.panel.handleInput(TAB);
 		assert.equal(column(), first);
+		ui.panel.handleInput(TAB);
+		assert.equal(column(), first, "Tab wraps around to the first page");
 		const wide = ui.panel.render(file.length + 60).join("\n").split("\n")[1];
 		assert.ok(wide.endsWith(file.replace(os.homedir(), "~")), wide);
 		const narrow = ui.panel.render(50).join("\n").split("\n")[1];
@@ -229,7 +231,7 @@ test("outside the TUI, /pi_cc prints the summary, page by page", async () => {
 		);
 		assert.match(
 			h.notifications.at(-1).message,
-			/Usage: \/pi_cc <item> on\|off +\(messages, footer, draft, summary, keys, compact, idle\)/,
+			/Usage: \/pi_cc <item> <value> +\(messages, footer, draft, summary, keys, compact, idle\)/,
 			"every setting the panel has is named",
 		);
 	});
@@ -298,5 +300,8 @@ test("every setting is read from the file, and a variable wins for any of them",
 	});
 	await withEnv({ PI_CC_CONFIG_FILE: tempConfig({ footer: true }), PI_CC_FOOTER: "0" }, async () => {
 		assert.equal(config.loadConfig().footer, false, "the variable wins over the file");
+	});
+	await withEnv({ PI_CC_CONFIG_FILE: tempConfig({ idleCompaction: true }), PI_CC_IDLE_COMPACTION: "0" }, async () => {
+		assert.equal(config.loadConfig().idleCompaction, false, "the variable wins for any boolean setting");
 	});
 });

@@ -38,7 +38,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
 | 任务面板 | 一个原生的 TUI 浮层，统一查看本会话的 Loop 和 Monitor 任务；本地命令，不进对话 | `/tasks`（重名时改用 `/cc-tasks`，二选一） |
-| 底部摘要 | Pi 底部状态栏一行：`loop 2 · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
+| 底部摘要 | Pi 底部状态栏一行：`2 loops · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
 | 界面设置 | 按插件分页的设置面板，本地命令，不进对话 | `/pi_cc` |
 
 ## 命令
@@ -140,7 +140,7 @@ Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` �
 ```jsonc
 {
   "compactMessages": true,   // 触发块和 Monitor 事件用上面的样式；false 为旧的带底色卡片
-  "footer": true,            // 底部摘要：loop 的一行和 Monitor 的 `monitor N`
+  "footer": true,            // 底部摘要：Loop 和 Monitor 的数量
   "draft": true,             // pi-cc-plugins：Ctrl+C 找回
   "turnSummary": true,       // pi-cc-plugins：回合摘要一行
   "ccKeys": true,            // pi-cc-plugins：Enter 排队、↑ 取回待发消息
@@ -186,14 +186,14 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 | 场景 | 显示 |
 | --- | --- |
 | 没有任务 | 不设置状态，footer 不会被多占一行 |
-| 有任务 | `loop 3 · next 4m`（数量 + 最近一次触发） |
-| 一分钟内 | `loop 1 · next <1m` |
-| 超过一小时 | `loop 1 · next 2h 15m` |
+| 有任务 | `3 loops · next 4m`（数量 + 最近一次触发） |
+| 一分钟内 | `1 loop · next <1m` |
+| 超过一小时 | `1 loop · next 2h 15m` |
 
 - 倒计时取整到分钟，配合"文本相同就不调用"的去重，最多每分钟重绘一次（Pi 每次 `setStatus` 都会触发重绘）
 - 装了 `pi-cc-extensions`：这一行会作为它的一个 chip 出现在第 2 行，可在它的配置面板里移动或隐藏；它会把 ANSI 去掉，所以这里只用纯文本
 - 没装 `pi-cc-extensions`：Pi 内置 footer 会把它和其他扩展的状态拼成一行，加在用量行下面，只在有任务时出现
-- 装了 `pi-cc-monitor`：运行中的 monitor 另有一项 `monitor 2`，和这一行用同一个开关
+- 装了 `pi-cc-monitor`：运行中的 monitor 另有一项 `2 monitors`，和这一行用同一个开关
 
 ## 环境变量
 

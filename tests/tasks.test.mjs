@@ -1,5 +1,5 @@
 /**
- * /cc-tasks: the shared Monitor + Loop overlay.
+ * /cc-tasks: the shared dynamic-provider overlay.
  *
  * The fake APIs omit getCommands(), exercising the conservative fallback.
  * Actual SDK command discovery and selection live in task-commands.test.mjs.
@@ -45,6 +45,23 @@ async function waitFor(predicate, timeoutMs = 4000) {
 		await sleep(20);
 	}
 	return false;
+}
+
+/** Follow the real scroll viewport through every semantic section and log tail. */
+function detailText(runtime) {
+	const pages = [];
+	runtime.render();
+	const limit = runtime.state.component.detailLineCount + 1;
+	for (let i = 0; i < limit; i++) {
+		pages.push(runtime.text());
+		const before = runtime.state.component.detailScroll;
+		runtime.input("pageDown");
+		if (runtime.state.component.detailScroll === before) {
+			assert.equal(before, Math.max(0, runtime.state.component.detailLineCount - runtime.state.component.detailViewport));
+			return pages.join("\n");
+		}
+	}
+	assert.fail("detail paging never reached the final viewport");
 }
 
 /** One Pi session runtime: one bus, any number of extensions with distinct facades. */
@@ -412,7 +429,7 @@ test("Tab/Shift+Tab, named select actions and Esc behave in both directions", as
 	runtime.input("tab");
 	assert.match(runtime.text(), /first monitor/);
 	runtime.input("tab");
-	assert.match(runtime.text(), /No loops in this session/);
+	assert.match(runtime.text(), /No Loop tasks in this session/);
 	runtime.input("shiftTab");
 	assert.match(runtime.text(), /first monitor/);
 
@@ -432,10 +449,13 @@ test("non-TUI modes report text and never touch TUI methods; standalone plugins 
 	await armMonitor(monitorOnly, { command: "sleep 30", description: "only monitor", persistent: true });
 	assert.deepEqual(ccTasksCommands(monitorOnly), ["cc-tasks"]);
 	const overlay = openTasks(monitorOnly);
-	// All -> Monitor -> Loop: the missing package is named, not hidden.
+	// Only loaded providers get tabs: All -> Monitor -> All.
 	monitorOnly.input("tab");
+	assert.match(monitorOnly.text(), /only monitor/);
+	assert.doesNotMatch(monitorOnly.text(), /Loop \d/);
 	monitorOnly.input("tab");
-	assert.match(monitorOnly.text(), /pi-cc-loop is not loaded/);
+	assert.match(monitorOnly.text(), /All 1/);
+	assert.doesNotMatch(monitorOnly.text(), /Loop \d/);
 	monitorOnly.input("escape");
 	await overlay;
 
@@ -458,7 +478,8 @@ test("non-TUI modes report text and never touch TUI methods; standalone plugins 
 	assert.deepEqual(ccTasksCommands(loopOnly), ["cc-tasks"]);
 	const loopOverlay = openTasks(loopOnly);
 	loopOnly.input("tab");
-	assert.match(loopOnly.text(), /pi-cc-monitor is not loaded/);
+	assert.match(loopOnly.text(), /loop only/);
+	assert.doesNotMatch(loopOnly.text(), /Monitor \d/);
 	loopOnly.input("shiftTab");
 	assert.match(loopOnly.text(), /loop only/);
 	loopOnly.input("escape");
@@ -760,19 +781,18 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 		description: "noisy log",
 		persistent: true,
 	});
-	assert.ok(await waitFor(() => fs.existsSync(armed.details.outputPath) && fs.statSync(armed.details.outputPath).size > 0));
-	assert.ok(await waitFor(() => fs.existsSync(armed.details.stderrPath) && fs.statSync(armed.details.stderrPath).size > 0));
+	assert.ok(await waitFor(() => fs.existsSync(armed.details.outputPath) && fs.readFileSync(armed.details.outputPath, "utf8").includes("RED") && fs.existsSync(armed.details.stderrPath) && fs.readFileSync(armed.details.stderrPath, "utf8").includes("GREEN")));
 
 	const eventsBefore = runtime.sent.filter((entry) => entry.message?.customType === "Monitor").length;
 	const overlay = openTasks(runtime);
 	runtime.input("tab");
 	runtime.input("enter");
-	runtime.render();
-	runtime.input("pageDown");
-	const detail = runtime.text();
+	const detail = detailText(runtime);
 	assert.ok(detail.includes("RED"), "visible text survives");
 	assert.ok(detail.includes("CLEAR"));
 	assert.ok(detail.includes("GREEN"), "stderr is readable too");
+	assert.match(detail, /RED CLEAR/, "actual sanitized stdout, not just the command text");
+	assert.match(detail, /ERR GREEN/, "actual sanitized stderr tail");
 	const clean = tuiPkg.stripTerminalSequences(detail);
 	assert.ok(!clean.includes("\x1b"), "no ANSI escape from a log reaches the screen");
 	assert.ok(!clean.includes("\x01"), "no control character from a log reaches the screen");
@@ -786,10 +806,8 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 	// throttled refresh keeps only the bounded tail.
 	fs.appendFileSync(armed.details.outputPath, `${"A".repeat(20_000)}\nlast line\n`);
 	await sleep(1500);
-	runtime.render();
-	runtime.input("pageDown");
-	const bounded = runtime.text();
-	assert.match(bounded, /last \d+ lines/, "the tail is labelled");
+	const bounded = detailText(runtime);
+	assert.match(bounded, /last \d+ lines?/, "the tail is labelled with its actual line count");
 	assert.ok(bounded.includes("last line"), "the most recent line survives the byte cap");
 	assert.ok(!tuiPkg.stripTerminalSequences(bounded).includes("\x1b"));
 	runtime.input("escape");
@@ -803,7 +821,7 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 	assert.ok(tail.truncated);
 	assert.ok(tail.text.split("\n").length <= 5);
 	assert.ok(!tail.text.includes("\x1b"));
-	assert.match(tail.note, /last \d+ lines/);
+	assert.match(tail.note, /last \d+ lines?/);
 
 	// A deleted log is a note, not a crash.
 	fs.rmSync(armed.details.outputPath, { force: true });
@@ -811,9 +829,7 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 	await sleep(1100);
 	runtime.input("tab");
 	runtime.input("enter");
-	runtime.render();
-	runtime.input("pageDown");
-	assert.match(runtime.text(), /log not created yet|\(empty\)/);
+	assert.match(detailText(runtime), /log not created yet|\(empty\)/);
 	runtime.input("escape");
 	runtime.input("escape");
 	await reopened;

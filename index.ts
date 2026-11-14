@@ -332,7 +332,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				return at ?? now;
 			}),
 		);
-		return `loop ${jobs.length} \u00b7 next ${formatEta(Math.max(0, next - now))}`;
+		const label = jobs.length === 1 ? "loop" : "loops";
+		return `${jobs.length} ${label} \u00b7 next ${formatEta(Math.max(0, next - now))}`;
 	}
 
 	let lastStatusText: string | undefined;

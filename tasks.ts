@@ -1,8 +1,8 @@
 /**
- * /tasks (or /cc-tasks on conflict): one native Monitor/Loop task overlay.
+ * /tasks (or /cc-tasks on conflict): one native background task overlay.
  *
- * Both packages carry this file verbatim (tests/shared.test.mjs fails when the
- * copies drift apart). They are separate npm packages but may run in the same
+ * The task-owning packages carry this file verbatim (tests/shared.test.mjs
+ * fails when the copies drift apart). They are separate npm packages but may run in the same
  * Pi session. Pi gives every extension its own `pi.events` facade over one
  * common event bus, so a WeakMap keyed by `pi.events` cannot join them. The
  * registry is therefore discovered synchronously over that bus:
@@ -25,7 +25,6 @@
  * sanitized for display, and never part of an event stream.
  */
 
-import fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
 	backgroundAnsi,
@@ -34,7 +33,6 @@ import {
 	mixColors,
 	rgbColor,
 	matchesKey,
-	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -42,6 +40,8 @@ import {
 	type KeybindingsManager,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { readLogTail, sanitizeDisplay } from "./log-tail.ts";
+export { readLogTail, sanitizeDisplay, type LogTail } from "./log-tail.ts";
 
 /** Preferred entry when no loaded command or prompt already owns the name. */
 export const TASKS_COMMAND = "tasks";
@@ -54,10 +54,6 @@ const CHANGED_CHANNEL = "pi-cc:tasks:changed";
 /** A refresh coalesces bursts of provider changes. One second keeps elapsed times honest. */
 const REFRESH_MS = 250;
 const TICK_MS = 1000;
-/** A log tail is small enough to read synchronously and wide enough to be useful. */
-const LOG_MAX_BYTES = 8192;
-const LOG_MAX_LINES = 60;
-const LOG_LINE_MAX = 500;
 const PANEL_MAX_WIDTH = 96;
 const PANEL_MAX_BODY_ROWS = 12;
 
@@ -114,15 +110,12 @@ function panelPalette(theme: Theme): PanelPalette {
 	};
 }
 
-const TABS = [
-	{ id: "all", label: "All" },
-	{ id: "monitor", label: "Monitor" },
-	{ id: "loop", label: "Loop" },
-] as const;
-type TaskTab = (typeof TABS)[number]["id"];
-
-/** Provider order in the All tab and in the textual summary. */
+/** Preferred provider order; any additional provider follows registration order. */
 const PROVIDER_ORDER = ["monitor", "loop"] as const;
+interface TaskTab {
+	id: string;
+	label: string;
+}
 
 /** One row in a provider's list. `id` is unique within that provider, not across providers. */
 export interface TaskItem {
@@ -135,6 +128,12 @@ export interface TaskItem {
 	active: boolean;
 	/** Optional short right-hand detail, e.g. "3 events · 1m" or "next 2m". */
 	meta?: string;
+	/** User-facing role, separate from provider and lifecycle state. */
+	role?: string;
+	/** Actual parent id in this provider only; never inferred from titles. */
+	parentId?: string;
+	/** Scope of the locally confirmed stop, supplied by the resource owner. */
+	stopConfirmation?: string;
 	/** Stable within a provider; lower comes first. */
 	order?: number;
 }
@@ -143,6 +142,9 @@ export interface TaskItem {
 export interface TaskEntry extends TaskItem {
 	provider: string;
 	providerLabel: string;
+	/** Display-only tree information; not execution state. */
+	depth?: number;
+	hasChildren?: boolean;
 }
 
 export interface TaskDetailRow {
@@ -156,8 +158,16 @@ export interface TaskLogRef {
 	path: string;
 }
 
-export interface TaskDetail {
+export interface TaskDetailSection {
+	title: string;
 	rows: TaskDetailRow[];
+}
+
+export interface TaskDetail {
+	/** Flat fallback for older panels, or the body when no sections are supplied. */
+	rows: TaskDetailRow[];
+	/** Preferred semantic body when present; never rendered alongside fallback rows. */
+	sections?: TaskDetailSection[];
 	logs?: TaskLogRef[];
 	/** A short note under the rows (ownership, disabled actions, ...). */
 	note?: string;
@@ -175,7 +185,7 @@ export interface TaskStopResult {
  * they must be quick and must not throw (the overlay catches anyway).
  */
 export interface TaskProvider {
-	/** "monitor" or "loop": the namespace half of a task's identity. */
+	/** "bash", "monitor", "loop", ...: the namespace half of a task's identity. */
 	id: string;
 	label: string;
 	list(): TaskItem[];
@@ -270,7 +280,7 @@ export function registerTaskProvider(pi: ExtensionAPI, provider: TaskProvider): 
 			}
 		});
 		const command = {
-			description: "Open the shared Monitor and Loop task overlay (read-only; x stops a selected task)",
+			description: "Open the shared task overlay (read-only; x stops a selected task)",
 			handler: async (_args: string, ctx: ExtensionCommandContext) => {
 				await openTasks(pi, created, ctx);
 			},
@@ -337,21 +347,41 @@ function providerFor(registry: TaskRegistry, id: string): TaskProvider | undefin
 	return provider && !registry.disposed ? provider : undefined;
 }
 
-/** A plain-text listing for print, JSON, and RPC modes: no TUI methods are called. */
-export function taskSummary(registry: TaskRegistry): string {
-	const lines = ["Tasks · Monitor & Loop"];
-	let total = 0;
+function orderedProviders(registry: TaskRegistry): Array<[string, TaskProvider]> {
+	if (registry.disposed) return [];
+	const ordered: Array<[string, TaskProvider]> = [];
+	const seen = new Set<string>();
 	for (const id of PROVIDER_ORDER) {
 		const provider = providerFor(registry, id);
-		if (!provider) {
-			lines.push(`${id === "monitor" ? "Monitor" : "Loop"}: not loaded`);
-			continue;
-		}
+		if (!provider) continue;
+		seen.add(id);
+		ordered.push([id, provider]);
+	}
+	for (const [id, provider] of registry.providers) {
+		if (!seen.has(id)) ordered.push([id, provider]);
+	}
+	return ordered;
+}
+
+function taskTabs(registry: TaskRegistry): TaskTab[] {
+	return [
+		{ id: "all", label: "All" },
+		...orderedProviders(registry).map(([id, provider]) => ({ id, label: provider.label || id })),
+	];
+}
+
+/** A plain-text listing for print, JSON, and RPC modes: no TUI methods are called. */
+export function taskSummary(registry: TaskRegistry): string {
+	const lines = ["Tasks"];
+	let total = 0;
+	for (const [, provider] of orderedProviders(registry)) {
 		const items = safeItems(provider);
 		total += items.length;
 		lines.push(`${provider.label} (${items.length})`);
-		for (const item of items) {
-			lines.push(`  ${oneLine(item.state)}  ${oneLine(item.id)}  ${oneLine(item.title)}${item.meta ? `  ${oneLine(item.meta)}` : ""}`);
+		for (const item of groupTaskEntries(items.map((item) => ({ ...item, provider: provider.id, providerLabel: provider.label })))) {
+			const role = item.role ? `${oneLine(item.role)}  ` : "";
+			const source = item.parentId ? ` → #${oneLine(item.parentId)}` : "";
+			lines.push(`  ${"  ".repeat(Math.min(item.depth ?? 0, 3))}${oneLine(item.state)}  ${role}${oneLine(item.id)}  ${oneLine(item.title)}${source}${item.meta ? `  ${oneLine(item.meta)}` : ""}`);
 		}
 	}
 	if (total === 0) lines.push("No tasks.");
@@ -425,97 +455,9 @@ async function openTasks(pi: ExtensionAPI, registry: TaskRegistry, ctx: Extensio
 
 // ------------------------------------------------------------- log display
 
-function errorCode(error: unknown): string | undefined {
-	return (error as NodeJS.ErrnoException | undefined)?.code;
-}
-
-/** Strip ANSI, C0/C1 controls, and bidi overrides from anything shown. */
-export function sanitizeDisplay(value: unknown): string {
-	let text = String(value ?? "");
-	try {
-		text = stripTerminalSequences(text);
-	} catch {
-		// fall through to the control-character pass
-	}
-	return text
-		.replace(/\x1b/g, "")
-		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
-		.replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
-}
-
 function oneLine(value: unknown): string {
 	return sanitizeDisplay(value).replace(/\s+/g, " ").trim();
 }
-
-export interface LogTail {
-	text: string;
-	truncated: boolean;
-	/** Why there is nothing to show, when the file is missing or unreadable. */
-	note?: string;
-}
-
-/**
- * Read a bounded tail of a log. Missing files and permission errors are notes,
- * not failures: the task viewer must work even after a log is cleaned up.
- */
-export function readLogTail(filePath: string, maxBytes = LOG_MAX_BYTES, maxLines = LOG_MAX_LINES): LogTail {
-	if (!filePath) return { text: "", truncated: false, note: "no log path" };
-	let stat: fs.Stats;
-	try {
-		stat = fs.statSync(filePath);
-	} catch (error) {
-		return {
-			text: "",
-			truncated: false,
-			note: errorCode(error) === "ENOENT" ? "log not created yet" : "log unreadable",
-		};
-	}
-	if (!stat.isFile()) return { text: "", truncated: false, note: "log is not a file" };
-	const size = stat.size;
-	const start = Math.max(0, size - Math.max(0, maxBytes));
-	let buffer: Buffer;
-	try {
-		const fd = fs.openSync(filePath, "r");
-		try {
-			buffer = Buffer.alloc(size - start);
-			if (buffer.length > 0) fs.readSync(fd, buffer, 0, buffer.length, start);
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return { text: "", truncated: false, note: "log unreadable" };
-	}
-
-	let text = buffer.toString("utf8");
-	if (start > 0) {
-		// Drop the partial first line of a byte-bounded tail.
-		const newline = text.indexOf("\n");
-		if (newline >= 0) text = text.slice(newline + 1);
-	}
-	let lines = text.split(/\r\n|\r|\n/);
-	const overLines = lines.length > maxLines;
-	if (overLines) lines = lines.slice(-maxLines);
-	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-	const sanitized = lines.map((line) =>
-		truncateToWidth(sanitizeDisplay(line).replace(/\t/g, "    "), LOG_LINE_MAX, "\u2026"),
-	);
-	return {
-		text: sanitized.join("\n"),
-		truncated: start > 0 || overLines,
-		note:
-			start > 0 || overLines
-				? `last ${Math.min(maxLines, lines.length)} lines \u00b7 ${formatBytes(Math.max(0, size - start))} tail`
-				: undefined,
-	};
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes}B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1).replace(/\.0$/, "")}KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")}MB`;
-}
-
-// ---------------------------------------------------------------- overlay
 
 interface OverlayOptions {
 	tui: TUI;
@@ -535,6 +477,41 @@ interface DetailLogView {
 
 function taskKey(entry: Pick<TaskEntry, "provider" | "id">): string {
 	return `${entry.provider}:${entry.id}`;
+}
+
+/** Stable parent-first order. Missing/cyclic/cross-provider links cannot hide entries. */
+export function groupTaskEntries(entries: TaskEntry[]): TaskEntry[] {
+	const byKey = new Map<string, TaskEntry>();
+	for (const entry of entries) if (!byKey.has(taskKey(entry))) byKey.set(taskKey(entry), entry);
+	const children = new Map<string, TaskEntry[]>();
+	const roots: TaskEntry[] = [];
+	for (const entry of byKey.values()) {
+		const parent = entry.parentId ? byKey.get(taskKey({ provider: entry.provider, id: entry.parentId })) : undefined;
+		if (parent && parent !== entry) {
+			const key = taskKey(parent);
+			const siblings = children.get(key) ?? [];
+			siblings.push(entry);
+			children.set(key, siblings);
+		} else roots.push(entry);
+	}
+	const ordered: TaskEntry[] = [];
+	const seen = new Set<string>();
+	const visit = (root: TaskEntry) => {
+		const stack = [{ entry: root, depth: 0 }];
+		while (stack.length) {
+			const { entry, depth } = stack.pop()!;
+			const key = taskKey(entry);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const next = (children.get(key) ?? []).filter((child) => !seen.has(taskKey(child)));
+			ordered.push({ ...entry, depth, hasChildren: next.length > 0 });
+			for (let i = next.length - 1; i >= 0; i--) stack.push({ entry: next[i]!, depth: depth + 1 });
+		}
+	};
+	for (const root of roots) visit(root);
+	// A cycle has no root. Show it once rather than recurse indefinitely or drop it.
+	for (const entry of byKey.values()) if (!seen.has(taskKey(entry))) visit(entry);
+	return ordered;
 }
 
 function shortDuration(ms: number): string {
@@ -572,14 +549,17 @@ function eta(ms: number): string {
 }
 
 function stateColor(state: string): ThemeColor {
+	if (/stop_timeout|timed_out|flood/i.test(state)) return "warning";
 	if (/fail|error/i.test(state)) return "error";
-	if (/pending|waiting|keepalive|awaiting|foreign/i.test(state)) return "warning";
-	if (/running|scheduled|active|armed|due/i.test(state)) return "success";
+	if (/pending|waiting|keepalive|awaiting|foreign|stopping/i.test(state)) return "warning";
+	if (/completed|succeeded/i.test(state)) return "success";
+	if (/^(?:stopped|exited|closed|ended)\b/i.test(state)) return "accent";
+	if (/running|scheduled|active|armed|due/i.test(state)) return "accent";
 	return "dim";
 }
 
 class TasksOverlay {
-	private tab: TaskTab = "all";
+	private tab = "all";
 	private entries: TaskEntry[] = [];
 	private selectedKey: string | undefined;
 	private selectedIndexHint = 0;
@@ -690,24 +670,13 @@ class TasksOverlay {
 	}
 
 	private collect(): TaskEntry[] {
-		const registry = this.options.registry;
 		const entries: TaskEntry[] = [];
-		const seen = new Set<string>();
-		const add = (id: string, provider: TaskProvider) => {
-			if (seen.has(id)) return;
-			seen.add(id);
+		for (const [id, provider] of orderedProviders(this.options.registry)) {
 			for (const item of safeItems(provider)) {
 				entries.push({ ...item, provider: id, providerLabel: provider.label || id });
 			}
-		};
-		for (const id of PROVIDER_ORDER) {
-			const provider = providerFor(registry, id);
-			if (provider) add(id, provider);
 		}
-		for (const [id, provider] of registry.providers) {
-			if (!registry.disposed) add(id, provider);
-		}
-		return entries;
+		return groupTaskEntries(entries);
 	}
 
 	private visible(): TaskEntry[] {
@@ -727,6 +696,10 @@ class TasksOverlay {
 
 	private refreshNow(render: boolean): void {
 		if (this.disposed) return;
+		if (this.tab !== "all" && !providerFor(this.options.registry, this.tab)) {
+			this.tab = "all";
+			this.listScroll = 0;
+		}
 		this.entries = this.collect();
 		const keys = new Set(this.entries.map(taskKey));
 		if (this.knownKeys) {
@@ -775,8 +748,10 @@ class TasksOverlay {
 	}
 
 	private switchTab(delta: number): void {
-		const index = TABS.findIndex((tab) => tab.id === this.tab);
-		this.tab = TABS[(index + delta + TABS.length) % TABS.length]!.id;
+		const tabs = taskTabs(this.options.registry);
+		const index = tabs.findIndex((tab) => tab.id === this.tab);
+		const current = index < 0 ? 0 : index;
+		this.tab = tabs[(current + delta + tabs.length) % tabs.length]!.id;
 		this.ensureSelection();
 		this.listScroll = 0;
 		this.requestRender();
@@ -923,7 +898,7 @@ class TasksOverlay {
 			return;
 		}
 		this.confirming = entry;
-		this.status = `Stop ${entry.providerLabel} ${entry.id}? (y/N)`;
+		this.status = "";
 		this.requestRender();
 	}
 
@@ -1035,7 +1010,8 @@ class TasksOverlay {
 				: max >= 3 ? "borderless" : max === 2 ? "twoLine" : "single";
 		const chrome = mode === "framed" ? 7 : mode === "compact" ? 6 : mode === "borderless" ? 2 : 1;
 		const bodyWidth = mode === "framed" || mode === "compact" ? Math.max(1, width - 4) : width;
-		const wanted = this.detailKey ? this.detailLines(bodyWidth).length : Math.max(2, this.visible().length);
+		const wanted = this.confirming ? this.confirmationLines(bodyWidth).length
+			: this.detailKey ? this.detailLines(bodyWidth).length : Math.max(2, this.visible().length);
 		const body = Math.max(1, Math.min(PANEL_MAX_BODY_ROWS, wanted, max - chrome));
 		return { mode, body, max };
 	}
@@ -1055,6 +1031,7 @@ class TasksOverlay {
 
 	/** Slice the detail or list body to the current height and record scroll metrics. */
 	private bodyLines(width: number, height: number): string[] {
+		if (this.confirming) return this.confirmationLines(width).slice(0, height);
 		if (this.detailKey) {
 			const full = this.detailLines(width);
 			this.detailLineCount = full.length;
@@ -1071,19 +1048,17 @@ class TasksOverlay {
 	private listLines(width: number, height: number): string[] {
 		const list = this.visible();
 		if (!list.length) {
-			const message =
-				this.tab === "all"
-					? "No tasks. Arm a Monitor or start a /loop."
-					: this.tab === "monitor"
-						? providerFor(this.options.registry, "monitor")
-							? "No monitors in this session."
-							: "pi-cc-monitor is not loaded."
-						: providerFor(this.options.registry, "loop")
-							? "No loops in this session."
-							: "pi-cc-loop is not loaded.";
-			return this.tab === "all"
-				? [this.options.theme.fg("text", "No tasks."), this.panelTheme().fg("muted", "Start a Monitor or /loop to add one.")]
-				: [this.options.theme.fg("text", message)];
+			if (this.tab === "all") {
+				return [
+					this.options.theme.fg("text", "No tasks."),
+					this.panelTheme().fg("muted", "Start a task with any loaded provider."),
+				];
+			}
+			const provider = providerFor(this.options.registry, this.tab);
+			const message = provider
+				? `No ${provider.label} tasks in this session.`
+				: "This task provider is no longer loaded.";
+			return [this.options.theme.fg("text", message)];
 		}
 		const index = Math.max(
 			0,
@@ -1098,14 +1073,32 @@ class TasksOverlay {
 			const entry = list[i]!;
 			const selected = entry === this.selected();
 			const marker = selected ? theme.fg("accent", "\u25b8 ") : "  ";
-			const tag = this.tab === "all" ? `${theme.fg("dim", entry.provider === "monitor" ? "M" : "L")} ` : "";
-			const state = theme.fg(stateColor(entry.state), oneLine(entry.state));
-			const title = selected ? theme.fg("text", theme.bold(oneLine(entry.title))) : oneLine(entry.title);
-			const meta = entry.meta ? theme.fg("dim", ` \u00b7 ${oneLine(entry.meta)}`) : "";
-			const line = fitWidth(`${marker}${tag}${state} ${title}${meta}`, width);
+			const glyph = entry.provider === "monitor" ? "M"
+				: entry.provider === "loop" ? "L"
+					: (entry.providerLabel.charAt(0).toUpperCase() || "?");
+			const tag = this.tab === "all" ? `${theme.fg("dim", glyph)} ` : "";
+			const branch = entry.depth ? `${"  ".repeat(Math.min(entry.depth, 3))}↳ ` : entry.hasChildren ? "▾ " : "";
+			const state = theme.fg(stateColor(entry.state), entry.role ? oneLine(entry.state).padEnd(12) : oneLine(entry.state));
+			const title = selected ? theme.fg("text", theme.bold(oneLine(entry.title))) : entry.role && !entry.active ? theme.fg("dim", oneLine(entry.title)) : oneLine(entry.title);
+			const information = [entry.role, entry.meta].filter(Boolean).map(oneLine).join(" · ");
+			const meta = information ? theme.fg("dim", ` · ${information}`) : "";
+			const line = fitWidth(`${marker}${tag}${branch}${state} ${title}${meta}`, width);
 			lines.push(selected ? this.styled(line, { bg: this.palette().selected }) : line);
 		}
 		return lines;
+	}
+
+	private confirmationLines(width: number): string[] {
+		const entry = this.confirming;
+		if (!entry) return [];
+		const theme = this.panelTheme();
+		const title = `Stop ${oneLine(entry.role ?? entry.providerLabel)} #${oneLine(entry.id)}?`;
+		const scope = entry.stopConfirmation ?? "Stops the selected task using its owning provider.";
+		return [
+			fitWidth(theme.fg("warning", theme.bold(title)), width),
+			...wrapTextWithAnsi(oneLine(scope), Math.max(1, width)).map((part) => fitWidth(theme.fg("text", part), width)),
+			fitWidth(theme.fg("dim", oneLine(entry.title)), width),
+		];
 	}
 
 	private detailLines(width: number): string[] {
@@ -1113,7 +1106,7 @@ class TasksOverlay {
 		if (!entry) return [];
 		const theme = this.panelTheme();
 		const lines: string[] = [];
-		lines.push(fitWidth(theme.fg("accent", theme.bold(`${entry.providerLabel} \u00b7 ${oneLine(entry.id)}`)), width));
+		lines.push(fitWidth(theme.fg("accent", theme.bold(`${entry.providerLabel} · ${entry.role ? `${oneLine(entry.role)} #` : ""}${oneLine(entry.id)}`)), width));
 		lines.push(fitWidth(theme.fg("text", oneLine(entry.title)), width));
 
 		let detail: TaskDetail | undefined;
@@ -1127,26 +1120,29 @@ class TasksOverlay {
 		}
 		if (detail?.heading) lines.push(fitWidth(theme.fg("muted", oneLine(detail.heading)), width));
 		if (detail) {
-			const labels = detail.rows.map((row) => oneLine(row.label));
-			const labelWidth = Math.min(12, Math.max(1, ...labels.map((label) => visibleWidth(label))));
-			const inline = width >= labelWidth + 16;
-			for (let i = 0; i < detail.rows.length; i++) {
-				const label = labels[i] ?? "";
-				const value = oneLine(detail.rows[i]!.value);
-				if (!inline) {
-					lines.push(fitWidth(theme.fg("dim", label), width));
-					for (const part of wrapTextWithAnsi(value, Math.max(8, width - 2))) {
-						lines.push(fitWidth(`  ${part}`, width));
+			const appendRows = (rows: TaskDetailRow[]) => {
+				const labels = rows.map((row) => oneLine(row.label));
+				const labelWidth = Math.min(12, Math.max(1, ...labels.map((label) => visibleWidth(label))));
+				const inline = width >= labelWidth + 16;
+				for (let i = 0; i < rows.length; i++) {
+					const label = labels[i] ?? "";
+					const value = oneLine(rows[i]!.value);
+					if (!inline) {
+						lines.push(fitWidth(theme.fg("dim", label), width));
+						for (const part of wrapTextWithAnsi(value, Math.max(8, width - 2))) lines.push(fitWidth(`  ${part}`, width));
+						continue;
 					}
-					continue;
+					const prefix = theme.fg("dim", `${label.padEnd(labelWidth)} `);
+					const available = Math.max(8, width - labelWidth - 1);
+					const wrapped = wrapTextWithAnsi(value, available);
+					lines.push(fitWidth(`${prefix}${wrapped[0] ?? ""}`, width));
+					for (const part of wrapped.slice(1)) lines.push(fitWidth(`${" ".repeat(labelWidth + 1)}${part}`, width));
 				}
-				const prefix = theme.fg("dim", `${label.padEnd(labelWidth)} `);
-				const available = Math.max(8, width - labelWidth - 1);
-				const wrapped = wrapTextWithAnsi(value, available);
-				lines.push(fitWidth(`${prefix}${wrapped[0] ?? ""}`, width));
-				for (const part of wrapped.slice(1)) {
-					lines.push(fitWidth(`${" ".repeat(labelWidth + 1)}${part}`, width));
-				}
+			};
+			if (!detail.sections?.length) appendRows(detail.rows);
+			for (const section of detail.sections ?? []) {
+				lines.push("", fitWidth(theme.fg("accent", theme.bold(oneLine(section.title))), width));
+				appendRows(section.rows);
 			}
 			if (detail.note) lines.push(fitWidth(theme.fg("dim", oneLine(detail.note)), width));
 		} else if (!provider) {
@@ -1176,13 +1172,11 @@ class TasksOverlay {
 
 	private tabsLine(width: number): string {
 		const theme = this.panelTheme();
-		const counts: Record<TaskTab, number> = {
-			all: this.entries.length,
-			monitor: this.entries.filter((entry) => entry.provider === "monitor").length,
-			loop: this.entries.filter((entry) => entry.provider === "loop").length,
-		};
-		const parts = TABS.map((tab) => {
-			const label = ` ${tab.label} ${counts[tab.id]} `;
+		const tabs = taskTabs(this.options.registry);
+		const counts = new Map<string, number>([["all", this.entries.length]]);
+		for (const entry of this.entries) counts.set(entry.provider, (counts.get(entry.provider) ?? 0) + 1);
+		const parts = tabs.map((tab) => {
+			const label = ` ${tab.label} ${counts.get(tab.id) ?? 0} `;
 			return tab.id === this.tab
 				? this.styled(label, { fg: this.palette().text, bg: this.palette().tab, bold: true })
 				: theme.fg("muted", label);
@@ -1202,8 +1196,8 @@ class TasksOverlay {
 
 	private hintLine(width: number): string {
 		const theme = this.panelTheme();
+		if (this.confirming) return fitWidth(theme.fg("warning", "y stop · n/Esc cancel"), width);
 		if (this.status) return fitWidth(theme.fg("warning", this.status), width);
-		if (this.confirming) return fitWidth(theme.fg("warning", "y stop \u00b7 n/Esc cancel"), width);
 		if (this.detailKey) {
 			const total = this.detailLineCount;
 			const visible = this.detailViewport;
@@ -1218,6 +1212,7 @@ class TasksOverlay {
 	}
 
 	private singleLine(width: number): string {
+		if (this.confirming) return fitWidth(this.panelTheme().fg("warning", `y stop ${oneLine(this.confirming.role ?? this.confirming.providerLabel)} · n/Esc cancel`), width);
 		const entry = this.detailKey ? this.entryFor(this.detailKey) : this.selected();
 		const hint = this.hintLine(width);
 		if (!entry || this.status) return hint;

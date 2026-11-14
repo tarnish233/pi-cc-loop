@@ -63,7 +63,7 @@ async function open(order, { prompt = false } = {}) {
 
 const commandNames = (s) => s.session.extensionRunner.getRegisteredCommands().map((command) => command.invocationName);
 const tasksNames = (s) => commandNames(s).filter((name) => /^tasks(?::\d+)?$/.test(name));
-const panelCommandNames = (s) => commandNames(s).filter((name) => s.command(name).description?.startsWith("Open the shared Monitor and Loop task overlay"));
+const panelCommandNames = (s) => commandNames(s).filter((name) => s.command(name).description?.startsWith("Open the shared task overlay"));
 
 function assertPanelCommand(s, name) {
 	assert.deepEqual(panelCommandNames(s), [name], "our panel has exactly one entry, with no alias or suffix");

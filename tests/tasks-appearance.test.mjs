@@ -102,7 +102,7 @@ test("empty task card is compact and its width responds to resize without growin
 	try {
 		assert.equal(v.width(), 96);
 		assert.equal(v.render().length, 9, "an empty list uses only two body rows, not a 16-row sheet");
-		assert.match(stripTerminalSequences(v.render().join("\n")), /No tasks\.[\s\S]*Start a Monitor/);
+		assert.match(stripTerminalSequences(v.render().join("\n")), /No tasks\.[\s\S]*Start a task/);
 		v.state.columns = 62;
 		assert.equal(v.width(), 60);
 		assert.ok(v.render().every((line) => visibleWidth(line) === 60));
