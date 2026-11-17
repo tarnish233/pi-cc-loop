@@ -39,6 +39,8 @@ import {
 	type Color,
 	type KeybindingsManager,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { statSync } from "node:fs";
 import { readLogTail, sanitizeDisplay } from "./log-tail.ts";
@@ -128,6 +130,8 @@ export interface TaskItem {
 	state: string;
 	/** False when the task has ended or cannot be stopped from here. */
 	active: boolean;
+	/** Creation time in epoch milliseconds, used only for newest-first display. */
+	createdAt?: number;
 	/** Optional short right-hand detail, e.g. "3 events · 1m" or "next 2m". */
 	meta?: string;
 	/** User-facing role, separate from provider and lifecycle state. */
@@ -492,17 +496,50 @@ interface DetailLogView {
 	lines: string[];
 }
 
+type PanelAction =
+	| { kind: "tab"; id: string }
+	| { kind: "task"; key: string }
+	| { kind: "toggle"; key: string }
+	| { kind: "detail" | "stop"; key: string }
+	| { kind: "back" | "close" | "confirmStop" | "cancelStop" };
+
+interface HitRegion {
+	x: number;
+	y: number;
+	width: number;
+	action: PanelAction;
+}
+
+interface BodyScrollbar {
+	x: number;
+	y: number;
+	height: number;
+	total: number;
+	viewport: number;
+	scroll: number;
+	thumbOffset: number;
+	thumbSize: number;
+}
+
 function taskKey(entry: Pick<TaskEntry, "provider" | "id">): string {
 	return `${entry.provider}:${entry.id}`;
 }
 
-/** Stable parent-first order. Missing/cyclic/cross-provider links cannot hide entries. */
+/** Equal/unknown times retain provider order; timestamped tasks precede undated ones. */
+function compareTaskCreation(a: TaskItem, b: TaskItem): number {
+	const aTime = Number.isFinite(a.createdAt) ? a.createdAt! : -Infinity;
+	const bTime = Number.isFinite(b.createdAt) ? b.createdAt! : -Infinity;
+	return aTime === bTime ? 0 : aTime > bTime ? -1 : 1;
+}
+
+/** Newest roots/siblings first, with parents before children and no hidden entries. */
 export function groupTaskEntries(entries: TaskEntry[]): TaskEntry[] {
 	const byKey = new Map<string, TaskEntry>();
 	for (const entry of entries) if (!byKey.has(taskKey(entry))) byKey.set(taskKey(entry), entry);
+	const newestFirst = [...byKey.values()].sort(compareTaskCreation);
 	const children = new Map<string, TaskEntry[]>();
 	const roots: TaskEntry[] = [];
-	for (const entry of byKey.values()) {
+	for (const entry of newestFirst) {
 		const parent = entry.parentId ? byKey.get(taskKey({ provider: entry.provider, id: entry.parentId })) : undefined;
 		if (parent && parent !== entry) {
 			const key = taskKey(parent);
@@ -527,7 +564,7 @@ export function groupTaskEntries(entries: TaskEntry[]): TaskEntry[] {
 	};
 	for (const root of roots) visit(root);
 	// A cycle has no root. Show it once rather than recurse indefinitely or drop it.
-	for (const entry of byKey.values()) if (!seen.has(taskKey(entry))) visit(entry);
+	for (const entry of newestFirst) if (!seen.has(taskKey(entry))) visit(entry);
 	return ordered;
 }
 
@@ -575,6 +612,17 @@ class TasksOverlay {
 	private knownKeys: Set<string> | undefined;
 	private recentTask: string | undefined;
 	private confirming: TaskEntry | undefined;
+	private confirmationScroll = 0;
+	private confirmationLineCount = 0;
+	private confirmationViewport = 0;
+	private readonly collapsed = new Set<string>();
+	private hitRegions: HitRegion[] = [];
+	private bodyScrollbar: BodyScrollbar | undefined;
+	private scrollbarDragOffset: number | undefined;
+	private suppressMouseGesture = false;
+	private mouseWidth = 0;
+	private mouseColumns = 0;
+	private mouseRows = 0;
 	private stoppingKey: string | undefined;
 	private status = "";
 	private disposed = false;
@@ -617,6 +665,7 @@ class TasksOverlay {
 	invalidate(): void {
 		this.renderQueued = false;
 		this.renderPalette = undefined;
+		this.mouseWidth = 0;
 	}
 
 	private palette(): PanelPalette {
@@ -680,7 +729,20 @@ class TasksOverlay {
 	}
 
 	private visible(): TaskEntry[] {
-		return this.tab === "all" ? this.entries : this.entries.filter((entry) => entry.provider === this.tab);
+		const entries = this.tab === "all" ? this.entries : this.entries.filter((entry) => entry.provider === this.tab);
+		if (!this.collapsed.size) return entries;
+		const visible: TaskEntry[] = [];
+		let hiddenBelow: number | undefined;
+		for (const entry of entries) {
+			const depth = entry.depth ?? 0;
+			if (hiddenBelow !== undefined) {
+				if (depth > hiddenBelow) continue;
+				hiddenBelow = undefined;
+			}
+			visible.push(entry);
+			if (entry.hasChildren && this.collapsed.has(taskKey(entry))) hiddenBelow = depth;
+		}
+		return visible;
 	}
 
 	private entryFor(key: string): TaskEntry | undefined {
@@ -703,10 +765,11 @@ class TasksOverlay {
 		this.entries = this.collect();
 		const keys = new Set(this.entries.map(taskKey));
 		if (this.knownKeys) {
-			const added = this.entries.filter((entry) => !this.knownKeys!.has(taskKey(entry)));
-			if (added.length) this.recentTask = added[added.length - 1]!.title;
+			const added = this.entries.filter((entry) => !this.knownKeys!.has(taskKey(entry))).sort(compareTaskCreation);
+			if (added.length) this.recentTask = added[0]!.title;
 		}
 		this.knownKeys = keys;
+		for (const key of this.collapsed) if (!keys.has(key)) this.collapsed.delete(key);
 		this.ensureSelection();
 		if (this.detailKey && !this.entryFor(this.detailKey)) this.detailKey = undefined;
 		if (this.detailKey) this.reloadLogs();
@@ -747,14 +810,84 @@ class TasksOverlay {
 		this.requestRender();
 	}
 
+	/** Wheel input scrolls the viewport, keeping the selected task visible. */
+	private scrollList(delta: number): void {
+		const list = this.visible();
+		if (!list.length) return;
+		const height = this.pageSize();
+		const index = this.syncListScroll(list, height);
+		const next = Math.max(0, Math.min(Math.max(0, list.length - height), this.listScroll + delta));
+		if (next === this.listScroll) return;
+		this.listScroll = next;
+		// Preserve selection unless the wheel moves it outside the visible page.
+		const selected = Math.max(next, Math.min(next + height - 1, index));
+		this.selectedKey = taskKey(list[selected]!);
+		this.selectedIndexHint = selected;
+		this.requestRender();
+	}
+
+	private syncListScroll(list: TaskEntry[], height: number): number {
+		const index = Math.max(0, list.findIndex((entry) => taskKey(entry) === this.selectedKey));
+		if (index < this.listScroll) this.listScroll = index;
+		if (index >= this.listScroll + height) this.listScroll = index - height + 1;
+		this.listScroll = Math.max(0, Math.min(this.listScroll, Math.max(0, list.length - height)));
+		return index;
+	}
+
+	private selectTab(id: string): void {
+		if (!taskTabs(this.options.registry).some((tab) => tab.id === id)) return;
+		this.tab = id;
+		this.detailKey = undefined;
+		this.detailScroll = 0;
+		this.confirming = undefined;
+		this.confirmationScroll = 0;
+		this.status = "";
+		this.ensureSelection();
+		this.listScroll = 0;
+		this.requestRender();
+	}
+
 	private switchTab(delta: number): void {
 		const tabs = taskTabs(this.options.registry);
 		const index = tabs.findIndex((tab) => tab.id === this.tab);
 		const current = index < 0 ? 0 : index;
-		this.tab = tabs[(current + delta + tabs.length) % tabs.length]!.id;
-		this.ensureSelection();
-		this.listScroll = 0;
+		this.selectTab(tabs[(current + delta + tabs.length) % tabs.length]!.id);
+	}
+
+	private openDetail(entry = this.selected()): void {
+		if (!entry) return;
+		const key = taskKey(entry);
+		if (this.detailKey === key) return;
+		this.detailKey = key;
+		this.detailScroll = 0;
+		this.status = "";
+		this.reloadLogs();
 		this.requestRender();
+	}
+
+	private closeDetail(): void {
+		if (!this.detailKey) return;
+		this.detailKey = undefined;
+		this.detailScroll = 0;
+		this.status = "";
+		this.requestRender();
+	}
+
+	private toggleGroup(key: string): void {
+		const entry = this.entryFor(key);
+		if (!entry?.hasChildren) return;
+		if (this.collapsed.has(key)) this.collapsed.delete(key);
+		else this.collapsed.add(key);
+		this.ensureSelection();
+		this.requestRender();
+	}
+
+	private collapseSelected(expand: boolean): void {
+		const entry = this.selected();
+		if (!entry?.hasChildren) return;
+		const key = taskKey(entry);
+		if (expand ? !this.collapsed.has(key) : this.collapsed.has(key)) return;
+		this.toggleGroup(key);
 	}
 
 	private reloadLogs(): void {
@@ -803,6 +936,151 @@ class TasksOverlay {
 
 	// ------------------------------------------------------------ input
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.disposed) return undefined;
+		if (event.type === "wheel") {
+			// Contain every wheel event, including bounds, so the transcript
+			// behind the overlay never moves with the panel.
+			const delta = Number.isFinite(event.wheelDelta) ? Math.trunc(event.wheelDelta!) : 0;
+			if (delta) {
+				this.recentTask = undefined;
+				this.scrollBody(delta);
+			}
+			return { handled: true, render: false };
+		}
+		if (event.button !== "left" && event.type !== "release") return undefined;
+		if (this.suppressMouseGesture) return { handled: true, focus: true, render: false };
+		this.ensureMouseLayout(event);
+
+		if (event.type === "press" && this.bodyScrollbar &&
+			event.x === this.bodyScrollbar.x && event.y >= this.bodyScrollbar.y &&
+			event.y < this.bodyScrollbar.y + this.bodyScrollbar.height) {
+			// Re-render once at the gesture boundary to fold in any pending
+			// refresh before mapping a track coordinate to a scroll position.
+			const previous = this.bodyScrollbar;
+			this.render(event.width, true);
+			const bar = this.bodyScrollbar;
+			if (!bar || bar.x !== previous.x || bar.y !== previous.y || bar.height !== previous.height ||
+				event.x !== bar.x || event.y < bar.y || event.y >= bar.y + bar.height) {
+				// The old bar may now overlap a new task row. Suppress the whole
+				// gesture (including a double-click) until the host repaints it.
+				this.suppressMouseGesture = true;
+				this.scrollbarDragOffset = undefined;
+				this.requestRender();
+				return { handled: true, focus: true, render: false };
+			}
+			const localY = event.y - bar.y;
+			this.scrollbarDragOffset = localY >= bar.thumbOffset && localY < bar.thumbOffset + bar.thumbSize
+				? localY - bar.thumbOffset : Math.floor(bar.thumbSize / 2);
+			this.scrollBodyFromPointer(event.y);
+			return { capture: true, focus: true, render: false };
+		}
+		if (event.type === "drag" && this.scrollbarDragOffset !== undefined && this.bodyScrollbar) {
+			this.scrollBodyFromPointer(event.y);
+			return { capture: true, render: false };
+		}
+		if (event.type === "release" && event.button === "left" && this.scrollbarDragOffset !== undefined) {
+			this.scrollbarDragOffset = undefined;
+			return { handled: true, render: false };
+		}
+		if (event.type === "press" && this.mouseRegion(event.x, event.y)) {
+			// Pi emits click only for a press target it owns. The action itself
+			// still runs on click, after a stationary press/release sequence.
+			return { handled: true, focus: true, render: false };
+		}
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		const region = this.mouseRegion(event.x, event.y);
+		if (!region) return undefined;
+		this.recentTask = undefined;
+		this.performMouseAction(region.action, event.clickCount ?? 1);
+		return { handled: true, focus: true, render: false };
+	}
+
+	private mouseRegion(x: number, y: number): HitRegion | undefined {
+		for (let i = this.hitRegions.length - 1; i >= 0; i--) {
+			const region = this.hitRegions[i]!;
+			if (y === region.y && x >= region.x && x < region.x + region.width) return region;
+		}
+		return undefined;
+	}
+
+	private ensureMouseLayout(event: TuiMouseEvent): void {
+		const width = Math.max(1, Math.floor(event.width));
+		if (this.mouseWidth === width && this.mouseColumns === this.columns() && this.mouseRows === this.rows()) return;
+		this.render(width, true);
+	}
+
+	private performMouseAction(action: PanelAction, clickCount: number): void {
+		if (this.confirming && action.kind !== "confirmStop" && action.kind !== "cancelStop") return;
+		switch (action.kind) {
+			case "tab": this.selectTab(action.id); break;
+			case "task": {
+				if (this.detailKey) return;
+				const list = this.visible();
+				const index = list.findIndex((entry) => taskKey(entry) === action.key);
+				if (index < 0) return;
+				this.selectedKey = action.key;
+				this.selectedIndexHint = index;
+				if (clickCount >= 2) this.openDetail(list[index]);
+				else this.requestRender();
+				break;
+			}
+			case "toggle": if (!this.detailKey) this.toggleGroup(action.key); break;
+			case "back": this.closeDetail(); break;
+			case "close": if (!this.detailKey) this.options.onClose(); break;
+			case "detail": {
+				if (this.detailKey) break;
+				const index = this.visible().findIndex((entry) => taskKey(entry) === action.key);
+				const entry = index >= 0 ? this.visible()[index] : undefined;
+				if (!entry) break;
+				this.selectedKey = action.key;
+				this.selectedIndexHint = index;
+				this.openDetail(entry);
+				break;
+			}
+			case "stop": {
+				const entry = this.entryFor(action.key);
+				const inView = entry && (this.detailKey ? this.detailKey === action.key
+					: this.visible().some((candidate) => taskKey(candidate) === action.key));
+				if (inView) this.askStop(entry);
+				break;
+			}
+			case "cancelStop": this.cancelStop(); break;
+			case "confirmStop": {
+				const target = this.confirming;
+				if (!target) return;
+				this.confirming = undefined;
+				this.confirmationScroll = 0;
+				void this.stop(target);
+				break;
+			}
+		}
+	}
+
+	private scrollBody(delta: number): void {
+		if (this.confirming) this.scrollConfirmation(delta);
+		else if (this.detailKey) this.scrollDetail(delta);
+		else this.scrollList(delta);
+	}
+
+	private scrollBodyTo(scroll: number): void {
+		if (this.confirming) this.scrollConfirmation(scroll - this.confirmationScroll);
+		else if (this.detailKey) this.scrollDetail(scroll - this.detailScroll);
+		else this.scrollList(scroll - this.listScroll);
+		if (this.bodyScrollbar) {
+			this.bodyScrollbar.scroll = this.confirming ? this.confirmationScroll : this.detailKey ? this.detailScroll : this.listScroll;
+		}
+	}
+
+	private scrollBodyFromPointer(pointerY: number): void {
+		const bar = this.bodyScrollbar;
+		if (!bar || this.scrollbarDragOffset === undefined) return;
+		const range = Math.max(0, bar.height - bar.thumbSize);
+		const thumb = Math.max(0, Math.min(range, pointerY - bar.y - this.scrollbarDragOffset));
+		const maxScroll = Math.max(0, bar.total - bar.viewport);
+		this.scrollBodyTo(range ? Math.round(thumb / range * maxScroll) : 0);
+	}
+
 	handleInput(data: string): void {
 		if (this.disposed) return;
 		this.recentTask = undefined;
@@ -811,24 +1089,25 @@ class TasksOverlay {
 			if (data === "y" || data === "Y") {
 				const target = this.confirming;
 				this.confirming = undefined;
+				this.confirmationScroll = 0;
 				void this.stop(target);
 				return;
 			}
 			if (data === "n" || data === "N" || this.isCancel(data)) {
-				this.confirming = undefined;
-				this.status = "";
-				this.requestRender();
+				this.cancelStop();
 				return;
 			}
+			const page = this.pageSize();
+			if (this.isUp(data)) this.scrollConfirmation(-1);
+			else if (this.isDown(data)) this.scrollConfirmation(1);
+			else if (this.isPageUp(data)) this.scrollConfirmation(-page);
+			else if (this.isPageDown(data)) this.scrollConfirmation(page);
 			return;
 		}
 
 		if (this.detailKey) {
 			if (this.isCancel(data)) {
-				this.detailKey = undefined;
-				this.detailScroll = 0;
-				this.status = "";
-				this.requestRender();
+				this.closeDetail();
 				return;
 			}
 			if (data === "x" || data === "X") {
@@ -871,14 +1150,16 @@ class TasksOverlay {
 			this.move(1, true);
 			return;
 		}
+		if (matchesKey(data, "left")) {
+			this.collapseSelected(false);
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.collapseSelected(true);
+			return;
+		}
 		if (this.isConfirm(data)) {
-			const entry = this.selected();
-			if (entry) {
-				this.detailKey = taskKey(entry);
-				this.detailScroll = 0;
-				this.reloadLogs();
-				this.requestRender();
-			}
+			this.openDetail();
 			return;
 		}
 		if (data === "x" || data === "X") {
@@ -886,9 +1167,9 @@ class TasksOverlay {
 		}
 	}
 
-	private askStop(): void {
-		if (this.stoppingKey) return;
-		const entry = this.detailKey ? this.entryFor(this.detailKey) : this.selected();
+	private askStop(target?: TaskEntry): void {
+		if (this.stoppingKey || this.confirming) return;
+		const entry = target ?? (this.detailKey ? this.entryFor(this.detailKey) : this.selected());
 		if (!entry) return;
 		if (!entry.active) {
 			this.status = "This task has ended; there is nothing to stop.";
@@ -902,6 +1183,15 @@ class TasksOverlay {
 			return;
 		}
 		this.confirming = entry;
+		this.confirmationScroll = 0;
+		this.status = "";
+		this.requestRender();
+	}
+
+	private cancelStop(): void {
+		if (!this.confirming) return;
+		this.confirming = undefined;
+		this.confirmationScroll = 0;
 		this.status = "";
 		this.requestRender();
 	}
@@ -947,6 +1237,22 @@ class TasksOverlay {
 		this.detailLineCount = lines.length;
 		this.detailViewport = Math.max(1, this.pageSize());
 		this.detailScroll = Math.max(0, Math.min(Math.max(0, lines.length - this.detailViewport), this.detailScroll));
+	}
+
+	private scrollConfirmation(delta: number): void {
+		if (!this.confirming) return;
+		this.syncConfirmationMetrics();
+		const max = Math.max(0, this.confirmationLineCount - this.confirmationViewport);
+		this.confirmationScroll = Math.max(0, Math.min(max, this.confirmationScroll + delta));
+		this.requestRender();
+	}
+
+	private syncConfirmationMetrics(): void {
+		if (!this.confirming) return;
+		const lines = this.confirmationLines(this.metricsWidth());
+		this.confirmationLineCount = lines.length;
+		this.confirmationViewport = Math.max(1, this.pageSize());
+		this.confirmationScroll = Math.max(0, Math.min(Math.max(0, lines.length - this.confirmationViewport), this.confirmationScroll));
 	}
 
 	private isCancel(data: string): boolean {
@@ -1003,7 +1309,8 @@ class TasksOverlay {
 	 * title/tabs/rules/hint; very short terminals switch to a borderless layout
 	 * with just tabs, body and hint, and finally to a single line.
 	 */
-	private layoutFor(width: number = this.lastRenderWidth || this.estimatedOverlayWidth()): {
+	private layoutFor(width: number = this.lastColumns === this.columns() && this.lastRenderWidth > 0
+		? this.lastRenderWidth : this.estimatedOverlayWidth()): {
 		mode: "framed" | "compact" | "borderless" | "twoLine" | "single";
 		body: number;
 		max: number;
@@ -1033,9 +1340,16 @@ class TasksOverlay {
 			: Math.max(1, overlay);
 	}
 
-	/** Slice the detail or list body to the current height and record scroll metrics. */
-	private bodyLines(width: number, height: number): string[] {
-		if (this.confirming) return this.confirmationLines(width).slice(0, height);
+	/** Slice the active body and retain geometry for native mouse dispatch. */
+	private bodyLines(width: number, height: number, row: number, x: number): string[] {
+		if (this.confirming) {
+			const full = this.confirmationLines(width);
+			this.confirmationLineCount = full.length;
+			this.confirmationViewport = height;
+			const maxScroll = Math.max(0, full.length - height);
+			this.confirmationScroll = Math.max(0, Math.min(maxScroll, this.confirmationScroll));
+			return full.slice(this.confirmationScroll, this.confirmationScroll + height);
+		}
 		if (this.detailKey) {
 			const full = this.detailLines(width);
 			this.detailLineCount = full.length;
@@ -1046,10 +1360,12 @@ class TasksOverlay {
 		}
 		this.detailLineCount = 0;
 		this.detailViewport = 0;
-		return this.listLines(width, height);
+		this.confirmationLineCount = 0;
+		this.confirmationViewport = 0;
+		return this.listLines(width, height, row, x);
 	}
 
-	private listLines(width: number, height: number): string[] {
+	private listLines(width: number, height: number, row: number, x: number): string[] {
 		const list = this.visible();
 		if (!list.length) {
 			if (this.tab === "all") {
@@ -1064,32 +1380,69 @@ class TasksOverlay {
 				: "This task provider is no longer loaded.";
 			return [this.options.theme.fg("text", message)];
 		}
-		const index = Math.max(
-			0,
-			list.findIndex((entry) => taskKey(entry) === this.selectedKey),
-		);
-		if (index < this.listScroll) this.listScroll = index;
-		if (index >= this.listScroll + height) this.listScroll = index - height + 1;
-		this.listScroll = Math.max(0, Math.min(this.listScroll, Math.max(0, list.length - height)));
+		this.syncListScroll(list, height);
 		const lines: string[] = [];
 		const theme = this.panelTheme();
 		for (let i = this.listScroll; i < Math.min(list.length, this.listScroll + height); i++) {
 			const entry = list[i]!;
+			const key = taskKey(entry);
 			const selected = entry === this.selected();
 			const marker = selected ? theme.fg("accent", "\u25b8 ") : "  ";
 			const glyph = entry.provider === "monitor" ? "M"
 				: entry.provider === "loop" ? "L"
 					: (entry.providerLabel.charAt(0).toUpperCase() || "?");
 			const tag = this.tab === "all" ? `${theme.fg("dim", glyph)} ` : "";
-			const branch = entry.depth ? `${"  ".repeat(Math.min(entry.depth, 3))}↳ ` : entry.hasChildren ? "▾ " : "";
+			const depth = Math.min(entry.depth ?? 0, 3);
+			const branch = entry.hasChildren
+				? `${"  ".repeat(depth)}${this.collapsed.has(key) ? "▸" : "▾"} `
+				: entry.depth ? `${"  ".repeat(depth)}↳ ` : "";
 			const state = theme.fg(stateColor(entry.state), entry.role ? oneLine(entry.state).padEnd(12) : oneLine(entry.state));
 			const title = selected ? theme.fg("text", theme.bold(oneLine(entry.title))) : entry.role && !entry.active ? theme.fg("dim", oneLine(entry.title)) : oneLine(entry.title);
 			const information = [entry.role, entry.meta].filter(Boolean).map(oneLine).join(" · ");
 			const meta = information ? theme.fg("dim", ` · ${information}`) : "";
 			const line = fitWidth(`${marker}${tag}${branch}${state} ${title}${meta}`, width);
+			const y = row + lines.length;
+			this.hitRegions.push({ x, y, width, action: { kind: "task", key } });
+			if (entry.hasChildren) {
+				const arrowX = x + visibleWidth(marker) + visibleWidth(tag) + depth * 2;
+				if (arrowX + 2 <= x + width) this.hitRegions.push({ x: arrowX, y, width: 2, action: { kind: "toggle", key } });
+			}
 			lines.push(selected ? this.styled(line, { bg: this.palette().selected }) : line);
 		}
 		return lines;
+	}
+
+	private bodyTotal(width: number): number {
+		if (this.confirming) return this.confirmationLines(width).length;
+		if (this.detailKey) return this.detailLines(width).length;
+		return this.visible().length;
+	}
+
+	/** Render the viewport first, then append a native hit-testable scrollbar. */
+	private renderBody(width: number, height: number, row: number, x: number): string[] {
+		const reservedWidth = Math.max(1, width - 1);
+		const scrolling = width >= 2 && this.bodyTotal(reservedWidth) > height;
+		const contentWidth = scrolling ? reservedWidth : width;
+		this.lastBodyWidth = contentWidth;
+		const body = this.bodyLines(contentWidth, height, row, x);
+		while (body.length < height) body.push("");
+		const total = this.confirming ? this.confirmationLineCount : this.detailKey ? this.detailLineCount : this.visible().length;
+		const scroll = this.confirming ? this.confirmationScroll : this.detailKey ? this.detailScroll : this.listScroll;
+		if (!scrolling || total <= height) {
+			this.bodyScrollbar = undefined;
+			return body.map((line) => fitWidth(line, width));
+		}
+		const thumbSize = Math.max(1, Math.min(height, Math.round(height * height / total)));
+		const thumbRange = Math.max(0, height - thumbSize);
+		const maxScroll = Math.max(1, total - height);
+		const thumbOffset = Math.max(0, Math.min(thumbRange, Math.round(scroll / maxScroll * thumbRange)));
+		this.bodyScrollbar = { x: x + contentWidth, y: row, height, total, viewport: height, scroll, thumbOffset, thumbSize };
+		const theme = this.panelTheme();
+		return body.map((line, index) => {
+			const thumb = index >= thumbOffset && index < thumbOffset + thumbSize;
+			const glyph = thumb ? theme.fg("accent", "█") : theme.fg("muted", "░");
+			return `${fitWidth(line, contentWidth)}${glyph}`;
+		});
 	}
 
 	private confirmationLines(width: number): string[] {
@@ -1178,13 +1531,19 @@ class TasksOverlay {
 		return lines;
 	}
 
-	private tabsLine(width: number): string {
+	private tabsLine(width: number, row: number, x: number): string {
 		const theme = this.panelTheme();
 		const tabs = taskTabs(this.options.registry);
 		const counts = new Map<string, number>([["all", this.entries.length]]);
 		for (const entry of this.entries) counts.set(entry.provider, (counts.get(entry.provider) ?? 0) + 1);
+		let cursor = 0;
 		const parts = tabs.map((tab) => {
 			const label = ` ${tab.label} ${counts.get(tab.id) ?? 0} `;
+			const labelWidth = visibleWidth(label);
+			if (cursor + labelWidth <= width) {
+				this.hitRegions.push({ x: x + cursor, y: row, width: labelWidth, action: { kind: "tab", id: tab.id } });
+			}
+			cursor += labelWidth + 1;
 			return tab.id === this.tab
 				? this.styled(label, { fg: this.palette().text, bg: this.palette().tab, bold: true })
 				: theme.fg("muted", label);
@@ -1192,37 +1551,77 @@ class TasksOverlay {
 		return fitWidth(parts.join(" "), width);
 	}
 
-	private titleLine(width: number): string {
+	private titleLine(width: number, row: number, x: number): string {
 		const theme = this.panelTheme();
-		const title = this.detailKey ? "Task detail" : "Tasks";
-		const right = this.detailKey ? "Esc back" : "Esc close";
+		const title = this.confirming ? "Confirm stop" : this.detailKey ? "Task detail" : "Tasks";
+		const action: PanelAction = { kind: this.confirming ? "cancelStop" : this.detailKey ? "back" : "close" };
+		const label = this.confirming ? "Esc cancel" : this.detailKey ? "Esc back" : "Esc close";
+		const right = this.styled(` ${label} `, { fg: this.palette().text, bg: this.palette().tab, bold: true });
+		const rightWidth = visibleWidth(right);
 		const left = theme.fg("accent", theme.bold(title));
-		const gap = width - visibleWidth(left) - visibleWidth(right);
+		const gap = width - visibleWidth(left) - rightWidth;
 		if (gap < 1) return fitWidth(left, width);
-		return fitWidth(`${left}${" ".repeat(gap)}${theme.fg("dim", right)}`, width);
+		this.hitRegions.push({ x: x + width - rightWidth, y: row, width: rightWidth, action });
+		return fitWidth(`${left}${" ".repeat(gap)}${right}`, width);
 	}
 
-	private hintLine(width: number): string {
-		const theme = this.panelTheme();
-		if (this.confirming) return fitWidth(theme.fg("warning", "y stop · n/Esc cancel"), width);
-		if (this.status) return fitWidth(theme.fg("warning", this.status), width);
-		if (this.detailKey) {
-			const total = this.detailLineCount;
-			const visible = this.detailViewport;
-			const scroll = total > visible ? ` ${this.detailScroll + 1}-${Math.min(total, this.detailScroll + visible)}/${total}` : "";
-			return fitWidth(theme.fg("dim", `\u2191\u2193 scroll \u00b7 pgUp/pgDn page \u00b7 x stop \u00b7 Esc back${scroll}`), width);
+	private actionLine(width: number, row: number, x: number, segments: Array<{ text: string; action?: PanelAction }>): string {
+		let cursor = 0;
+		for (const segment of segments) {
+			const segmentWidth = visibleWidth(segment.text);
+			if (segment.action && cursor + segmentWidth <= width) {
+				this.hitRegions.push({ x: x + cursor, y: row, width: segmentWidth, action: segment.action });
+			}
+			cursor += segmentWidth + 1;
 		}
-		const newTask = this.recentTask ? theme.fg("warning", `new ${oneLine(this.recentTask)} \u00b7 `) : "";
-		const controls = taskTabs(this.options.registry).length > 1
-			? "Tab switch \u00b7 \u2191\u2193 select \u00b7 Enter detail \u00b7 x stop \u00b7 Esc close"
-			: "\u2191\u2193 select \u00b7 Enter detail \u00b7 x stop \u00b7 Esc close";
-		return fitWidth(newTask + theme.fg("dim", controls), width);
+		return fitWidth(segments.map((segment) => segment.text).join(" "), width);
+	}
+
+	private actionButton(label: string, action?: PanelAction): { text: string; action?: PanelAction } {
+		return {
+			text: action
+				? this.styled(` ${label} `, { fg: this.palette().text, bg: this.palette().tab, bold: true })
+				: this.panelTheme().fg("muted", ` ${label} `),
+			...(action ? { action } : {}),
+		};
+	}
+
+	private hintLine(width: number, row: number, x: number): string {
+		const theme = this.panelTheme();
+		if (this.status) return fitWidth(theme.fg("warning", this.status), width);
+		const fullscreen = this.options.tui.mode === "fullscreen";
+		const range = (total: number, viewport: number, scroll: number) => total > viewport
+			? `${scroll + 1}-${Math.min(total, scroll + viewport)}/${total}` : "";
+		if (this.confirming) {
+			return this.actionLine(width, row, x, [
+				this.actionButton("Cancel", { kind: "cancelStop" }),
+				this.actionButton("Stop", { kind: "confirmStop" }),
+				{ text: theme.fg("dim", "y stop · n/Esc cancel") },
+				{ text: theme.fg("dim", range(this.confirmationLineCount, this.confirmationViewport, this.confirmationScroll)) },
+			]);
+		}
+		const entry = this.detailKey ? this.entryFor(this.detailKey) : this.selected();
+		const canStop = !!entry?.active && !this.stoppingKey && !!providerFor(this.options.registry, entry.provider)?.stop;
+		if (this.detailKey) {
+			return this.actionLine(width, row, x, [
+				this.actionButton("Stop", entry && canStop ? { kind: "stop", key: taskKey(entry) } : undefined),
+				{ text: theme.fg("dim", fullscreen ? "↑↓/wheel scroll" : "↑↓ scroll · pgUp/pgDn page · x stop") },
+				{ text: theme.fg("dim", range(this.detailLineCount, this.detailViewport, this.detailScroll)) },
+			]);
+		}
+		return this.actionLine(width, row, x, [
+			...(this.recentTask ? [{ text: theme.fg("warning", `new ${oneLine(this.recentTask)}`) }] : []),
+			this.actionButton("Detail", entry ? { kind: "detail", key: taskKey(entry) } : undefined),
+			this.actionButton("Stop", entry && canStop ? { kind: "stop", key: taskKey(entry) } : undefined),
+			{ text: theme.fg("dim", fullscreen ? "↑↓ select · wheel scroll" : "↑↓ select · Enter detail · x stop") },
+			{ text: theme.fg("dim", range(this.visible().length, this.pageSize(), this.listScroll)) },
+		]);
 	}
 
 	private singleLine(width: number): string {
 		if (this.confirming) return fitWidth(this.panelTheme().fg("warning", `y stop ${oneLine(this.confirming.role ?? this.confirming.providerLabel)} · n/Esc cancel`), width);
 		const entry = this.detailKey ? this.entryFor(this.detailKey) : this.selected();
-		const hint = this.hintLine(width);
+		const hint = this.hintLine(width, 0, 0);
 		if (!entry || this.status) return hint;
 		const controls = this.detailKey ? "Esc back" : "Esc close";
 		return fitWidth(`${oneLine(entry.state)} ${oneLine(entry.title)} \u00b7 ${controls}`, width);
@@ -1230,23 +1629,29 @@ class TasksOverlay {
 
 	private renderBorderless(width: number, layout: ReturnType<TasksOverlay["layoutFor"]>): string[] {
 		if (layout.mode === "twoLine") {
-			const body = this.bodyLines(width, 1);
-			return [fitWidth(body[0] ?? this.hintLine(width), width), this.hintLine(width)];
+			const body = this.renderBody(width, 1, 0, 0);
+			return [fitWidth(body[0] ?? this.hintLine(width, 0, 0), width), this.hintLine(width, 1, 0)];
 		}
-		const lines: string[] = [this.tabsLine(width)];
-		const body = this.bodyLines(width, layout.body);
-		while (body.length < layout.body) body.push("");
+		const lines: string[] = [this.tabsLine(width, 0, 0)];
+		const body = this.renderBody(width, layout.body, 1, 0);
 		for (const line of body) lines.push(fitWidth(line, width));
-		lines.push(this.hintLine(width));
+		lines.push(this.hintLine(width, lines.length, 0));
 		return lines;
 	}
 
-	render(width: number): string[] {
-		// Rebuild colors on every render: the injected theme can change in place.
+	render(width: number, fromMouse = false): string[] {
+		// Rebuild colors and mouse geometry on every render: providers, themes,
+		// Unicode widths and terminal dimensions can all change between events.
+		if (!fromMouse) this.suppressMouseGesture = false;
 		this.renderPalette = panelPalette(this.options.theme);
+		this.hitRegions = [];
+		this.bodyScrollbar = undefined;
 		const safeWidth = Math.max(1, Math.floor(Number(width) || 0));
 		this.lastRenderWidth = safeWidth;
 		this.lastColumns = this.columns();
+		this.mouseWidth = safeWidth;
+		this.mouseColumns = this.lastColumns;
+		this.mouseRows = this.rows();
 		const layout = this.layoutFor(safeWidth);
 		if (layout.mode === "single") {
 			this.lastBodyWidth = safeWidth;
@@ -1260,7 +1665,6 @@ class TasksOverlay {
 			return [this.paint(this.singleLine(safeWidth), safeWidth)];
 		}
 		if (layout.mode === "borderless" || layout.mode === "twoLine") {
-			this.lastBodyWidth = safeWidth;
 			const lines = this.renderBorderless(safeWidth, layout);
 			return lines.map((line, index) => this.paint(line, safeWidth,
 				index === 0 || index === lines.length - 1 ? this.palette().chrome : this.palette().surface));
@@ -1268,22 +1672,20 @@ class TasksOverlay {
 
 		const inner = safeWidth - 2;
 		const bodyWidth = Math.max(1, inner - 2);
-		this.lastBodyWidth = bodyWidth;
 		const theme = this.panelTheme();
 		const border = (text: string) => theme.fg("border", text);
 		const row = (text: string, background: Color = this.palette().surface) =>
 			this.paint(border("│") + fitWidth(text, inner) + border("│"), safeWidth, background);
 		const rule = (left: string, right: string) => this.paint(border(left + "─".repeat(inner) + right), safeWidth);
 		const lines: string[] = [rule("╭", "╮")];
-		if (layout.mode === "framed") lines.push(row(` ${this.titleLine(bodyWidth)} `, this.palette().chrome));
-		lines.push(row(` ${this.tabsLine(bodyWidth)} `, this.palette().chrome));
+		if (layout.mode === "framed") lines.push(row(` ${this.titleLine(bodyWidth, 1, 2)} `, this.palette().chrome));
+		lines.push(row(` ${this.tabsLine(bodyWidth, lines.length, 2)} `, this.palette().chrome));
 		lines.push(rule("├", "┤"));
 
-		const body = this.bodyLines(bodyWidth, layout.body);
-		while (body.length < layout.body) body.push("");
+		const body = this.renderBody(bodyWidth, layout.body, lines.length, 2);
 		for (const line of body) lines.push(row(` ${line} `));
 		lines.push(rule("├", "┤"));
-		lines.push(row(` ${this.hintLine(bodyWidth)} `, this.palette().chrome));
+		lines.push(row(` ${this.hintLine(bodyWidth, lines.length, 2)} `, this.palette().chrome));
 		lines.push(rule("╰", "╯"));
 		return lines;
 	}

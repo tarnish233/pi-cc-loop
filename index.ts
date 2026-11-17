@@ -714,6 +714,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		return {
 			id: job.id,
 			title: displayPrompt(job.prompt),
+			createdAt: job.createdAt,
 			state: jobState(job, now).replace(/ \(.*$/, ""),
 			active: true,
 			meta: meta.join(" · "),

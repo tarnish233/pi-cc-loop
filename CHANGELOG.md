@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-17
+
+### Added
+- Support native mouse navigation throughout `/tasks`: clickable tabs/tasks/actions, single-click selection, double-click details, draggable scrollbars, visible scroll ranges, and source-group collapse/expand with mouse or arrow keys.
+
+### Changed
+- Show task root groups and siblings newest-first by their creation timestamps, including mixed-provider All views, while retaining source grouping and stable selection on refresh.
+
+### Fixed
+- Handle Pi's native wheel/trackpad input in task lists and details using live viewport bounds. Contain scrolling at either end and during stop confirmation so the underlying transcript never moves.
+- Make long stop-scope explanations scrollable while Cancel/Stop remain visible; repeated mouse clicks cannot reuse a dismissed confirmation or stop a task twice.
+
 ## [0.10.1] - 2026-11-14
 
 ### Fixed

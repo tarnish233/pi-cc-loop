@@ -92,6 +92,9 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 
 - **范围**：只列本会话的任务；本项目的 durable 任务按锁的归属显示，别的会话执行的任务标成 foreign，不会说成“正在这里运行”。不做跨会话的全局面板。
 - **Tab / Shift+Tab**：两个及以上 provider 时显示 All / Monitor / Loop 等页面；只有一个 provider 时只显示该 provider，不重复显示 All，也不显示 Tab 切换提示。上下键走 Pi 的 `tui.select.up/down` 命名动作，所以会跟随你的 keybindings；PgUp/PgDn 翻页。选中项用 `provider + id` 记录，刷新或增删任务后不会跳到别的任务上。
+- **排序**：按创建时间倒序，最新任务在最上方；All 页按同一时间顺序混排 Monitor / Loop，不再按 provider 分块。source 与 subscription 仍成组、父项在前，同级订阅也按创建时间倒序；相同时间保持稳定顺序，状态变化不改变排序。
+- **鼠标与滚动**：Pi fullscreen 模式下，单击页签切换列表，单击任务选中、双击打开详情；标题栏的返回/关闭和底部的 Detail / Stop / Cancel 都可点击。滚轮 / 触控板滚动列表、详情和长停止说明，右侧滚动条支持点击与拖动，底部显示可见范围；普通详情文本仍可拖拽选中。滚动到边界不会带动后方对话，普通 scrollback 模式保留完整键盘操作。
+- **分组折叠**：source 旁的 `▾` / `▸` 可点击收起或展开其 subscription；选中父任务时也可用 Left / Right 折叠或展开。收起只影响显示，不会停止任务，All 与 provider 页共用同一分组关系。
 - **Enter**：详情。Esc 先回列表，再按一次才关面板；关面板只关 UI，不取消任何任务，也不会把 Esc 传给 app.interrupt。
 - **Loop 详情**：cron 还是自定步调、实际的下次时间（`nextFireAt` / `scheduledFor`，已含错峰，不是从 `cron_list` 文本里猜的）、模型给的 reason、触发次数、是否 pending 等待 agent 空闲、是否 active / 等待重新调度、durable 归属；还会区分 `--durable` 里别的会话执行或从别的目录复制来的任务。
 - **Monitor 详情**：状态、命令或 WebSocket、事件数与限流丢弃数、已运行时间、超时/常驻、退出码、绑定的 loop；stdout/stderr 只读**有上限的尾部**（约最后 8KB / 60 行），ANSI 和控制字符会被剥掉。日志不存在或读不了只显示说明，不影响 monitor；读日志也不会喂给 Monitor 的事件流。

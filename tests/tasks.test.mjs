@@ -398,6 +398,9 @@ test("both load orders expose exactly one /cc-tasks and open a native overlay wh
 		assert.match(all, /Loop/);
 		assert.equal(armed.details.status, undefined);
 		assert.match(all, /check the deploy/);
+		const creationTimes = runtime.state.component.entries.map((entry) => entry.createdAt);
+		assert.ok(creationTimes.every(Number.isFinite), "both real providers expose task creation timestamps");
+		assert.deepEqual(creationTimes, [...creationTimes].sort((a, b) => b - a), "All is newest-first in either package load order");
 		assert.equal(runtime.sent.length, sentBefore, "no conversation write just to open");
 		assert.equal(runtime.appended.length, appendedBefore, "no session entry just to open");
 
@@ -415,15 +418,18 @@ test("Tab/Shift+Tab, named select actions and Esc behave in both directions", as
 	t.after(() => stopAll(runtime));
 	runtime.loadBoth(["loop", "monitor"]);
 	await runtime.start();
+	let creationTime = Date.now();
+	const clock = t.mock.method(Date, "now", () => ++creationTime);
 	await armMonitor(runtime, { command: "sleep 30", description: "first monitor", persistent: true });
 	await armMonitor(runtime, { command: "sleep 30", description: "second monitor", persistent: true });
+	clock.mock.restore();
 
 	const overlay = openTasks(runtime);
-	assert.match(runtime.selectedLine(), /first monitor/);
-	runtime.input("down"); // the injected keybinding is "j", not ArrowDown
 	assert.match(runtime.selectedLine(), /second monitor/);
-	runtime.input("up"); // "k"
+	runtime.input("down"); // the injected keybinding is "j", not ArrowDown
 	assert.match(runtime.selectedLine(), /first monitor/);
+	runtime.input("up"); // "k"
+	assert.match(runtime.selectedLine(), /second monitor/);
 
 	// Monitor tab, then Loop tab (pi-cc-loop is loaded but has nothing).
 	runtime.input("tab");
@@ -756,7 +762,9 @@ test("the detail shows the actual jittered run time, pending/idle and active/res
 	assert.equal(chain.awaitingReschedule, true);
 	await sleep(350);
 	runtime.input("escape"); // back to list
-	runtime.input("down"); // the wakeup is the second Loop row
+	assert.equal(runtime.state.component.selected().id, created.details.id, "refresh retained the cron selection");
+	runtime.input("up"); // the newer wakeup is now the first Loop row
+	assert.equal(runtime.state.component.selected().id, wake.details.id);
 	runtime.input("enter");
 	detail = runtime.text();
 	assert.match(detail, /active/);
@@ -890,37 +898,40 @@ test("PageUp and PageDown move by whole pages in both directions at start, middl
 	t.after(() => stopAll(runtime));
 	runtime.load(loopMod.default);
 	await runtime.start();
+	let creationTime = Date.now();
+	const clock = t.mock.method(Date, "now", () => ++creationTime);
 	for (let i = 0; i < 31; i++) {
 		await createCron(runtime, { cron: "*/5 * * * *", prompt: `job ${String(i).padStart(2, "0")}` });
 	}
+	clock.mock.restore();
 	const overlay = openTasks(runtime);
 	const selected = () => runtime.selectedLine(68);
-	assert.match(selected(), /job 00/, "initial selection is the first row");
+	assert.match(selected(), /job 30/, "initial selection is the newest row");
 
 	// Start: PageUp cannot go above the first row, PageDown jumps one page.
 	runtime.input("u");
-	assert.match(selected(), /job 00/);
+	assert.match(selected(), /job 30/);
 	runtime.input("d"); // keybinding "d"; the compact card caps the body at 12 rows
-	assert.match(selected(), /job 12/, "PageDown advances by one page");
+	assert.match(selected(), /job 18/, "PageDown advances by one page");
 	runtime.input("u"); // keybinding "u"
-	assert.match(selected(), /job 00/, "PageUp reverses PageDown instead of moving farther down");
+	assert.match(selected(), /job 30/, "PageUp reverses PageDown instead of moving farther down");
 
 	// Middle: page down then page up returns to the same middle row.
 	for (let i = 0; i < 5; i++) runtime.input("down");
-	assert.match(selected(), /job 05/);
+	assert.match(selected(), /job 25/);
 	runtime.input("d");
-	assert.match(selected(), /job 17/);
+	assert.match(selected(), /job 13/);
 	runtime.input("u");
-	assert.match(selected(), /job 05/);
+	assert.match(selected(), /job 25/);
 
 	// End: PageDown clamps at the last task, PageUp moves back one page.
 	runtime.input("u");
 	for (let i = 0; i < 3; i++) runtime.input("d");
-	assert.match(selected(), /job 30/, "PageDown clamps at the end");
+	assert.match(selected(), /job 00/, "PageDown clamps at the oldest task");
 	runtime.input("d");
-	assert.match(selected(), /job 30/);
+	assert.match(selected(), /job 00/);
 	runtime.input("u");
-	assert.match(selected(), /job 18/, "PageUp moves up exactly one page from the end");
+	assert.match(selected(), /job 12/, "PageUp moves up exactly one page from the end");
 
 	runtime.input("escape");
 	await overlay;
