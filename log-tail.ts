@@ -85,6 +85,7 @@ export function readLogTail(
 	const start = Math.max(0, size - byteLimit);
 	const want = size - start;
 	let buffer = EMPTY_BUFFER;
+	let atLineStart = false;
 	if (want > 0) {
 		try {
 			const fd = fs.openSync(filePath, "r");
@@ -99,6 +100,12 @@ export function readLogTail(
 				// Trust only the bytes actually read: the file may have shrunk
 				// between stat and read.
 				if (read < want) buffer = buffer.subarray(0, read);
+				// A tail that starts right after a newline holds a complete first
+				// line; only a genuinely partial one may be dropped below.
+				if (start > 0) {
+					const prior = Buffer.alloc(1);
+					atLineStart = fs.readSync(fd, prior, 0, 1, start - 1) === 1 && prior[0] === 0x0a;
+				}
 			} finally {
 				fs.closeSync(fd);
 			}
@@ -119,7 +126,7 @@ export function readLogTail(
 	// Blank lines (or terminal styles) after a huge line are not a replacement
 	// for that line's final result.
 	const byteClipped = start > 0;
-	if (start > 0) {
+	if (start > 0 && !atLineStart) {
 		const newline = text.indexOf("\n");
 		const rest = newline < 0 ? "" : text.slice(newline + 1);
 		if (sanitizeDisplay(rest).trim()) text = rest;

@@ -7,7 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadModule } from "./helpers.mjs";
+import { pathToFileURL } from "node:url";
+import { findPiInstall, loadModule } from "./helpers.mjs";
 
 const mod = await loadModule("index.ts");
 
@@ -171,6 +172,47 @@ test("with compactMessages off, a scheduled fire is still a scheduled task, not 
 
 		const wakeup = tickMessage("[loop tick #7 \u00b7 ...]\nwatch CI", { kind: "wakeup", jobId: "abc", prompt: "watch CI" });
 		assert.match(render(renderers.get("pi-cc-loop-tick"), wakeup, false).text, /loop #7 \u00b7 watch CI/);
+	} finally {
+		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
+		(await loadModule("config.ts")).invalidateConfig();
+	}
+});
+test("with compactMessages off, a collapsed card truncates a long prompt header", async () => {
+	const { renderers } = makeHarness();
+	fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: false }), "utf8");
+	(await loadModule("config.ts")).invalidateConfig();
+	try {
+		const long = `${"watch the deploy ".repeat(200)}ENDMARK`;
+		const message = tickMessage(`[loop tick #7 \u00b7 ...]\n${long}`, { kind: "wakeup", jobId: "abc", prompt: long });
+		const collapsed = render(renderers.get("pi-cc-loop-tick"), message, false);
+		assert.ok(collapsed.lines.length <= 5, `a one-line header, not the whole prompt (${collapsed.lines.length} lines)`);
+		assert.match(collapsed.text, /\u2026/, "the truncate helper's ellipsis");
+		assert.ok(!collapsed.text.includes("ENDMARK"), "the tail of a long prompt stays hidden while collapsed");
+		assert.ok(render(renderers.get("pi-cc-loop-tick"), message, true).text.includes("ENDMARK"), "expanding shows the whole prompt");
+	} finally {
+		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
+		(await loadModule("config.ts")).invalidateConfig();
+	}
+});
+
+test("with compactMessages off, an emoji/CJK/ANSI prompt header stays within 80 columns", async () => {
+	const { renderers } = makeHarness();
+	const { visibleWidth } = await import(pathToFileURL(findPiInstall().piTui).href);
+	fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: false }), "utf8");
+	(await loadModule("config.ts")).invalidateConfig();
+	try {
+		for (const long of ["\u{1f600}".repeat(200), "你".repeat(200), "\x1b[31m你\x1b[0m".repeat(200)]) {
+			const message = tickMessage(`[loop tick #7 \u00b7 ...]\n${long}`, { kind: "wakeup", jobId: "abc", prompt: long });
+			const collapsed = render(renderers.get("pi-cc-loop-tick"), message, false);
+			assert.ok(collapsed.lines.length <= 5, `a one-line header, not a wrapped prompt (${collapsed.lines.length} lines)`);
+			const headerLine = collapsed.lines.find((line) => line.includes("loop #7"));
+			assert.ok(headerLine, "the header line");
+			const promptPart = headerLine.slice(headerLine.indexOf("\u00b7 ") + 2).trimEnd();
+			assert.ok(visibleWidth(promptPart) <= 80, `the prompt fits 80 terminal columns (${visibleWidth(promptPart)})`);
+			assert.match(promptPart, /\u2026/, "the ellipsis");
+			assert.doesNotMatch(promptPart, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no split surrogate pair");
+			assert.doesNotMatch(promptPart, /\x1b(?!\[[0-9;]*m)/, "no broken ANSI escape");
+		}
 	} finally {
 		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
 		(await loadModule("config.ts")).invalidateConfig();

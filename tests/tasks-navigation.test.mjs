@@ -477,3 +477,156 @@ test("clicks retain task identity across refresh and use fresh Unicode geometry 
 	assert.equal(press, undefined, "ordinary detail text remains available to native selection");
 	assert.deepEqual(v.state.effects, []);
 });
+
+test("single-line layout paints no invisible Detail/Stop regions and an empty list still offers Close", async (t) => {
+	const v = view(t, { items: [item("alpha")] });
+	v.terminal.rows = 3;
+	v.render();
+	assert.match(v.text(), /running task alpha · Esc close/);
+	assert.deepEqual(v.panel.hitRegions, [], "the plain text line cannot carry button hit regions");
+	v.click(3, 0);
+	assert.equal(v.panel.detailKey, undefined, "clicking the state word cannot open a detail");
+	assert.equal(v.panel.confirming, undefined, "clicking the text cannot arm a stop");
+	v.state.items = [];
+	v.panel.refreshNow(false);
+	v.render();
+	v.clickAction("close");
+	await v.pending;
+	assert.equal(v.tui.hasOverlay(), false);
+	assert.deepEqual(v.state.effects, []);
+});
+
+test("a long new-task announcement never pushes Detail and Stop out of the frame", (t) => {
+	const v = view(t);
+	v.state.items.unshift({ ...item("new", 9999), title: "watch the deploy log until the canary rollout finishes and report any 5xx spike immediately" });
+	v.panel.refreshNow(false);
+	v.render();
+	assert.match(v.text(), /new watch the deploy/, "the announcement stays visible");
+	assert.ok(v.panel.hitRegions.some(({ action }) => action.kind === "detail"), "Detail survives any title length");
+	assert.ok(v.panel.hitRegions.some(({ action }) => action.kind === "stop"), "Stop survives any title length");
+	v.clickAction("detail");
+	assert.equal(v.panel.detailKey, "monitor:30", "the button still acts on the selected task");
+	assert.deepEqual(v.state.effects, []);
+});
+
+test("a stationary scrollbar press repaints so hit regions never outrun the painted frame", (t) => {
+	const v = view(t);
+	let bar = v.panel.bodyScrollbar;
+	v.packet(0, bar.x, bar.y + bar.thumbOffset);
+	v.packet(0, bar.x, bar.y + bar.thumbOffset, "m");
+	v.state.items.push(item("newest", 200));
+	v.panel.refreshNow(false); // a pending refresh the press branch folds in without a host repaint
+	let renders = 0;
+	v.tui.requestRender = () => { renders++; };
+	bar = v.panel.bodyScrollbar;
+	v.packet(0, bar.x, bar.y + bar.thumbOffset);
+	assert.ok(renders > 0, "the folded-in frame must be painted, not merely hit-tested");
+	v.packet(0, bar.x, bar.y + bar.thumbOffset, "m");
+	assert.equal(v.panel.listScroll, 0);
+	assert.equal(v.panel.detailKey, undefined, "the stationary press/release cannot open a task");
+	assert.deepEqual(v.state.effects, []);
+});
+
+test("a one-row scrollbar ignores presses instead of snapping back to the top", (t) => {
+	const v = view(t);
+	v.terminal.rows = 4;
+	v.render();
+	v.wheel(10);
+	v.render();
+	const bar = v.panel.bodyScrollbar;
+	assert.ok(bar);
+	assert.equal(bar.height, 1);
+	assert.equal(v.panel.listScroll, 10);
+	v.packet(0, bar.x, bar.y);
+	v.packet(0, bar.x, bar.y, "m");
+	assert.equal(v.panel.listScroll, 10, "a thumb with no travel cannot map a press to the top");
+	assert.deepEqual(v.state.effects, []);
+});
+
+test("without the framed title line the hint offers mouse Back and Close", async (t) => {
+	for (const rows of [10, 9, 6, 4]) {
+		const v = view(t);
+		v.terminal.rows = rows;
+		v.render();
+		assert.ok(v.panel.hitRegions.some(({ action }) => action.kind === "close"), `rows=${rows}: the list offers Close`);
+		v.clickTask("30", 2);
+		v.render();
+		assert.equal(v.panel.detailKey, "monitor:30");
+		v.clickAction("back");
+		assert.equal(v.panel.detailKey, undefined, `rows=${rows}: Back leaves the detail`);
+		v.render();
+		v.clickAction("close");
+		await v.pending;
+		assert.equal(v.tui.hasOverlay(), false, `rows=${rows}: Close dismisses the panel`);
+		assert.deepEqual(v.state.effects, []);
+	}
+});
+
+test("a stop status without a title control still offers mouse Close (list) and Back (detail)", async (t) => {
+	const v = view(t, { items: [item("30")] });
+	v.terminal.rows = 4;
+	v.render();
+	v.clickAction("stop");
+	v.render();
+	v.clickAction("confirmStop");
+	await Promise.resolve();
+	await Promise.resolve();
+	v.render();
+	assert.match(v.text(), /Stopped Monitor 30\./, "the status stays readable");
+	assert.ok(v.panel.hitRegions.some(({ action }) => action.kind === "close"), "the status frame keeps a mouse exit");
+	v.clickTask("30", 2);
+	v.render();
+	v.clickAction("stop");
+	v.render();
+	v.clickAction("confirmStop");
+	await Promise.resolve();
+	await Promise.resolve();
+	v.render();
+	assert.match(v.text(), /Stopped Monitor 30\./);
+	v.clickAction("back");
+	assert.equal(v.panel.detailKey, undefined, "the status frame keeps a mouse Back in the detail");
+	v.render();
+	v.clickAction("close");
+	await v.pending;
+	assert.equal(v.tui.hasOverlay(), false);
+	assert.deepEqual(v.state.effects, ["stop 30", "stop 30"]);
+});
+
+test("a narrow empty list registers Close before the inert Detail/Stop placeholders", async (t) => {
+	const v = view(t, { items: [] });
+	v.terminal.rows = 4;
+	v.terminal.columns = 24;
+	v.render();
+	assert.match(v.text(), /No tasks\./);
+	assert.ok(v.panel.hitRegions.some(({ action }) => action.kind === "close"), "Close survives the narrow hint");
+	v.clickAction("close");
+	await v.pending;
+	assert.equal(v.tui.hasOverlay(), false);
+	assert.deepEqual(v.state.effects, []);
+});
+
+test("a framed title too narrow for its control still leaves mouse Back and Close in the hint", async (t) => {
+	const v = view(t);
+	v.terminal.columns = 27;
+	v.render();
+	v.clickTask("30", 2);
+	v.render();
+	assert.equal(v.panel.detailKey, "monitor:30");
+	assert.equal(v.panel.hitRegions.some(({ action, y }) => action.kind === "back" && y === 1), false, "the title control was not painted");
+	v.clickAction("back");
+	assert.equal(v.panel.detailKey, undefined, "the hint offers Back when the title control does not fit");
+	v.render();
+	v.clickAction("close");
+	await v.pending;
+	assert.equal(v.tui.hasOverlay(), false);
+	assert.deepEqual(v.state.effects, []);
+
+	const empty = view(t, { items: [] });
+	empty.terminal.columns = 22;
+	empty.render();
+	assert.equal(empty.panel.hitRegions.some(({ action, y }) => action.kind === "close" && y === 1), false, "the title control was not painted");
+	empty.clickAction("close");
+	await empty.pending;
+	assert.equal(empty.tui.hasOverlay(), false);
+	assert.deepEqual(empty.state.effects, []);
+});

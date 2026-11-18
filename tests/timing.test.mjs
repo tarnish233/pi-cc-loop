@@ -255,3 +255,22 @@ test("a one-shot job does not expire, however far out it is", () => {
 });
 
 
+test("re-arming a pending wakeup supersedes the due fire instead of firing at once", () => {
+	const delivered = [];
+	let idle = false;
+	const scheduler = new LoopScheduler({ dispatch: (job) => delivered.push(job.id), canDispatch: () => idle });
+	const added = scheduler.add({
+		id: "rearm", kind: "wakeup", prompt: "p", recurring: false,
+		createdAt: Date.now(), scheduledFor: Date.now() - 1, durable: false, source: "t",
+	});
+	scheduler.tick();
+	assert.equal(added.pending, true, "due while the agent is busy");
+	assert.equal(added.scheduledFor, undefined, "markDue consumed the old time");
+
+	scheduler.update(added.id, { scheduledFor: Date.now() + 1200_000, awaitingReschedule: false });
+	assert.equal(added.pending, false, "the new arm time replaces the due fire");
+	assert.equal(added.dueAt, undefined);
+	idle = true;
+	scheduler.tick();
+	assert.deepEqual(delivered, [], "the wakeup fires in 1200s, not at the next settle");
+});

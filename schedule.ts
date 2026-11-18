@@ -225,6 +225,12 @@ export class LoopScheduler {
 		const job = this.jobs.get(id);
 		if (!job) return undefined;
 		Object.assign(job, patch);
+		if (patch.scheduledFor !== undefined) {
+			// A new arm time supersedes a fire that became due while the agent
+			// was busy; keeping it pending would fire the wakeup immediately.
+			job.pending = false;
+			job.dueAt = undefined;
+		}
 		this.changed();
 		return job;
 	}

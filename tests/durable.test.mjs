@@ -487,3 +487,43 @@ test("missed durable one-shots are surfaced to the model with an ask-first instr
 	assert.match(message.message.content, /Do NOT execute this prompt yet\. First ask the user/);
 	assert.match(message.message.content, /push the release branch/);
 });
+test("a corrupt durable file is never replaced by a write", () => {
+	const cwd = tempProject();
+	const store = new DurableStore(cwd);
+	const a = session(cwd, 1001);
+	try {
+		a.runtime.add(cronJob("keep1")); // takes the lock
+		store.upsert(cronJob("keep2"));
+		const corrupt = '{"version":1,"jobs":[{"id":"keep1","kind":"cron"';
+		fs.writeFileSync(store.file, corrupt);
+		assert.deepEqual(store.read(), [], "the tolerant read still serves load/sync");
+		assert.throws(() => store.upsert(cronJob("new")), SyntaxError);
+		assert.throws(() => store.remove("keep1"), SyntaxError);
+		assert.doesNotThrow(() => a.runtime.afterFire(cronJob("keep1"), false), "a fire must not escape into the scan timer");
+		assert.equal(fs.readFileSync(store.file, "utf8"), corrupt, "the other jobs are not destroyed");
+	} finally {
+		a.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a valid-JSON durable file of the wrong shape is never replaced by a write", () => {
+	const cwd = tempProject();
+	const store = new DurableStore(cwd);
+	fs.mkdirSync(store.dir, { recursive: true });
+	try {
+		// Intact records under an unexpected root: only ENOENT means "empty store".
+		for (const wrong of [
+			JSON.stringify([cronJob("keep1"), cronJob("keep2")]),
+			'{"version":1,"jobs":{"keep1":{"id":"keep1"}}}',
+		]) {
+			fs.writeFileSync(store.file, wrong);
+			assert.deepEqual(store.read(), [], "the tolerant read still serves load/sync");
+			assert.throws(() => store.upsert(cronJob("new")));
+			assert.throws(() => store.remove("keep1"));
+			assert.equal(fs.readFileSync(store.file, "utf8"), wrong, "the intact records are not destroyed");
+		}
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});

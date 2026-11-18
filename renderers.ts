@@ -5,6 +5,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { bodyLines, contentText, formatStamp, renderBlock, renderCard } from "./render.ts";
 export { formatClock } from "./render.ts";
 import { loadConfig } from "./config.ts";
@@ -57,8 +58,10 @@ export function renderScheduledMessage(message: any, options: any, theme: Theme)
 
 	if (!loadConfig().compactMessages) {
 		// Same naming as the block: a cron fire is a scheduled task, only a
-		// self-paced tick is a loop.
-		const header = details.missed ? label : `${label.replace("\u273b ", "")} \u00b7 ${displayPrompt(prompt)}`;
+		// self-paced tick is a loop. The header is one line: a loop.md body
+		// must not render whole while the card is collapsed. Width-aware, so
+		// emoji/CJK/ANSI are never cut mid-grapheme or mid-escape.
+		const header = details.missed ? label : `${label.replace("\u273b ", "")} \u00b7 ${truncateToWidth(displayPrompt(prompt).replace(/\s+/g, " ").trim(), 80, "\u2026")}`;
 		return renderCard({ header, body: prompt, expanded: options.expanded, outputPad: options.outputPad, theme });
 	}
 

@@ -636,7 +636,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				// The user asking for this loop again is a new loop: the mark that
 				// keeps a late schedule_wakeup from reviving a stopped chain must
 				// not block it.
-				stoppedPrompts.delete(normalizePrompt(raw) || LOOP_FILE_SENTINEL);
+				const prompt = normalizePrompt(raw);
+				stoppedPrompts.delete(prompt || LOOP_FILE_SENTINEL);
+				// An interval-bearing /loop stores its chain under the sentinel
+				// (`/loop 15m`) or the task without its interval (`/loop 15m task`);
+				// clear that mark too, so the same /loop can restart. The unit must
+				// end at whitespace: `5m.js audit` is a task, not an interval.
+				const withoutInterval = prompt.replace(/^\d+[smhd](?=\s|$)\s*/i, "").trim();
+				if (withoutInterval !== prompt) stoppedPrompts.delete(withoutInterval || LOOP_FILE_SENTINEL);
 				queueRun({ content: text, guidelines });
 				try {
 					pi.sendUserMessage(text, { expandPromptTemplates: false, deliverAs: "followUp" });
@@ -883,7 +890,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				throw new Error(`Invalid cron expression '${params.cron}'. Expected 5 fields: M H DoM Mon DoW.`);
 			}
 			if (isUnreachable(params.cron)) {
-				throw new Error(`Cron expression '${params.cron}' does not match any date within the next year.`);
+				throw new Error(`Cron expression '${params.cron}' does not match any date within the next 4 years.`);
 			}
 			if (scheduler.size >= MAX_JOBS) {
 				throw new Error(`Too many scheduled jobs (max ${MAX_JOBS}). Cancel one first.`);
@@ -1088,6 +1095,27 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 
+			if (currentRun.cronId) {
+				// Not an error: the request is already satisfied by the schedule.
+				// Returning it as a result (instead of throwing) keeps the transcript
+				// calm and tells the model nothing is missing.
+				const cronJob = scheduler.get(currentRun.cronId);
+				const value = { suppressed: "fixed-interval", id: currentRun.cronId, stopped: false };
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`No wakeup needed: this tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
+								`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
+								`Nothing was scheduled. To end the loop, call cron_delete with id ${currentRun.cronId}.`,
+						},
+					],
+					details: value,
+					structuredContent: value,
+				};
+			}
+
 			if (params.stop === true) {
 				// Stop the loop this turn belongs to; otherwise the named one, or all.
 				const current = currentRun.chainId ? scheduler.get(currentRun.chainId) : undefined;
@@ -1120,27 +1148,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const prompt = params.prompt ? normalizePrompt(params.prompt) : "";
 			if (!prompt) {
 				throw new Error("`prompt` is required when `stop` is not true.");
-			}
-
-			if (currentRun.cronId) {
-				// Not an error: the request is already satisfied by the schedule.
-				// Returning it as a result (instead of throwing) keeps the transcript
-				// calm and tells the model nothing is missing.
-				const cronJob = scheduler.get(currentRun.cronId);
-				const value = { suppressed: "fixed-interval", id: currentRun.cronId, stopped: false };
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text:
-								`No wakeup needed: this tick belongs to the fixed-interval /loop ${currentRun.cronId}` +
-								`${cronJob?.cron ? ` (${humanSchedule(cronJob.cron)})` : ""}, which fires its own next tick. ` +
-								`Nothing was scheduled. To end the loop, call cron_delete with id ${currentRun.cronId}.`,
-						},
-					],
-					details: value,
-					structuredContent: value,
-				};
 			}
 
 			// Check the finalized assistant batch before changing any chain or timer.

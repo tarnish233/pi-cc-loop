@@ -406,3 +406,55 @@ test("cron fires add no session entries; structural changes do", async () => {
 	await h.tools.get("cron_delete").execute("d", { id: job.id }, undefined, undefined, h.ctx);
 	assert.ok(h.appended.length > afterCreate, "removing a job is persisted");
 });
+test("stop:true from a fixed-cron tick is suppressed and leaves unrelated loops alone", async () => {
+	const h = await start(makeHarness());
+	const other = await startSelfPaced(h, "watch the deploy", 1800);
+	const job = await createCron(h, { cron: "*/5 * * * *", prompt: "print hi" });
+	makeDue(h, job.id);
+	const before = h.sent.length;
+	h.scheduler().tick();
+	const tick = h.sent.slice(before).find((entry) => entry.kind === "custom");
+	await h.handlers.get("before_agent_start")(runEvent(tick), h.ctx);
+	const result = await h.tools.get("schedule_wakeup").execute("c", { stop: true }, undefined, undefined, h.ctx);
+	assert.equal(result.details.stopped, false);
+	assert.equal(result.details.suppressed, "fixed-interval");
+	assert.match(result.content[0].text, /cron_delete/);
+	assert.ok(h.scheduler().get(other.id), "the unrelated self-paced loop keeps running");
+});
+
+test("an interval-bearing /loop can be restarted after it was stopped", async () => {
+	const h = await start(makeHarness());
+	// /loop 15m: the chain runs under the loop.md sentinel.
+	await loop(h).handler("15m", h.ctx);
+	const chain = await startSelfPaced(h, "<<loop.md>>", 900);
+	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
+	await loop(h).handler("15m", h.ctx);
+	assert.ok(await startSelfPaced(h, "<<loop.md>>", 900), "the same /loop starts a new chain");
+
+	// /loop 15m task: the chain runs under the task without its interval.
+	await loop(h).handler("15m check the deploy", h.ctx);
+	const taskChain = await startSelfPaced(h, "check the deploy", 900);
+	await h.tools.get("cron_delete").execute("c", { id: taskChain.id }, undefined, undefined, h.ctx);
+	await loop(h).handler("15m check the deploy", h.ctx);
+	assert.ok(await startSelfPaced(h, "check the deploy", 900), "the task variant restarts too");
+
+	// Unrelated stopped marks survive: only this request's marks are cleared.
+	const unrelated = await startSelfPaced(h, "watch CI", 900);
+	await h.tools.get("cron_delete").execute("c", { id: unrelated.id }, undefined, undefined, h.ctx);
+	await loop(h).handler("15m check the deploy", h.ctx);
+	await assert.rejects(
+		h.tools.get("schedule_wakeup").execute("c", { delaySeconds: 900, reason: "waiting", prompt: "watch CI" }, undefined, undefined, h.ctx),
+		/was stopped and must not be rescheduled/,
+	);
+});
+
+test("/loop 5m.js audit is a task, not an interval: the '.js audit' stop mark survives", async () => {
+	const h = await start(makeHarness());
+	const unrelated = await startSelfPaced(h, ".js audit", 900);
+	await h.tools.get("cron_delete").execute("c", { id: unrelated.id }, undefined, undefined, h.ctx);
+	await loop(h).handler("5m.js audit", h.ctx);
+	await assert.rejects(
+		h.tools.get("schedule_wakeup").execute("c", { delaySeconds: 900, reason: "waiting", prompt: ".js audit" }, undefined, undefined, h.ctx),
+		/was stopped and must not be rescheduled/,
+	);
+});

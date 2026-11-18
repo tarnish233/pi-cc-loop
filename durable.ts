@@ -80,6 +80,28 @@ export class DurableStore {
 		}
 	}
 
+	/**
+	 * The write path's read: only a missing file means "no jobs". A file that
+	 * cannot be read or parsed must throw, so a read-modify-write can never
+	 * replace it (and every other session's jobs) with just the new job.
+	 */
+	private readForWrite(): LoopJob[] {
+		let text: string;
+		try {
+			text = fs.readFileSync(this.file, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
+		}
+		const data = JSON.parse(text) as Partial<DurableFileData>;
+		// Valid JSON of the wrong shape is still someone's data, not an empty
+		// store: rewriting it would destroy intact records.
+		if (data === null || typeof data !== "object" || Array.isArray(data) || (data.jobs !== undefined && !Array.isArray(data.jobs))) {
+			throw new Error(`Refusing to rewrite ${this.file}: not a durable jobs document.`);
+		}
+		return Array.isArray(data.jobs) ? data.jobs.filter((job) => job && typeof job.id === "string") : [];
+	}
+
 	/** Modification time, to notice changes made by other sessions. */
 	mtime(): number | undefined {
 		try {
@@ -104,7 +126,7 @@ export class DurableStore {
 		fs.mkdirSync(this.dir, { recursive: true });
 		withFileLock(this.file, () => {
 			this.assertWritable();
-			const jobs = this.read().filter((other) => other.id !== job.id);
+			const jobs = this.readForWrite().filter((other) => other.id !== job.id);
 			jobs.push(storedJob(job));
 			this.write(jobs);
 		});
@@ -115,7 +137,7 @@ export class DurableStore {
 		if (!this.exists()) return false;
 		return withFileLock(this.file, () => {
 			this.assertWritable();
-			const jobs = this.read();
+			const jobs = this.readForWrite();
 			const kept = jobs.filter((job) => job.id !== id);
 			if (kept.length === jobs.length) return false;
 			this.write(kept);

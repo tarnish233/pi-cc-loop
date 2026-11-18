@@ -608,6 +608,8 @@ class TasksOverlay {
 	private lastRenderWidth = 0;
 	private lastBodyWidth = 0;
 	private lastColumns = 0;
+	/** Whether the last render actually painted a title control; otherwise the hint must offer Back/Close. */
+	private framedTitle = false;
 	private logs: DetailLogView[] = [];
 	private knownKeys: Set<string> | undefined;
 	private recentTask: string | undefined;
@@ -973,7 +975,9 @@ class TasksOverlay {
 			this.scrollbarDragOffset = localY >= bar.thumbOffset && localY < bar.thumbOffset + bar.thumbSize
 				? localY - bar.thumbOffset : Math.floor(bar.thumbSize / 2);
 			this.scrollBodyFromPointer(event.y);
-			return { capture: true, focus: true, render: false };
+			// Repaint even when the scroll is unchanged: the render above already
+			// rebuilt hitRegions for the folded-in frame, so the painted frame must catch up.
+			return { capture: true, focus: true, render: true };
 		}
 		if (event.type === "drag" && this.scrollbarDragOffset !== undefined && this.bodyScrollbar) {
 			this.scrollBodyFromPointer(event.y);
@@ -1076,9 +1080,11 @@ class TasksOverlay {
 		const bar = this.bodyScrollbar;
 		if (!bar || this.scrollbarDragOffset === undefined) return;
 		const range = Math.max(0, bar.height - bar.thumbSize);
+		// A thumb with no travel maps every pointer row to the top; ignore it instead.
+		if (range === 0) return;
 		const thumb = Math.max(0, Math.min(range, pointerY - bar.y - this.scrollbarDragOffset));
 		const maxScroll = Math.max(0, bar.total - bar.viewport);
-		this.scrollBodyTo(range ? Math.round(thumb / range * maxScroll) : 0);
+		this.scrollBodyTo(Math.round(thumb / range * maxScroll));
 	}
 
 	handleInput(data: string): void {
@@ -1562,6 +1568,7 @@ class TasksOverlay {
 		const gap = width - visibleWidth(left) - rightWidth;
 		if (gap < 1) return fitWidth(left, width);
 		this.hitRegions.push({ x: x + width - rightWidth, y: row, width: rightWidth, action });
+		this.framedTitle = true;
 		return fitWidth(`${left}${" ".repeat(gap)}${right}`, width);
 	}
 
@@ -1588,7 +1595,13 @@ class TasksOverlay {
 
 	private hintLine(width: number, row: number, x: number): string {
 		const theme = this.panelTheme();
-		if (this.status) return fitWidth(theme.fg("warning", this.status), width);
+		if (this.status) {
+			// A mouse-only user still needs an exit while the status replaces the hint.
+			return this.actionLine(width, row, x, [
+				...(this.framedTitle ? [] : [this.actionButton(this.detailKey ? "Back" : "Close", { kind: this.detailKey ? "back" : "close" })]),
+				{ text: theme.fg("warning", this.status) },
+			]);
+		}
 		const fullscreen = this.options.tui.mode === "fullscreen";
 		const range = (total: number, viewport: number, scroll: number) => total > viewport
 			? `${scroll + 1}-${Math.min(total, scroll + viewport)}/${total}` : "";
@@ -1604,15 +1617,21 @@ class TasksOverlay {
 		const canStop = !!entry?.active && !this.stoppingKey && !!providerFor(this.options.registry, entry.provider)?.stop;
 		if (this.detailKey) {
 			return this.actionLine(width, row, x, [
+				...(this.framedTitle ? [] : [this.actionButton("Back", { kind: "back" })]),
 				this.actionButton("Stop", entry && canStop ? { kind: "stop", key: taskKey(entry) } : undefined),
 				{ text: theme.fg("dim", fullscreen ? "↑↓/wheel scroll" : "↑↓ scroll · pgUp/pgDn page · x stop") },
 				{ text: theme.fg("dim", range(this.detailLineCount, this.detailViewport, this.detailScroll)) },
 			]);
 		}
 		return this.actionLine(width, row, x, [
-			...(this.recentTask ? [{ text: theme.fg("warning", `new ${oneLine(this.recentTask)}`) }] : []),
+			// The exit control comes first so a narrow frame clips optional task
+			// actions, never the only way out for a mouse-only user.
+			...(this.framedTitle ? [] : [this.actionButton("Close", { kind: "close" })]),
 			this.actionButton("Detail", entry ? { kind: "detail", key: taskKey(entry) } : undefined),
 			this.actionButton("Stop", entry && canStop ? { kind: "stop", key: taskKey(entry) } : undefined),
+			// The announcement follows the buttons: a long title must never push
+			// their hit regions past the frame edge, where actionLine drops them.
+			...(this.recentTask ? [{ text: theme.fg("warning", `new ${oneLine(this.recentTask)}`) }] : []),
 			{ text: theme.fg("dim", fullscreen ? "↑↓ select · wheel scroll" : "↑↓ select · Enter detail · x stop") },
 			{ text: theme.fg("dim", range(this.visible().length, this.pageSize(), this.listScroll)) },
 		]);
@@ -1621,8 +1640,8 @@ class TasksOverlay {
 	private singleLine(width: number): string {
 		if (this.confirming) return fitWidth(this.panelTheme().fg("warning", `y stop ${oneLine(this.confirming.role ?? this.confirming.providerLabel)} · n/Esc cancel`), width);
 		const entry = this.detailKey ? this.entryFor(this.detailKey) : this.selected();
-		const hint = this.hintLine(width, 0, 0);
-		if (!entry || this.status) return hint;
+		// Only the hint path may register hit regions; the plain text line paints none.
+		if (!entry || this.status) return this.hintLine(width, 0, 0);
 		const controls = this.detailKey ? "Esc back" : "Esc close";
 		return fitWidth(`${oneLine(entry.state)} ${oneLine(entry.title)} \u00b7 ${controls}`, width);
 	}
@@ -1646,6 +1665,7 @@ class TasksOverlay {
 		this.renderPalette = panelPalette(this.options.theme);
 		this.hitRegions = [];
 		this.bodyScrollbar = undefined;
+		this.framedTitle = false;
 		const safeWidth = Math.max(1, Math.floor(Number(width) || 0));
 		this.lastRenderWidth = safeWidth;
 		this.lastColumns = this.columns();

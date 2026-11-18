@@ -44,7 +44,10 @@ function parseField(spec: FieldSpec, raw: string): Set<number> | null {
 		const trimmed = part.trim();
 		if (!trimmed) return null;
 
-		const [rangePart, stepPart] = trimmed.split("/");
+		const segments = trimmed.split("/");
+		// "*/2/3" or "*/5/": extra segments are malformed, not a step to ignore.
+		if (segments.length > 2) return null;
+		const [rangePart, stepPart] = segments;
 		let step = 1;
 		if (stepPart !== undefined) {
 			if (!/^\d+$/.test(stepPart)) return null;
@@ -154,8 +157,9 @@ export function nextFireAfter(
 export function isUnreachable(expression: string): boolean {
 	const fields = parseCron(expression);
 	if (!fields) return true;
-	// Look a year ahead; if nothing matches, the expression is dead.
-	return nextFireAfter(fields, new Date(), 366) === null;
+	// Search the same window as nextFireAfter (4 years), so a leap-day cron
+	// is not declared dead just because the next February 29 is years away.
+	return nextFireAfter(fields, new Date(), 366 * 4) === null;
 }
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];

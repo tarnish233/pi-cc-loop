@@ -103,3 +103,15 @@ test("humanSchedule labels cron expressions like Claude Code", () => {
 
 
 
+test("more than one step segment is invalid, not silently the first step", () => {
+	assert.equal(cron.parseCron("*/2/3 * * * *"), null);
+	assert.equal(cron.parseCron("*/5/ * * * *"), null);
+	assert.equal(cron.parseCron("0-59/2/7 * * * *"), null);
+	assert.ok(cron.parseCron("*/5 * * * *"), "the supported form still parses");
+});
+
+test("a leap-day cron is reachable within nextFireAfter's search window", () => {
+	assert.equal(cron.isUnreachable("0 0 29 2 *"), false, "February 29 exists within 4 years");
+	assert.equal(cron.isUnreachable("0 0 30 2 *"), true);
+	assert.equal(cron.isUnreachable("0 0 31 4 *"), true);
+});
