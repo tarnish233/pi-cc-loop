@@ -60,6 +60,55 @@ test("nextFireAfter rolls a daily job to the next day", () => {
 	assert.equal(next.getMinutes(), 0);
 });
 
+test("nextFireAfter stays strictly future across a DST rollback, in both repeats of the hour", () => {
+	const tz = process.env.TZ;
+	process.env.TZ = "America/New_York";
+	try {
+		// 2026-11-01: 01:00-01:59 happens twice (EDT -04:00, then EST -05:00).
+		const everyMinute = cron.parseCron("* * * * *");
+		const sparse = cron.parseCron("45 * * * *");
+		for (const fields of [everyMinute, sparse]) {
+			for (const offset of ["-04:00", "-05:00"]) {
+				const from = new Date(`2026-11-01T01:30:30${offset}`);
+				const next = cron.nextFireAfter(fields, from);
+				assert.ok(next.getTime() > from.getTime(), `${offset}: strictly future, not back into the first hour`);
+			}
+		}
+		assert.equal(
+			cron.nextFireAfter(everyMinute, new Date("2026-11-01T01:30:30-05:00")).toISOString(),
+			"2026-11-01T06:31:00.000Z",
+			"the second 01:30 advances to the second 01:31",
+		);
+		assert.equal(
+			cron.nextFireAfter(sparse, new Date("2026-11-01T01:30:30-05:00")).toISOString(),
+			"2026-11-01T06:45:00.000Z",
+			"a sparse minute field steps forward through the repeated hour",
+		);
+		assert.equal(
+			cron.nextFireAfter(sparse, new Date("2026-11-01T01:45:00-04:00")).toISOString(),
+			"2026-11-01T06:45:00.000Z",
+			"the second repeat still gets its own :45 fire",
+		);
+		// Walking the whole rollback keeps moving: no past slot, no stuck slot.
+		let cursor = new Date("2026-11-01T00:30:00-04:00");
+		for (let i = 0; i < 180; i++) {
+			const next = cron.nextFireAfter(everyMinute, cursor);
+			assert.ok(next.getTime() > cursor.getTime(), `step ${i} is strictly future`);
+			assert.equal(next.getTime() - cursor.getTime(), 60_000, "every minute means 60s, even across the rollback");
+			cursor = next;
+		}
+		assert.equal(cursor.toISOString(), "2026-11-01T07:30:00.000Z", "the walk crossed both repeats of 1 AM");
+		// Spring forward still skips the missing hour.
+		assert.equal(
+			cron.nextFireAfter(everyMinute, new Date("2026-03-08T01:59:30-05:00")).toISOString(),
+			"2026-03-08T07:00:00.000Z",
+		);
+	} finally {
+		if (tz === undefined) delete process.env.TZ;
+		else process.env.TZ = tz;
+	}
+});
+
 test("dom and dow are OR-ed when both are restricted", () => {
 	const fields = cron.parseCron("0 0 15 * 1");
 	const next = cron.nextFireAfter(fields, new Date("2026-10-21T00:00:00"));

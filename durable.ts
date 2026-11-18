@@ -120,15 +120,22 @@ export class DurableStore {
 		}
 	}
 
-	/** Insert or replace one job, keeping every other job in the file. */
-	upsert(job: LoopJob): void {
+	/**
+	 * Insert or replace one job, keeping every other job in the file. With
+	 * `onlyIfPresent`, a job another session removed is not reinserted; the
+	 * existence check and the write share one lock. Returns whether it wrote.
+	 */
+	upsert(job: LoopJob, onlyIfPresent = false): boolean {
 		this.assertWritable();
 		fs.mkdirSync(this.dir, { recursive: true });
-		withFileLock(this.file, () => {
+		return withFileLock(this.file, () => {
 			this.assertWritable();
-			const jobs = this.readForWrite().filter((other) => other.id !== job.id);
-			jobs.push(storedJob(job));
-			this.write(jobs);
+			const jobs = this.readForWrite();
+			const kept = jobs.filter((other) => other.id !== job.id);
+			if (onlyIfPresent && kept.length === jobs.length) return false;
+			kept.push(storedJob(job));
+			this.write(kept);
+			return true;
 		});
 	}
 
@@ -426,7 +433,10 @@ export class DurableRuntime {
 			this.acquireAndLoad(now);
 			// The new job was loaded from the file and armed in the scheduler.
 			// Persist that already-jittered time so another session's read-only
-			// view does not have to recompute it from a later clock.
+			// view does not have to recompute it from a later clock. This is also
+			// the one best-effort retry if sync's own save failed: sync skips
+			// already-loaded jobs, and the mtime snapshot can equal the failed
+			// write's mtime, so maintenance alone might never persist the time.
 			const loaded = this.options.scheduler.get(job.id);
 			if (loaded) this.save(loaded);
 		}
@@ -436,7 +446,9 @@ export class DurableRuntime {
 	/** Remove a durable job from the file. */
 	remove(id: string): boolean {
 		const removed = this.store.remove(id);
-		this.lastMtime = this.store.mtime();
+		// A single-job write is not a full sync: the next maintenance must still
+		// reload whatever other sessions changed in the file meanwhile.
+		this.lastMtime = undefined;
 		return removed;
 	}
 
@@ -447,9 +459,11 @@ export class DurableRuntime {
 			return;
 		}
 		try {
+			// Update only if the job still exists: another session may have
+			// cancelled it since the last sync, and a late fire must not undo that.
 			if (finished) this.store.remove(job.id);
-			else this.store.upsert(job);
-			this.lastMtime = this.store.mtime();
+			else if (!this.store.upsert(job, true)) this.options.scheduler.remove(job.id);
+			this.lastMtime = undefined;
 		} catch {
 			// best effort
 		}
@@ -484,8 +498,10 @@ export class DurableRuntime {
 
 	private save(job: LoopJob): void {
 		try {
-			this.store.upsert(job);
-			this.lastMtime = this.store.mtime();
+			// Post-arm persistence must not resurrect a job another session
+			// cancelled between the arm and this write.
+			if (!this.store.upsert(job, true)) this.options.scheduler.remove(job.id);
+			this.lastMtime = undefined;
 		} catch {
 			// best effort
 		}
@@ -500,6 +516,9 @@ export class DurableRuntime {
 	/** Bring the scheduler in line with the file: adopt new jobs, drop removed ones. */
 	private sync(now: number): void {
 		const { scheduler } = this.options;
+		// Snapshot before reading: a write that lands after the read must trigger
+		// the next sync, not be absorbed into the cache as already applied.
+		const mtime = this.store.mtime();
 		const jobs = this.store.read();
 		const ids = new Set(jobs.map((job) => job.id));
 		for (const job of scheduler.list()) {
@@ -526,10 +545,13 @@ export class DurableRuntime {
 			}
 			scheduler.restore(job);
 			scheduler.arm(job, now);
+			// Persist the armed time so other sessions list the real next fire,
+			// not the previous owner's stale one.
+			this.save(job);
 			adopted = true;
 		}
 		if (adopted) scheduler.refresh();
-		this.lastMtime = this.store.mtime();
+		this.lastMtime = mtime;
 		if (missed.length) this.options.onMissed(missed);
 	}
 

@@ -19,8 +19,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { createCron, makeHarness, start } from "./harness.mjs";
-import { loadModule } from "./helpers.mjs";
+import { findPiInstall, loadModule } from "./helpers.mjs";
 
 const config = await loadModule("config.ts");
 
@@ -221,6 +222,62 @@ test("in the panel, a setting a variable overrides shows its value in effect, na
 		assert.deepEqual(readJson(file), {}, "nothing is written");
 		ui.panel.handleInput(ESC);
 		await ui.closed;
+	});
+});
+
+test("a failed panel save notifies and rolls back instead of escaping Pi's terminal input", async (t) => {
+	const file = tempConfig({ compactMessages: true, footer: true });
+	await withEnv({ PI_CC_CONFIG_FILE: file }, async () => {
+		const h = await start(makeHarness());
+		const { TuiAltScreen, KeybindingsManager, TUI_KEYBINDINGS } = await import(pathToFileURL(findPiInstall().piTui).href);
+		const dir = path.dirname(file);
+		// Pi's real input entry: TuiBase.handleTerminalInput has no error boundary,
+		// so an exception out of the component would take the whole process down.
+		const tui = new TuiAltScreen({ columns: 100, rows: 30, write() {}, start() {}, stop() {}, hideCursor() {}, showCursor() {} }, false, dir);
+		tui.requestRender = () => {};
+		let component;
+		h.ctx.ui.custom = (factory) =>
+			new Promise((resolve) => {
+				component = factory(tui, { fg: (_color, text) => text, bold: (text) => text }, new KeybindingsManager(TUI_KEYBINDINGS, {}), resolve);
+				tui.setFocus(component);
+			});
+		const pending = piCc(h).handler("", h.ctx);
+		try {
+			assert.ok(component, "the actual /pi_cc wrapper opened");
+			fs.chmodSync(dir, 0o500);
+			try {
+				const probe = path.join(dir, "write-probe");
+				try {
+					fs.writeFileSync(probe, "x");
+					fs.rmSync(probe);
+					t.skip("directory permissions do not restrict this user");
+					return;
+				} catch {
+					// expected: the save cannot create its lock file
+				}
+				tui.handleTerminalInput(SPACE);
+			} finally {
+				fs.chmodSync(dir, 0o700);
+			}
+			const notice = h.notifications.at(-1);
+			assert.equal(notice?.level, "error");
+			assert.match(notice.message, /Could not save the setting/);
+			assert.deepEqual(readJson(file), { compactMessages: true, footer: true }, "nothing was persisted");
+			assert.match(component.render(100).join("\n"), /→ Message style +compact/, "the panel shows the value still in effect");
+			assert.ok(!h.busEvents.some((event) => event.channel === "pi-cc:config"), "no change is announced");
+			// Ordinary commands still surface save errors to the host's handler.
+			fs.chmodSync(dir, 0o500);
+			try {
+				await assert.rejects(piCc(h).handler("footer off", h.ctx), /EACCES/);
+			} finally {
+				fs.chmodSync(dir, 0o700);
+			}
+		} finally {
+			fs.chmodSync(dir, 0o700);
+			component.handleInput(ESC);
+			await pending;
+			tui.stop();
+		}
 	});
 });
 

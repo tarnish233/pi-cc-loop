@@ -374,7 +374,13 @@ async function openSettingsPanel(ctx: ExtensionCommandContext, apply: ApplySetti
 			pages,
 			file: configPath(),
 			onChange: (field, value) => {
-				apply(field, value);
+				// The panel restores the value in effect right after this callback;
+				// a failed save must not escape through handleTerminalInput and crash Pi.
+				try {
+					apply(field, value);
+				} catch (error) {
+					notify(ctx, `Could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
 			},
 			onClose: () => done(undefined),
 		});

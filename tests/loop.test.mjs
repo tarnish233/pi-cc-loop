@@ -424,24 +424,32 @@ test("stop:true from a fixed-cron tick is suppressed and leaves unrelated loops 
 
 test("an interval-bearing /loop can be restarted after it was stopped", async () => {
 	const h = await start(makeHarness());
+	// Each /loop request starts a new run in the host; before_agent_start resets
+	// the previous run's marks, so the restarts below run the way Pi runs them.
+	const beginRun = () => h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
 	// /loop 15m: the chain runs under the loop.md sentinel.
 	await loop(h).handler("15m", h.ctx);
+	await beginRun();
 	const chain = await startSelfPaced(h, "<<loop.md>>", 900);
 	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
 	await loop(h).handler("15m", h.ctx);
+	await beginRun();
 	assert.ok(await startSelfPaced(h, "<<loop.md>>", 900), "the same /loop starts a new chain");
 
 	// /loop 15m task: the chain runs under the task without its interval.
 	await loop(h).handler("15m check the deploy", h.ctx);
+	await beginRun();
 	const taskChain = await startSelfPaced(h, "check the deploy", 900);
 	await h.tools.get("cron_delete").execute("c", { id: taskChain.id }, undefined, undefined, h.ctx);
 	await loop(h).handler("15m check the deploy", h.ctx);
+	await beginRun();
 	assert.ok(await startSelfPaced(h, "check the deploy", 900), "the task variant restarts too");
 
 	// Unrelated stopped marks survive: only this request's marks are cleared.
 	const unrelated = await startSelfPaced(h, "watch CI", 900);
 	await h.tools.get("cron_delete").execute("c", { id: unrelated.id }, undefined, undefined, h.ctx);
 	await loop(h).handler("15m check the deploy", h.ctx);
+	await beginRun();
 	await assert.rejects(
 		h.tools.get("schedule_wakeup").execute("c", { delaySeconds: 900, reason: "waiting", prompt: "watch CI" }, undefined, undefined, h.ctx),
 		/was stopped and must not be rescheduled/,
@@ -453,6 +461,8 @@ test("/loop 5m.js audit is a task, not an interval: the '.js audit' stop mark su
 	const unrelated = await startSelfPaced(h, ".js audit", 900);
 	await h.tools.get("cron_delete").execute("c", { id: unrelated.id }, undefined, undefined, h.ctx);
 	await loop(h).handler("5m.js audit", h.ctx);
+	// The new request's run starts fresh; the stop mark, not the old run, must reject.
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
 	await assert.rejects(
 		h.tools.get("schedule_wakeup").execute("c", { delaySeconds: 900, reason: "waiting", prompt: ".js audit" }, undefined, undefined, h.ctx),
 		/was stopped and must not be rescheduled/,

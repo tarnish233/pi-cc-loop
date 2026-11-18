@@ -202,9 +202,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * `chainId` is the self-paced chain whose tick (or monitor) started it,
 	 * `cronId` the fixed-interval job whose tick started it, `armed` the chains
 	 * it armed, `tick` the tick number of a /loop run, `loopRequest` set when a
-	 * typed /loop started it (its rules already say to do the task now).
+	 * typed /loop started it (its rules already say to do the task now),
+	 * `cancelled` set when the run's own chain was stopped while it was running.
 	 */
-	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number; loopRequest?: boolean } = {};
+	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number; loopRequest?: boolean; cancelled?: boolean } = {};
 
 	const scheduler = new LoopScheduler({
 		dispatch: (job) => deliverTick(job),
@@ -294,11 +295,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	/**
 	 * Rules for a message we are about to send, keyed by its text. A user
-	 * message carries no details, so the run's guidelines and the loop it
-	 * belongs to wait here for before_agent_start to pick them up.
+	 * message carries no details, so the run's guidelines wait here for
+	 * before_agent_start to pick them up.
 	 */
-	const queuedRuns: Array<{ content: string; guidelines: string[]; chainId?: string; cronId?: string; tick?: number }> =
-		[];
+	const queuedRuns: Array<{ content: string; guidelines: string[] }> = [];
 
 	function queueRun(run: (typeof queuedRuns)[number]): void {
 		queuedRuns.push(run);
@@ -328,7 +328,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	let lastStatusText: string | undefined;
-	let statusSet = false;
 
 	function refreshStatus(jobs: LoopJob[] = scheduler.list()): void {
 		const ctx = lastCtx;
@@ -338,9 +337,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			if (typeof ctx.ui.setStatus !== "function") return;
 			const text = loadConfig().footer ? statusText(jobs) : undefined;
 			// Every call repaints, even with the same text, so speak only on change.
-			if (text === lastStatusText && (text !== undefined || !statusSet)) return;
+			if (text === lastStatusText) return;
 			lastStatusText = text;
-			statusSet = text !== undefined;
 			ctx.ui.setStatus(STATUS_KEY, text);
 		} catch {
 			// a stale context must never break the loop
@@ -366,6 +364,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	function retireChain(chain: LoopJob, reason: string, options: { silent?: boolean } = {}): void {
 		rememberStopped(chain.prompt);
+		// The run whose chain this was must not arm again, even under a reworded
+		// prompt: the stopped-prompt memory only matches the exact text.
+		if (currentRun.chainId === chain.id || currentRun.armed?.has(chain.id)) {
+			currentRun.cancelled = true;
+		}
 		scheduler.remove(chain.id);
 		try {
 			pi.events.emit(LOOP_STOPPED_CHANNEL, { prompt: chain.prompt, reason });
@@ -465,13 +468,16 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 */
 	const RULES_MESSAGE_TYPE = "pi-cc-loop-rules";
 
-	function rulesFor(guidelines: string[]) {
+	function rulesFor(guidelines: string[], receipt?: number) {
 		if (!guidelines.length) return undefined;
 		return {
 			message: {
 				customType: RULES_MESSAGE_TYPE,
 				content: [RULES_PROVENANCE, ...guidelines].join("\n\n"),
 				display: false,
+				// A primitive token, not the body: message_end acknowledges the
+				// supplement only once Pi has finalized the message into the run.
+				...(receipt !== undefined ? { details: { loopFileReceipt: receipt } } : {}),
 			},
 		};
 	}
@@ -507,6 +513,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 						cron: job.cron,
 						prompt: body,
 						reason: job.reason,
+						// The supplement in before_agent_start must key off the message,
+						// not a scheduler lookup: a one-shot's job is gone by then.
+						loopFile: isLoopFileSentinel(job.prompt),
 					},
 				},
 				// `triggerTurn` is what starts the run: without it the message is
@@ -1153,6 +1162,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// Check the finalized assistant batch before changing any chain or timer.
 			requireStandaloneWakeup(_toolCallId, ctx);
 
+			// This run's own chain was stopped mid-run: a late arm must not start a
+			// replacement chain, even under a reworded prompt.
+			if (currentRun.cancelled) {
+				throw new Error(
+					"The /loop this turn belongs to was stopped and must not be rescheduled. " +
+						"Do not call schedule_wakeup for it again. If the work should continue, ask the user to start a new /loop.",
+				);
+			}
+
 			// Claude Code rounds and clamps; only a change after rounding counts as clamped.
 			const requested = params.delaySeconds;
 			const rounded = Number.isFinite(requested) ? Math.round(requested) : requested > 0 ? MAX_DELAY_SECONDS : MIN_DELAY_SECONDS;
@@ -1259,11 +1277,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		currentRun = {};
 
 		// Our own messages are ordinary user messages now, so the instructions
-		// for the run and the loop it belongs to travel with the queued entry.
+		// for the run travel with the queued entry.
 		if (event.messageType === "user") {
 			const queued = takeQueuedRun(event.prompt);
 			if (!queued) return;
-			currentRun = { chainId: queued.chainId, cronId: queued.cronId, tick: queued.tick, loopRequest: true };
+			currentRun = { loopRequest: true };
 			return rulesFor(queued.guidelines);
 		}
 		if (event.messageType !== "custom") return;
@@ -1274,22 +1292,45 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				jobId?: string;
 				cron?: string;
 				tickCount?: number;
+				loopFile?: boolean;
 			};
 			currentRun = {
 				chainId: details.kind === "wakeup" ? details.jobId : undefined,
 				cronId: details.kind === "cron" ? details.jobId : undefined,
 				tick: details.tickCount,
 			};
+			// Pi compacts before before_agent_start, so a compaction reset only
+			// repairs the next tick: this run's reminder may point at a body the
+			// compaction just dropped. Supplement it here on a receipt: delivery
+			// is committed at message_end, so a failed run start still resends on
+			// the next tick, but a stored supplement is not sent again and again.
+			const supplement = (): { text: string; token: number } | null => {
+				if (!details.loopFile) return null;
+				const pending = loopFile.peek(ctx.cwd);
+				// A first fire already carries the full body in the tick itself.
+				return pending && !String(event.message.content).includes(pending.text) ? pending : null;
+			};
 			// A cron fire needs nothing beyond its envelope ("it fires the next tick
 			// on its own, so do not call schedule_wakeup; to cancel it, call
 			// cron_delete"): an extra message every minute would only grow the
 			// context. A self-paced tick carries the rules that keep the loop alive.
-			if (details.kind !== "wakeup") return;
+			if (details.kind !== "wakeup") {
+				const full = supplement();
+				return full ? rulesFor([full.text], full.token) : undefined;
+			}
 			const chain = details.jobId ? scheduler.get(details.jobId) : undefined;
-			if (!chain) return;
+			if (!chain) {
+				// The chain was retired after this tick was queued (cron_delete can
+				// land during pre-run compaction, before this handler): this run
+				// must not arm a replacement, even under a reworded prompt.
+				if (details.jobId) currentRun.cancelled = true;
+				return;
+			}
 			const guidelines = [loopGuidelines(chain.prompt)];
 			if (monitorToolAvailable()) guidelines.push(monitorGuidelines(chain.prompt));
-			return rulesFor(guidelines);
+			const full = supplement();
+			if (full) guidelines.push(full.text);
+			return rulesFor(guidelines, full?.token);
 		}
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {
@@ -1297,8 +1338,21 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// The monitor stores the prompt the model gave it; the chain is keyed
 			// without a leading `/loop`, so both spellings find it.
 			const loopPrompt = (event.message.details as { loopPrompt?: unknown } | undefined)?.loopPrompt;
-			const chain = typeof loopPrompt === "string" ? scheduler.findChain(normalizePrompt(loopPrompt)) : undefined;
-			if (chain) currentRun.chainId = chain.id;
+			const prompt = typeof loopPrompt === "string" ? normalizePrompt(loopPrompt) : undefined;
+			const chain = prompt !== undefined ? scheduler.findChain(prompt) : undefined;
+			if (chain) {
+				currentRun.chainId = chain.id;
+				// A monitor can wake the agent after a compaction or tree navigation
+				// dropped the sentinel chain's tasks: restore them for the active
+				// chain on a receipt, without re-arming any rules.
+				if (isLoopFileSentinel(chain.prompt)) {
+					const pending = loopFile.peek(ctx.cwd);
+					if (pending) return rulesFor([pending.text], pending.token);
+				}
+			}
+			// A queued monitor event can outlive its stopped loop: the stopped memo
+			// still bars a re-arm. No memo means a genuinely new loop; allow it.
+			else if (prompt !== undefined && stoppedPrompts.has(prompt)) currentRun.cancelled = true;
 			return;
 		}
 	});
@@ -1318,6 +1372,31 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	/** After a compaction, send the full loop.md tasks again on the next tick. */
 	pi.on("session_compact", async () => {
+		loopFile.reset();
+	});
+
+	/**
+	 * The supplement's receipt: Pi finalized the rules message into the run, so
+	 * the captured snapshot counts as delivered. Until then nothing is committed
+	 * (a failed start resends); a reset in between voids the receipt.
+	 */
+	pi.on("message_end", async (event) => {
+		const message = event.message;
+		if (message.role !== "custom" || message.customType !== RULES_MESSAGE_TYPE) return;
+		const token = (message.details as { loopFileReceipt?: unknown } | undefined)?.loopFileReceipt;
+		if (typeof token === "number") loopFile.acknowledge(token);
+	});
+
+	/**
+	 * Tree navigation can leave the branch without the full loop.md body. Reset
+	 * before navigating too: an extension loaded earlier may start a model from
+	 * its session_tree handler before ours runs. A cancelled navigation costs at
+	 * most one conservative full resend.
+	 */
+	pi.on("session_before_tree", async () => {
+		loopFile.reset();
+	});
+	pi.on("session_tree", async () => {
 		loopFile.reset();
 	});
 

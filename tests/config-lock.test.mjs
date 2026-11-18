@@ -58,3 +58,51 @@ test("two Pi processes changing different settings retain both changes", async (
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("an unreadable settings file is never rewritten: the save rejects and every byte survives", (t) => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-config-lock-"));
+	const file = path.join(dir, "pi-cc.json");
+	const previous = process.env.PI_CC_CONFIG_FILE;
+	const bytes = `${JSON.stringify({ footer: true, draft: false, futureSetting: "must survive" }, null, 2)}\n`;
+	fs.writeFileSync(file, bytes);
+	fs.chmodSync(file, 0o200);
+	try {
+		let code;
+		try { fs.readFileSync(file, "utf8"); } catch (error) { code = error.code; }
+		if (code !== "EACCES") return t.skip("file permissions do not restrict this user");
+		process.env.PI_CC_CONFIG_FILE = file;
+		config.invalidateConfig();
+		assert.throws(() => config.saveConfig({ footer: false }), (error) => error.code === "EACCES");
+		fs.chmodSync(file, 0o600);
+		assert.equal(fs.readFileSync(file, "utf8"), bytes, "unknown keys and the user's choices survive");
+		assert.equal(fs.existsSync(`${file}.write.lock`), false, "the lock is cleaned on rejection");
+	} finally {
+		fs.chmodSync(file, 0o600);
+		if (previous === undefined) delete process.env.PI_CC_CONFIG_FILE;
+		else process.env.PI_CC_CONFIG_FILE = previous;
+		config.invalidateConfig();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("missing and malformed files still fall back to a fresh write", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-config-lock-"));
+	const file = path.join(dir, "pi-cc.json");
+	const previous = process.env.PI_CC_CONFIG_FILE;
+	try {
+		process.env.PI_CC_CONFIG_FILE = file;
+		config.invalidateConfig();
+		config.saveConfig({ footer: false });
+		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { footer: false }, "a missing file is created");
+		fs.writeFileSync(file, "{broken");
+		config.invalidateConfig();
+		config.saveConfig({ draft: false });
+		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { draft: false }, "malformed JSON is rebuilt, as before");
+		assert.equal(fs.existsSync(`${file}.write.lock`), false);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CC_CONFIG_FILE;
+		else process.env.PI_CC_CONFIG_FILE = previous;
+		config.invalidateConfig();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createCron, makeHarness, start, stateEntries } from "./harness.mjs";
+import { createCron, makeDue, makeHarness, start, stateEntries } from "./harness.mjs";
 import { loadModule } from "./helpers.mjs";
 
 const { DurableRuntime, DurableStore, SchedulerLock, LOCK_FILE, LOCK_STALE_MS } = await loadModule("durable.ts");
@@ -261,6 +261,188 @@ test("a session never overwrites or deletes the other sessions' jobs", () => {
 	assert.deepEqual(readFile(cwd).map((job) => job.id), ["a2"], "only the cancelled job is removed");
 	a.runtime.maintain();
 	assert.deepEqual(a.scheduler.list().map((job) => job.id), ["a2"], "the holder drops the cancelled job");
+});
+
+test("a single-job write never marks another session's change as synced", () => {
+	const cwd = tempProject();
+	const a = session(cwd, 1001);
+	const b = session(cwd, 1002);
+	try {
+		a.runtime.add(cronJob("x"));
+		a.runtime.add(cronJob("y"));
+		b.runtime.start();
+		b.runtime.remove("y");
+		// a fires x before its next sync: the write must not absorb b's deletion.
+		a.scheduler.get("x").nextFireAt = Date.now() - 1;
+		a.scheduler.tick();
+		a.runtime.maintain();
+		assert.equal(a.scheduler.get("y"), undefined, "the deleted job leaves the holder at the next sync");
+		assert.deepEqual(readFile(cwd).map((job) => job.id), ["x"], "and is never written back");
+		b.runtime.add(cronJob("z"));
+		a.scheduler.get("x").nextFireAt = Date.now() - 1;
+		a.scheduler.tick();
+		a.runtime.maintain();
+		assert.ok(a.scheduler.get("z"), "a job added by another session is loaded after our own write");
+	} finally {
+		a.runtime.stop();
+		b.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("with the default 5s sync window, an own fire hides neither another session's delete nor its add", async () => {
+	const cwd = tempProject();
+	const a = await start(makeHarness(cwd));
+	let b;
+	const realNow = Date.now;
+	try {
+		const x = await createCron(a, { cron: "* * * * *", prompt: "x", durable: true });
+		const y = await createCron(a, { cron: "* * * * *", prompt: "y", durable: true });
+		b = await start(makeHarness(cwd));
+		process.env.PI_LOOP_DURABLE_SYNC_MS = "5000";
+		a.scheduler().tick(); // establish the maintenance throttle
+		const t = realNow();
+		await b.tools.get("cron_delete").execute("d", { id: y.id }, undefined, undefined, b.ctx);
+		makeDue(a, x.id);
+		a.scheduler().tick(); // own afterFire writes while the sync is throttled
+		Date.now = () => t + 6000;
+		a.scheduler().tick();
+		assert.equal(a.scheduler().get(y.id), undefined, "the cancelled job is dropped at the next sync");
+		assert.deepEqual(readFile(cwd).map((job) => job.id), [x.id], "and never written back");
+
+		await b.tools.get("cron_create").execute("c", { cron: "* * * * *", prompt: "z", durable: true }, undefined, undefined, b.ctx);
+		makeDue(a, x.id);
+		a.scheduler().tick();
+		Date.now = () => t + 12000;
+		a.scheduler().tick();
+		assert.ok(a.scheduler().list().some((job) => job.prompt === "z"), "the new job is loaded after our own write");
+	} finally {
+		Date.now = realNow;
+		delete process.env.PI_LOOP_DURABLE_SYNC_MS;
+		if (b) await b.handlers.get("session_shutdown")({ reason: "quit" }, b.ctx);
+		await a.handlers.get("session_shutdown")({ reason: "quit" }, a.ctx);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a late fire updates a still-present job but never resurrects a cancelled one", () => {
+	const cwd = tempProject();
+	const a = session(cwd, 1001);
+	const b = session(cwd, 1002);
+	try {
+		a.runtime.add(cronJob("x"));
+		b.runtime.start();
+		assert.equal(b.runtime.remove("x"), true);
+		a.scheduler.get("x").nextFireAt = Date.now() - 1;
+		a.scheduler.tick(); // the fire lands before a's next sync
+		assert.deepEqual(a.fired, ["x"], "one late fire within the sync window is tolerated");
+		assert.deepEqual(readFile(cwd), [], "the cancelled job is not reinserted");
+		assert.equal(a.scheduler.get("x"), undefined, "the local copy is dropped instead");
+	} finally {
+		a.runtime.stop();
+		b.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("upsert with onlyIfPresent never inserts a missing job", () => {
+	const cwd = tempProject();
+	const store = new DurableStore(cwd);
+	try {
+		assert.equal(store.upsert(cronJob("gone"), true), false, "a missing job is not inserted");
+		assert.equal(store.exists(), false, "no store file is created for it");
+		store.upsert(cronJob("live"));
+		assert.equal(store.upsert(cronJob("live", { prompt: "updated" }), true), true);
+		assert.deepEqual(readFile(cwd).map((job) => [job.id, job.prompt]), [["live", "updated"]]);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("the update-if-present check shares the writer lock with a concurrent cancellation", async () => {
+	const cwd = tempProject();
+	const a = session(cwd, 1001);
+	const file = path.join(cwd, ".pi", "scheduled_tasks.json");
+	let child;
+	try {
+		a.runtime.add(cronJob("x"));
+		const ready = path.join(cwd, "cancel-ready");
+		const script = `const fs=require('node:fs'),os=require('node:os');
+			const [file,ready]=process.argv.slice(1),lock=file+'.write.lock';
+			fs.writeFileSync(lock,JSON.stringify({pid:process.pid,hostname:os.hostname()}));
+			fs.writeFileSync(ready,'ready');
+			setTimeout(()=>{fs.writeFileSync(file,JSON.stringify({version:1,jobs:[]}));fs.unlinkSync(lock)},250);`;
+		child = spawn(process.execPath, ["-e", script, file, ready], { stdio: "ignore" });
+		const exited = new Promise((resolve) => child.once("exit", resolve));
+		const until = Date.now() + 3000;
+		while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+		assert.ok(fs.existsSync(ready), "the other process holds the writer lock");
+		a.runtime.afterFire(a.scheduler.get("x"), false); // waits, then sees the cancellation
+		assert.equal(await exited, 0);
+		assert.deepEqual(readFile(cwd), [], "the fire updated nothing: the job was cancelled under the lock");
+		assert.equal(a.scheduler.get("x"), undefined, "the local copy is dropped");
+	} finally {
+		if (child?.exitCode === null) child.kill();
+		a.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an adopted job persists its armed nextFireAt for foreign viewers", () => {
+	const cwd = tempProject();
+	const a = session(cwd, 1001);
+	const b = session(cwd, 1002);
+	const viewer = session(cwd, 1003);
+	const realNow = Date.now;
+	try {
+		const now = Date.parse("2026-11-18T10:00:00Z");
+		Date.now = () => now;
+		a.runtime.add(cronJob("d", { cron: "*/5 * * * *" }), now);
+		a.runtime.stop();
+		Date.now = () => now + 20 * 60_000;
+		b.runtime.start(Date.now());
+		const armed = b.scheduler.get("d").nextFireAt;
+		assert.ok(armed >= Date.parse("2026-11-18T10:25:00Z"), "the new owner armed from its own clock");
+		assert.equal(readFile(cwd).find((job) => job.id === "d").nextFireAt, armed, "the armed time is stored, not the old owner's");
+		assert.equal(viewer.runtime.foreignJobs().find((job) => job.id === "d").nextFireAt, armed, "a foreign view shows the real next fire");
+		// Later syncs do not re-arm or rewrite already-loaded jobs.
+		const file = path.join(cwd, ".pi", "scheduled_tasks.json");
+		const mtime = fs.statSync(file).mtimeMs;
+		b.runtime.maintain(Date.now());
+		b.runtime.maintain(Date.now());
+		assert.equal(fs.statSync(file).mtimeMs, mtime, "no adoption means no rewrite");
+	} finally {
+		Date.now = realNow;
+		a.runtime.stop();
+		b.runtime.stop();
+		viewer.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a failed first persistence of an adopted new job is retried once by add", () => {
+	const cwd = tempProject();
+	// A lock left by a dead holder: the adding session takes over inside add().
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, LOCK_FILE), JSON.stringify({ pid: 1001, hostname: os.hostname(), acquiredAt: Date.now(), heartbeatAt: Date.now() }));
+	const b = session(cwd, 1002, (pid) => pid !== 1001);
+	try {
+		const realUpsert = b.runtime.store.upsert.bind(b.runtime.store);
+		let presentWrites = 0;
+		b.runtime.store.upsert = (job, onlyIfPresent = false) => {
+			// Only the first update-if-present write fails; the initial insertion succeeds.
+			if (onlyIfPresent && ++presentWrites === 1) throw new Error("simulated transient write failure");
+			return realUpsert(job, onlyIfPresent);
+		};
+		assert.deepEqual(b.runtime.add(cronJob("retry")), { runsHere: true }, "the dead holder's lock is taken over");
+		const armed = b.scheduler.get("retry").nextFireAt;
+		assert.ok(Number.isFinite(armed));
+		assert.equal(presentWrites, 2, "the post-acquire save retries the failed persistence");
+		assert.equal(readFile(cwd).find((job) => job.id === "retry").nextFireAt, armed, "the armed time is persisted despite the first failure");
+	} finally {
+		b.runtime.stop();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("when the holder stops, another session takes over the jobs", () => {

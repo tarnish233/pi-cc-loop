@@ -218,8 +218,10 @@ export function saveConfig(patch: Partial<PiCcConfig>): PiCcConfig {
 		try {
 			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
-		} catch {
-			// A missing or malformed file is rewritten from scratch.
+		} catch (error) {
+			// A missing or malformed file is rewritten from scratch; a file we
+			// cannot read (EACCES/EIO) must not be, or its keys would be lost.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
 		}
 		const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
 		try {

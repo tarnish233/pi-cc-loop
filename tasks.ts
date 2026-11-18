@@ -44,7 +44,6 @@ import {
 } from "@earendil-works/pi-tui";
 import { statSync } from "node:fs";
 import { readLogTail, sanitizeDisplay } from "./log-tail.ts";
-import { formatDateTime as dateTime } from "./render.ts";
 export { readLogTail, sanitizeDisplay, type LogTail } from "./log-tail.ts";
 
 /** Preferred entry when no loaded command or prompt already owns the name. */
@@ -568,23 +567,6 @@ export function groupTaskEntries(entries: TaskEntry[]): TaskEntry[] {
 	return ordered;
 }
 
-function shortDuration(ms: number): string {
-	if (!Number.isFinite(ms) || ms < 0) return "0s";
-	if (ms < 1000) return `${Math.round(ms)}ms`;
-	const seconds = Math.round(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
-	const hours = Math.floor(minutes / 60);
-	return `${hours}h${minutes % 60 ? ` ${minutes % 60}m` : ""}`;
-}
-
-function eta(ms: number): string {
-	if (!Number.isFinite(ms)) return "?";
-	if (ms <= 0) return "now";
-	return shortDuration(ms);
-}
-
 function stateColor(state: string): ThemeColor {
 	if (/stop_timeout|timed_out|flood/i.test(state)) return "warning";
 	if (/fail|error/i.test(state)) return "error";
@@ -628,7 +610,6 @@ class TasksOverlay {
 	private stoppingKey: string | undefined;
 	private status = "";
 	private disposed = false;
-	private renderQueued = false;
 	private renderPalette: PanelPalette | undefined;
 	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private tickTimer: ReturnType<typeof setInterval> | undefined;
@@ -665,7 +646,6 @@ class TasksOverlay {
 	}
 
 	invalidate(): void {
-		this.renderQueued = false;
 		this.renderPalette = undefined;
 		this.mouseWidth = 0;
 	}
@@ -928,7 +908,6 @@ class TasksOverlay {
 
 	private requestRender(): void {
 		if (this.disposed) return;
-		this.renderQueued = true;
 		try {
 			this.options.tui.requestRender();
 		} catch {
@@ -1495,7 +1474,9 @@ class TasksOverlay {
 						for (const part of wrapTextWithAnsi(value, Math.max(8, width - 2))) lines.push(fitWidth(`  ${part}`, width));
 						continue;
 					}
-					const prefix = theme.fg("dim", `${label.padEnd(labelWidth)} `);
+					// fitWidth, not padEnd: the prefix must occupy exactly labelWidth
+					// columns (cap long labels, pad wide ones) or wrapping loses value text.
+					const prefix = theme.fg("dim", `${fitWidth(label, labelWidth)} `);
 					const available = Math.max(8, width - labelWidth - 1);
 					const wrapped = wrapTextWithAnsi(value, available);
 					lines.push(fitWidth(`${prefix}${wrapped[0] ?? ""}`, width));

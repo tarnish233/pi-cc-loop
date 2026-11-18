@@ -124,9 +124,9 @@ export function nextFireAfter(
 	from: Date,
 	limitDays = 366 * 4,
 ): Date | null {
-	const cursor = new Date(from.getTime());
-	cursor.setSeconds(0, 0);
-	cursor.setMinutes(cursor.getMinutes() + 1);
+	// Round and step in epoch ms: a local setMinutes reinterprets the repeated
+	// hour of a DST rollback and can move the cursor back before `from`.
+	const cursor = new Date(Math.floor(from.getTime() / 60_000) * 60_000 + 60_000);
 	const limit = from.getTime() + limitDays * 24 * 60 * 60 * 1000;
 
 	while (cursor.getTime() <= limit) {
@@ -145,7 +145,7 @@ export function nextFireAfter(
 			continue;
 		}
 		if (!fields.minute.has(cursor.getMinutes())) {
-			cursor.setMinutes(cursor.getMinutes() + 1, 0, 0);
+			cursor.setTime(cursor.getTime() + 60_000);
 			continue;
 		}
 		return cursor;

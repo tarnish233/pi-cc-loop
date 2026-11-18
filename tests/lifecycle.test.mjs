@@ -406,6 +406,131 @@ test("cron_delete on a self-paced chain ends it like /loop stop", async () => {
 	await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt: "watch CI" }), /was stopped/);
 });
 
+test("a stopped tick run cannot re-arm its chain, even under a reworded prompt", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx); // the tick's run
+	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
+	for (const prompt of ["watch CI", "watch the CI run"]) {
+		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
+	}
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no replacement chain was created");
+	// stop:true still works from the cancelled run and never aborts the turn.
+	const stopped = await wakeup(h, { stop: true });
+	assert.equal(stopped.details.stopped, true);
+	assert.equal(stopped.terminate, undefined);
+	// A fresh /loop from the user is a new run and may start the loop again.
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	assert.ok(await startSelfPaced(h, "watch CI", 600), "the same prompt arms in the new run");
+});
+
+test("a stopped first /loop run cannot re-arm under a reworded prompt either", async () => {
+	const h = await start(makeHarness());
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	const chain = await startSelfPaced(h, "watch CI", 600); // the run armed this chain
+	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
+	for (const prompt of ["watch CI", "watch the CI run"]) {
+		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
+	}
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no replacement chain was created");
+});
+
+test("stop:true on the tick's own chain also blocks a reworded re-arm from that run", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick();
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	await wakeup(h, { stop: true });
+	await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt: "watch the CI run" }), /was stopped/);
+	assert.equal(h.scheduler().byKind("wakeup").length, 0);
+});
+
+test("stop:true after the first /loop arm blocks a reworded re-arm from that run", async () => {
+	const h = await start(makeHarness());
+	await startSelfPaced(h, "watch deploy", 600); // a chain from an earlier run
+	await runTurn(h);
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	await startSelfPaced(h, "watch CI", 600); // the run armed this chain
+	await wakeup(h, { stop: true, prompt: "watch deploy" }); // unrelated: the run stays free
+	assert.ok(await wakeup(h, { delaySeconds: 600, prompt: "watch CI" }), "own chain re-arms after an unrelated stop");
+	await wakeup(h, { stop: true }); // the agent stops the loop it just armed
+	for (const prompt of ["watch CI", "watch the CI run"]) {
+		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
+	}
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no replacement chain was created");
+	// A fresh /loop from the user is a new run and may start the loop again.
+	await runTurn(h);
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	assert.ok(await startSelfPaced(h, "watch CI", 600), "the same prompt arms in the new run");
+});
+
+test("stopping an unrelated chain leaves the tick run free to re-arm its own", async () => {
+	const h = await start(makeHarness());
+	const ci = await startSelfPaced(h, "watch CI", 600);
+	const other = await startSelfPaced(h, "watch deploy", 600);
+	await runTurn(h);
+	makeDue(h, ci.id);
+	h.scheduler().tick();
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	await h.tools.get("cron_delete").execute("c", { id: other.id }, undefined, undefined, h.ctx);
+	const result = await wakeup(h, { delaySeconds: 600, prompt: "watch the CI run" });
+	assert.equal(result.details.id, ci.id, "the tick's own chain is re-armed, not replaced");
+	assert.equal(h.scheduler().byKind("wakeup").length, 1);
+});
+
+test("a tick whose chain was retired before its run started cannot re-arm", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	await runTurn(h);
+	makeDue(h, chain.id);
+	h.scheduler().tick(); // the tick is queued; the host may compact before before_agent_start
+	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx); // the late run start
+	for (const prompt of ["watch CI", "watch the CI run"]) {
+		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
+	}
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no replacement chain was created");
+});
+
+test("a queued monitor of a stopped loop cannot re-arm it, but a fresh /loop can", async () => {
+	const h = await start(makeHarness());
+	const chain = await startSelfPaced(h, "watch CI", 600);
+	await runTurn(h);
+	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
+	// The queued event outlived its chain; the monitor may quote the /loop prefix.
+	const monitorEvent = {
+		message: { customType: "Monitor", content: "queued old output", details: { loopPrompt: "/loop watch CI" } },
+	};
+	await h.handlers.get("before_agent_start")(runEvent({ kind: "custom", ...monitorEvent }), h.ctx);
+	for (const prompt of ["watch CI", "watch the CI run"]) {
+		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
+	}
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "no replacement chain was created");
+	// A fresh /loop clears the memo and starts a new run: the restart is not poisoned.
+	await runTurn(h);
+	await h.commands.get("loop").handler("watch CI", h.ctx);
+	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
+	assert.ok(await startSelfPaced(h, "watch CI", 600), "the same prompt arms in the new run");
+});
+
+test("a monitor with no stopped memo still lets the run arm its loop", async () => {
+	const h = await start(makeHarness());
+	const monitorEvent = {
+		message: { customType: "Monitor", content: "output", details: { loopPrompt: "watch CI" } },
+	};
+	await h.handlers.get("before_agent_start")(runEvent({ kind: "custom", ...monitorEvent }), h.ctx);
+	assert.ok(await startSelfPaced(h, "watch CI", 600), "a not-yet-armed loop is not blocked");
+});
+
 // -------------------------------------------------------------- scheduling
 
 
@@ -415,6 +540,10 @@ test("the stopped-prompt memory is capped", async () => {
 	for (let i = 0; i < 25; i++) {
 		await startSelfPaced(h, `task ${i}`, 600);
 		await wakeup(h, { stop: true });
+		// Each pair is an independent turn in the host: settle the run and start
+		// the next one, so this turn's stop cannot block the next turn's arm.
+		await runTurn(h);
+		await h.handlers.get("before_agent_start")(runEvent({ kind: "user", content: `task ${i + 1}` }), h.ctx);
 	}
 	assert.equal(h.lastState().stopped.length, 20);
 	assert.ok(!h.lastState().stopped.includes("task 0"), "the oldest are forgotten first");

@@ -8,7 +8,7 @@ import { makeHarness } from "./harness.mjs";
 import { findPiInstall, loadModule } from "./helpers.mjs";
 
 const { registerTaskProvider } = await loadModule("tasks.ts");
-const { rgbColor, styleText, stripTerminalSequences, visibleWidth } = await import(pathToFileURL(findPiInstall().piTui).href);
+const { KeybindingsManager, TUI_KEYBINDINGS, rgbColor, styleText, stripTerminalSequences, truncateToWidth, visibleWidth } = await import(pathToFileURL(findPiInstall().piTui).href);
 
 /** A theme using Pi's real ANSI styler, including nested background resets. */
 function colorTheme(appearance = "dark", mode = "truecolor") {
@@ -199,4 +199,50 @@ test("colored cards keep detail scrolling and Esc correct in tiny/narrow layouts
 		assert.equal(v.panel.detailKey, undefined, "first Esc closes only the detail");
 		assert.deepEqual(v.h.sent, []);
 	} finally { await v.close(); }
+});
+
+test("detail labels fit the 12-column budget so every wrapped value character survives", async () => {
+	const previousCwd = process.cwd();
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-label-budget-"));
+	const h = makeHarness(cwd);
+	const value = Array.from({ length: 120 }, (_, i) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i % 26]).join("");
+	// Real Monitor labels: 17 ASCII columns and 16 CJK columns, both over the cap.
+	const labels = ["Watch build-ready", "会话预算会话预算"];
+	const registration = registerTaskProvider(h.pi, {
+		id: "monitor", label: "Monitor",
+		list: () => [{ id: "one", title: "command source observer", state: "running", active: true }],
+		detail: () => ({ rows: labels.map((label) => ({ label, value })) }),
+	});
+	let panel;
+	const tui = { terminal: { columns: 60, rows: 30 }, requestRender() {} };
+	h.ctx.ui.custom = (factory) => new Promise((resolve) => {
+		panel = factory(tui, { fg: (_role, text) => text, bold: (text) => text }, new KeybindingsManager(TUI_KEYBINDINGS, {}), () => { panel.dispose(); resolve(); });
+	});
+	const shown = h.commands.get("cc-tasks").handler("", h.ctx);
+	try {
+		panel.openDetail();
+		for (const width of [53, 28]) {
+			const lines = panel.detailLines(width).slice(2).map(stripTerminalSequences);
+			const perRow = Math.ceil(value.length / (width - 12 - 1));
+			assert.equal(lines.length, labels.length * perRow, `${width}: one prefix line plus continuations per row`);
+			labels.forEach((label, row) => {
+				const prefix = `${stripTerminalSequences(truncateToWidth(label, 12, "…", true))} `;
+				const first = lines[row * perRow];
+				assert.ok(first.startsWith(prefix), `${width}: the prefix occupies exactly the label budget`);
+				const parts = [first.slice(prefix.length)];
+				for (let i = 1; i < perRow; i++) {
+					const line = lines[row * perRow + i];
+					assert.ok(line.startsWith(" ".repeat(13)), `${width}: continuations align under the value`);
+					parts.push(line.slice(13));
+				}
+				assert.equal(parts.join(""), value, `${width}: every value character survives wrapping`);
+			});
+		}
+	} finally {
+		registration.close();
+		panel.dispose();
+		await shown;
+		process.chdir(previousCwd);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
 });
