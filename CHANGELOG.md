@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-18
+
+### Fixed
+- Re-arming a self-paced wakeup that came due while the agent was busy honours the new delay instead of firing immediately at the end of the turn.
+- A damaged `.pi/scheduled_tasks.json` is never overwritten: a write refuses a file it cannot parse or that is not a jobs document, so other sessions' jobs survive.
+- `schedule_wakeup` with `stop: true` from a fixed-interval tick no longer cancels unrelated self-paced loops; it names the cron job and points at `cron_delete`.
+- Accept leap-day cron expressions such as `0 0 29 2 *` that fall inside the scheduler's four-year search window.
+- Reject malformed cron steps such as `*/2/3` instead of silently applying the first step.
+- Restarting a stopped `/loop 15m` or `/loop 15m <task>` works again, without unblocking unrelated stopped loops.
+- Truncate the collapsed loop card header by terminal columns, so emoji, CJK and ANSI prompts no longer split characters or render the whole loop.md body.
+- `/tasks`: keep Detail/Stop clickable when a long "new task" announcement is shown, drop invisible hit regions in the single-line layout, repaint after a scrollbar press so clicks match the painted frame, and ignore presses on a one-row scrollbar instead of jumping back to the top.
+- `/tasks`: always offer a mouse Back/Close when the title control is unavailable — short terminals, narrow frames, and the status line shown after a stop.
+- Log tails no longer discard a complete first line when the byte limit lands exactly on a line boundary.
+
 ## [0.11.0] - 2026-11-17
 
 ### Added
