@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-18
+
+### Fixed
+- Catch settings-panel save failures locally, restore the effective value, and refuse to overwrite valid settings that cannot be read because of an I/O error.
+- Keep durable-file synchronization honest after single-job writes; late fires and post-arm saves update only still-existing jobs instead of resurrecting cancelled tasks.
+- Persist the actual armed next-fire time on durable takeover, retaining the best-effort retry when its first persistence fails.
+- Prevent stopped self-paced runs from rearming under a reworded prompt, including first-run steering, pre-start compaction gaps, and queued Monitor messages from a retired chain. Fresh user restarts and unrelated chains remain available.
+- Advance cron minutes monotonically in epoch time across daylight-saving rollback.
+- Restore loop.md or maintenance instructions in the current run after compaction/tree context loss. A single-read supplement snapshot is acknowledged at message_end, so successful Monitor wakeups do not keep appending the full task body and failed starts remain retryable.
+- Fit long and wide task-detail labels to their actual terminal-column budget so wrapped values do not lose characters.
+
+### Changed
+- Remove unused task-panel fields/helpers, duplicate footer state, and never-populated queued-run ownership fields; preserve native mouse navigation and local stop confirmation.
+- Expand regression coverage for file errors, multi-session cancellation races, real host startup/receipt ordering and Unicode display boundaries. This release was verified against Pi 1.5.2.
+
 ## [0.11.1] - 2026-11-18
 
 ### Fixed
