@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-23
+
+### Fixed
+- Make the release check work on a clean single-repo checkout: clone the sibling package the cross-extension tests load, and build the single-release fixture from the resolved install instead of a fixed release path.
+
 ## [0.12.3] - 2026-11-23
 
 ### Fixed

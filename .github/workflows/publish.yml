@@ -6,7 +6,7 @@ on:
       tag:
         description: "Tag to publish, for example v0.1.0"
         required: true
-        default: "v0.12.3"
+        default: "v0.12.4"
 
 jobs:
   check:
@@ -21,6 +21,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Check out pi-cc-monitor for the cross-extension tests
+        run: git clone --depth 1 https://github.com/tarnish233/pi-cc-monitor "${GITHUB_WORKSPACE%/*}/pi-cc-monitor"
 
       - name: Install validation dependencies
         run: npm install --ignore-scripts --no-save --package-lock=false @earendil-works/pi-coding-agent@1.6.0 @earendil-works/pi-ai@1.6.0 @earendil-works/pi-tui@1.6.0

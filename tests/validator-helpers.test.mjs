@@ -17,7 +17,9 @@ for (const version of install.versions) {
 		t.after(() => fs.rmSync(agentDir, { recursive: true, force: true }));
 		const releases = path.join(agentDir, "install", "releases");
 		fs.mkdirSync(releases, { recursive: true });
-		const release = path.resolve(install.root, "..", "..", version);
+		// Releases keep node_modules/<version>; installed peers keep <repo>/node_modules.
+		// The parent covers both, so the fixture works on a clean CI checkout too.
+		const release = path.dirname(install.root);
 		fs.symlinkSync(release, path.join(releases, version), "dir");
 		const expectedEngine = fs.existsSync(path.join(release, "node_modules", "@earendil-works", "pi-schema", "dist", "index.js"))
 			? "pi-schema" : "typebox";
