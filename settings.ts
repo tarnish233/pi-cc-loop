@@ -112,7 +112,7 @@ const PAGES: SettingsPage[] = [
 				on: "compact",
 				off: "card",
 				description:
-					"How scheduled fires and Monitor events are drawn. compact: \u273b header and indented body; card: the old padded card.",
+					"How scheduled fires and Monitor events are drawn. compact: one collapsed line, expandable details; card: the legacy padded card.",
 			},
 			{
 				field: "footer",
@@ -146,7 +146,7 @@ const PAGES: SettingsPage[] = [
 				on: "on",
 				off: "off",
 				description:
-					"Enter queues while Pi works; Ctrl+Enter is not bound by this feature. off: Pi's keys (Enter sends, Alt+Enter queues).",
+					"Up on the empty prompt recalls a queued message and Down puts the prompt back. Enter keeps Pi's keys (steer while running, send when idle).",
 			},
 		],
 	},
@@ -293,7 +293,7 @@ export function settingsPanel(options: SettingsPanelOptions): SettingsPanel {
 	const body = (width: number) => {
 		const lines = lists[active].render(width);
 		const hint = lines.findIndex((line) => line.includes("Esc to cancel"));
-		const kept = hint === -1 ? lines : lines.slice(0, hint);
+		const kept = hint === -1 ? [...lines] : lines.slice(0, hint);
 		while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
 		return kept;
 	};

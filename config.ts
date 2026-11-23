@@ -41,7 +41,7 @@ import os from "node:os";
 import path from "node:path";
 
 export interface PiCcConfig {
-	/** Two-line marker blocks instead of the padded card. */
+	/** One-line notifications with expandable details instead of the legacy padded card. */
 	compactMessages: boolean;
 	/**
 	 * Show a one-line summary in Pi's footer (loops armed, monitors running).
@@ -52,7 +52,7 @@ export interface PiCcConfig {
 	draft: boolean;
 	/** pi-cc-plugins: one line closes every agent run. */
 	turnSummary: boolean;
-	/** pi-cc-plugins: Enter queues while Pi works; no Ctrl+Enter shortcut. */
+	/** pi-cc-plugins: Up recalls a queued message; Down puts the prompt back. */
 	ccKeys: boolean;
 	/** pi-cc-compaction: Claude Code's compaction replaces Pi's summary request. */
 	compaction: boolean;

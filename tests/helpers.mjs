@@ -3,6 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { findPiInstall as findHost } from "../scripts/host-paths.mjs";
+/** Resolve Pi without treating a test's isolated agent dir (PI_CODING_AGENT_DIR) as an install. */
+export function findPiInstall() {
+	const isolated = process.env.PI_CODING_AGENT_DIR;
+	delete process.env.PI_CODING_AGENT_DIR;
+	try {
+		return findHost();
+	} finally {
+		if (isolated !== undefined) process.env.PI_CODING_AGENT_DIR = isolated;
+	}
+}
 
 // Isolate pi-cc-extensions' config as well: the compat sync must not touch
 // the real file when a test toggles compact tool rows.
@@ -21,37 +32,6 @@ if (!process.env.PI_CC_CONFIG_FILE) {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const extensionDir = path.resolve(here, "..");
-
-/** Locate the Pi installation that ships the extension host and jiti. */
-export function findPiInstall() {
-	const agentDir = process.env.PI_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
-	const releases = path.join(agentDir, "install", "releases");
-	const candidates = fs.existsSync(releases) ? fs.readdirSync(releases) : [];
-	const versions = candidates
-		.filter((name) => fs.existsSync(path.join(releases, name, "node_modules", "jiti")))
-		.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-	if (!versions.length) {
-		throw new Error(
-			`Could not find a Pi installation with jiti under ${releases}. ` +
-				"Set PI_AGENT_DIR to point at your agent directory.",
-		);
-	}
-	const root = path.join(releases, versions[versions.length - 1], "node_modules");
-	return {
-		root,
-		versions,
-		jiti: path.join(root, "jiti", "lib", "jiti.mjs"),
-		typebox: path.join(root, "typebox", "build", "index.mjs"),
-		// Pi aliases these for extensions at load time; the test harness has to
-		// do the same.
-		piCodingAgent: path.join(root, "@earendil-works", "pi-coding-agent", "dist", "index.js"),
-		piTui: path.join(root, "@earendil-works", "pi-tui", "dist", "index.js"),
-		// Pi's own tool-argument validator and the JSON Schema engine behind it
-		// (Pi 1.5.0+), so the tests check what Pi checks instead of TypeBox.
-		piAiValidation: path.join(root, "@earendil-works", "pi-ai", "dist", "utils", "validation.js"),
-		piSchema: path.join(root, "@earendil-works", "pi-schema", "dist", "index.js"),
-	};
-}
 
 /** A jiti instance that can load the extension's TypeScript sources. */
 let jitiInstance;

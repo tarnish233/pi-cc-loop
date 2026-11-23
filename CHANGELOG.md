@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-23
+
+### Fixed
+- Clear notification hover before native input dispatch without replacing ccstyle's viewport handler; keep reload and regular/fullscreen switches leak-free.
+- Trim a copy of Pi's cached settings rows, fixing the readonly-array type error and preventing render-cache mutation.
+
+### Changed
+- Synchronize stable shared settings and current message/key descriptions; leave unfinished custom action pages out of the release.
+- Require tests and typechecking against Pi 1.6.0 in a read-only validation job before trusted npm publishing. Test host discovery also supports installed peer dependencies.
+
 ## [0.12.1] - 2026-11-23
 
 ### Fixed

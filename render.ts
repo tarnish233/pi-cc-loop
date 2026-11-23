@@ -26,6 +26,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
+	type TuiInputListener,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -148,102 +149,66 @@ function expandHint(): string {
  * delivers mouse events, the regular screen only has the expand keybinding.
  */
 
-let screenMode: "regular" | "fullscreen" | undefined;
-
-/**
- * SGR mouse packets, as `pi-cc-extensions` parses them (MIT). Copied rather than
- * imported: the two packages ship separately and must not depend on each other.
- */
-type SgrMousePacket = { code: number; col: number; row: number; final: "M" | "m" };
-
-function parseSgrMousePackets(data: string): SgrMousePacket[] | null {
-	const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
-	const packets: SgrMousePacket[] = [];
-	let offset = 0;
-	for (const match of data.matchAll(pattern)) {
-		if (match.index !== offset) return null;
-		offset = match.index + match[0].length;
-		packets.push({ code: Number(match[1]), col: Number(match[2]), row: Number(match[3]), final: match[4] as "M" | "m" });
-	}
-	return packets.length > 0 && offset === data.length ? packets : null;
-}
-
-/** Pointer motion with no button held (DECSET 1003 reports 35); a drag is not a hover. */
-function isIdleMotion(packet: SgrMousePacket): boolean {
-	return packet.final === "M" && (packet.code & 32) !== 0 && (packet.code & ~(4 | 8 | 16 | 32)) === 3;
-}
-
-/** A wheel tick scrolls the transcript under a still pointer, so the hover is stale too. */
-function isWheel(packet: SgrMousePacket): boolean {
-	return packet.final === "M" && (packet.code & 64) !== 0;
-}
-
-/** The one card the pointer is on right now; `move` alone can never report leaving it. */
+/** Native `move` only reaches the hit component, never the one the pointer left. */
 let hoveredCard: NotificationCardView | undefined;
 
-type HoverHost = { tui: any; original: (data: string) => unknown; wrapper: (data: string) => unknown };
+type HoverHost = { listeners: Set<TuiInputListener>; observer: TuiInputListener; unsubscribe: () => void };
 let hoverHost: HoverHost | undefined;
-/** The fullscreen TUI, kept only to read the viewport height when rendering. */
+let hoverEnabled = false;
+/** The stable native TUI reference also supplies mode and viewport height for history cards. */
 let screenTui: any;
 
-/**
- * Pi delivers `move` only to the component under the pointer, so a card never
- * learns that the pointer left and its highlight would stick to every card the
- * pointer crossed. Intercepting the fullscreen viewport input is what
- * pi-cc-extensions does for the same reason: clear the highlight first, then let
- * the official dispatch light whichever card the pointer is really on.
- */
-function installHover(tui: any): void {
-	if (hoverHost?.tui === tui) return;
-	releaseNotificationHover();
-	const original = tui?.handleViewportInput;
-	// The regular screen has no viewport input: nothing to intercept.
-	if (typeof original !== "function") return;
-	const wrapper = function (this: unknown, data: string): unknown {
-		// Keystrokes and paste are the common case; skip the scan for them.
-		if (!data.includes("\u001b[<")) return Reflect.apply(original, this, [data]);
-		const packets = parseSgrMousePackets(data);
-		if (!packets?.some((packet) => isIdleMotion(packet) || isWheel(packet))) {
-			return Reflect.apply(original, this, [data]);
-		}
-		const previous = hoveredCard;
-		if (previous) previous.setHintHovered(false);
-		hoveredCard = undefined;
-		const result = Reflect.apply(original, this, [data]);
-		// The pointer left every card: nothing re-rendered, so ask for it here.
-		if (previous && !hoveredCard) tui.requestRender?.();
-		return result;
-	};
-	tui.handleViewportInput = wrapper;
-	hoverHost = { tui, original, wrapper };
-	screenTui = tui;
-}
-
-/**
- * Stop intercepting input, but keep the TUI reference: `/reload` fires the new
- * session's `session_start` before the old session's `session_shutdown`, and both
- * share this module state, so that late release would otherwise leave every
- * reloaded session with no hover at all. `render` re-installs on the next frame.
- */
-export function releaseNotificationHover(): void {
-	const host = hoverHost;
-	hoverHost = undefined;
+function clearHintHover(): void {
+	const previous = hoveredCard;
 	hoveredCard = undefined;
-	if (host && host.tui.handleViewportInput === host.wrapper) host.tui.handleViewportInput = host.original;
+	if (previous?.setHintHovered(false)) screenTui?.requestRender?.();
 }
 
-/** Re-arm after a release that followed our install (see releaseNotificationHover). */
+function removeHoverObserver(): void {
+	hoverHost?.unsubscribe();
+	hoverHost = undefined;
+	clearHintHover();
+}
+
+/** Observe before native dispatch consumes input; never replace ccstyle's viewport method. */
 function ensureHover(): void {
-	if (screenMode !== "fullscreen" || !screenTui) return;
-	if (hoverHost && screenTui.handleViewportInput === hoverHost.wrapper) return;
-	installHover(screenTui);
+	if (!hoverEnabled) return;
+	const tui = screenTui;
+	const listeners = tui?.inputListeners;
+	if (tui?.mode !== "fullscreen") {
+		removeHoverObserver();
+		return;
+	}
+	// The Set is stable through Pi's proxy; reading methods creates fresh functions.
+	if (hoverHost && hoverHost.listeners === listeners && listeners.has(hoverHost.observer)) return;
+	removeHoverObserver();
+	if (!(listeners instanceof Set) || typeof tui.addInputListener !== "function" || typeof tui.removeInputListener !== "function") return;
+	const previous = [...listeners];
+	const observer: TuiInputListener = () => {
+		// Keys, wheel and focus changes may move content; native moves restore the actual hit.
+		clearHintHover();
+		return undefined;
+	};
+	const unsubscribe = tui.addInputListener(observer);
+	// shortcut: Pi's internal listener order supplies priority; replace when a pre-dispatch API exists.
+	for (const listener of previous) {
+		tui.removeInputListener(listener);
+		tui.addInputListener(listener);
+	}
+	hoverHost = { listeners, observer, unsubscribe };
+}
+
+/** Stop input observation and clear the painted state; historical cards keep their viewport cap. */
+export function releaseNotificationHover(): void {
+	hoverEnabled = false;
+	removeHoverObserver();
 }
 
 /** Pi hands its TUI to an extension through the setWidget factory (ExtensionUIContext). */
 export function setNotificationTui(tui: unknown): void {
-	const mode = (tui as { mode?: unknown } | undefined)?.mode;
-	screenMode = mode === "fullscreen" || mode === "regular" ? mode : undefined;
-	if (screenMode === "fullscreen") installHover(tui);
+	screenTui = tui;
+	hoverEnabled = true;
+	ensureHover();
 }
 
 export type NotificationTone = "success" | "error" | "warning" | "accent";
@@ -307,7 +272,7 @@ const cardExpansion = new WeakMap<object, { base: boolean; expanded: boolean }>(
 export type KeyHintFn = (keybinding: any, description: string) => string;
 
 function collapsedHint(keyHint: KeyHintFn | undefined): string {
-	if (screenMode === "fullscreen") return "click to show more";
+	if (screenTui?.mode === "fullscreen") return "click to show more";
 	try {
 		const hint = keyHint?.("app.tools.expand", "to show more");
 		if (hint) return hint;
@@ -332,7 +297,7 @@ const LAST_INDENT = "  ";
 const MAX_EXPANDED_ROWS = 24;
 
 function expandedRowBudget(): number {
-	if (screenMode !== "fullscreen") return Number.POSITIVE_INFINITY;
+	if (screenTui?.mode !== "fullscreen") return Number.POSITIVE_INFINITY;
 	const rows = Number(screenTui?.terminal?.rows);
 	if (!Number.isFinite(rows) || rows <= 0) return 20;
 	return Math.max(6, Math.min(Math.floor(rows * 0.6), MAX_EXPANDED_ROWS));
@@ -377,7 +342,7 @@ class NotificationCardView implements Component {
 		private readonly theme: Theme,
 		private readonly pad: number,
 		private readonly base: boolean,
-		private readonly hint: string,
+		private readonly keyHint: KeyHintFn | undefined,
 	) {
 		const local = cardExpansion.get(message);
 		this.expanded = local?.base === base ? local.expanded : base;
@@ -398,7 +363,7 @@ class NotificationCardView implements Component {
 			this.setExpanded(!this.expanded);
 			return { handled: true, render: true };
 		}
-		if (event.type !== "move") return undefined;
+		if (event.type !== "move" || !hoverHost) return undefined;
 		return this.setHintHovered(
 			!this.expanded && event.y === 0 && event.x >= this.hintStart && event.x < this.hintEnd,
 		)
@@ -406,7 +371,7 @@ class NotificationCardView implements Component {
 			: undefined;
 	}
 
-	/** Only the card the pointer is on stays lit; the input wrapper clears the rest. */
+	/** Only the card the pointer is on stays lit; the input observer clears the rest. */
 	setHintHovered(hovered: boolean): boolean {
 		if (this.hintHovered === hovered) return false;
 		this.hintHovered = hovered;
@@ -417,8 +382,9 @@ class NotificationCardView implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): readonly string[] {
+	render(width: number): string[] {
 		ensureHover();
+		// Pi 1.5 declares a mutable array and 1.6 a readonly one; a fresh array satisfies both.
 		return this.expanded ? this.expandedRows(width) : this.collapsedRows(width);
 	}
 
@@ -466,7 +432,7 @@ class NotificationCardView implements Component {
 		const rowWidth = Math.max(1, width);
 		// The padding never eats the only column there is.
 		const indent = " ".repeat(Math.min(this.pad, rowWidth - 1));
-		const hint = ` ${theme.fg("dim", "\u00b7")} ${theme.fg(this.hintHovered ? "text" : "dim", this.hint)}`;
+		const hint = ` ${theme.fg("dim", "\u00b7")} ${theme.fg(this.hintHovered ? "text" : "dim", collapsedHint(this.keyHint))}`;
 		const head = `${indent}${this.collapsedHeader()}`;
 		// The hint keeps its columns; the title gives way with an ellipsis. A hard cut
 		// through "show more" reads like a bug, not like a narrow terminal.
@@ -482,7 +448,7 @@ class NotificationCardView implements Component {
 		return [line];
 	}
 
-	private expandedRows(width: number): readonly string[] {
+	private expandedRows(width: number): string[] {
 		const theme = this.theme;
 		const columns = Math.max(1, width);
 		// The frame never eats the only column there is.
@@ -508,7 +474,7 @@ class NotificationCardView implements Component {
 				return fitted.map((line) => truncateToWidth(line, room, ""));
 			},
 		});
-		return box.render(columns);
+		return [...box.render(columns)];
 	}
 }
 
@@ -525,6 +491,6 @@ export function renderNotificationCard(
 		theme,
 		Math.max(0, Math.floor(Number(options.outputPad) || 0)),
 		options.expanded,
-		collapsedHint(options.keyHint),
+		options.keyHint,
 	);
 }
