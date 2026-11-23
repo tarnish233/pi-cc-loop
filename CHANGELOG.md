@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-23
+
+### Fixed
+- An expanded card taller than the fullscreen viewport made Pi's alternate screen repaint every frame and painted the screen with the card's background. The expansion is capped at 60% of the viewport and 24 rows.
+- The hover wrapper was lost by every `/reload` (the old session's shutdown restored the method after the new session installed it), leaving every crossed hint lit. The next render re-arms it.
+
 ## [0.12.0] - 2026-11-23
 
 ### Changed

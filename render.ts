@@ -183,6 +183,8 @@ let hoveredCard: NotificationCardView | undefined;
 
 type HoverHost = { tui: any; original: (data: string) => unknown; wrapper: (data: string) => unknown };
 let hoverHost: HoverHost | undefined;
+/** The fullscreen TUI, kept only to read the viewport height when rendering. */
+let screenTui: any;
 
 /**
  * Pi delivers `move` only to the component under the pointer, so a card never
@@ -214,14 +216,27 @@ function installHover(tui: any): void {
 	};
 	tui.handleViewportInput = wrapper;
 	hoverHost = { tui, original, wrapper };
+	screenTui = tui;
 }
 
-/** Stop intercepting input; `/reload` and session end must not leave a stale wrapper. */
+/**
+ * Stop intercepting input, but keep the TUI reference: `/reload` fires the new
+ * session's `session_start` before the old session's `session_shutdown`, and both
+ * share this module state, so that late release would otherwise leave every
+ * reloaded session with no hover at all. `render` re-installs on the next frame.
+ */
 export function releaseNotificationHover(): void {
 	const host = hoverHost;
 	hoverHost = undefined;
 	hoveredCard = undefined;
 	if (host && host.tui.handleViewportInput === host.wrapper) host.tui.handleViewportInput = host.original;
+}
+
+/** Re-arm after a release that followed our install (see releaseNotificationHover). */
+function ensureHover(): void {
+	if (screenMode !== "fullscreen" || !screenTui) return;
+	if (hoverHost && screenTui.handleViewportInput === hoverHost.wrapper) return;
+	installHover(screenTui);
 }
 
 /** Pi hands its TUI to an extension through the setWidget factory (ExtensionUIContext). */
@@ -305,6 +320,24 @@ function collapsedHint(keyHint: KeyHintFn | undefined): string {
 const RAIL = "\u2502 ";
 const LAST_INDENT = "  ";
 
+/**
+ * How many rows an expanded card may draw. A component far taller than the
+ * viewport makes Pi's alternate screen fall back to a full redraw on every
+ * frame, and the card's own background then bleeds across the whole screen
+ * (pi-cc-extensions documents the same wall for its diff panels). Sixty percent
+ * of the viewport keeps the card honest and leaves the rest readable, and an
+ * absolute ceiling keeps a tall terminal from turning the card into a wall: the
+ * full output is in the log path and in `/tasks`.
+ */
+const MAX_EXPANDED_ROWS = 24;
+
+function expandedRowBudget(): number {
+	if (screenMode !== "fullscreen") return Number.POSITIVE_INFINITY;
+	const rows = Number(screenTui?.terminal?.rows);
+	if (!Number.isFinite(rows) || rows <= 0) return 20;
+	return Math.max(6, Math.min(Math.floor(rows * 0.6), MAX_EXPANDED_ROWS));
+}
+
 /** Section tree: `├`/`└` corners, accent-bold headings, body behind the rail. */
 function detailRows(sections: NotificationSection[], width: number, theme: Theme): string[] {
 	const room = Math.max(1, width - RAIL.length);
@@ -385,6 +418,7 @@ class NotificationCardView implements Component {
 	invalidate(): void {}
 
 	render(width: number): readonly string[] {
+		ensureHover();
 		return this.expanded ? this.expandedRows(width) : this.collapsedRows(width);
 	}
 
@@ -459,10 +493,19 @@ class NotificationCardView implements Component {
 			// Headings wrap themselves; the section tree already wrapped its body.
 			render: (inner: number) => {
 				const room = Math.max(1, inner);
-				return [
+				const rows = [
 					...wrapTextWithAnsi(this.expandedHeader(), room),
 					...detailRows(this.card.sections, room, theme),
-				].map((line) => truncateToWidth(line, room, ""));
+				];
+				const budget = expandedRowBudget();
+				const fitted =
+					rows.length <= budget
+						? rows
+						: [
+								...rows.slice(0, budget - 1),
+								`${theme.fg("dim", RAIL)}${theme.fg("dim", `\u2026 +${rows.length - budget + 1} more rows \u00b7 see /tasks`)}`,
+							];
+				return fitted.map((line) => truncateToWidth(line, room, ""));
 			},
 		});
 		return box.render(columns);
