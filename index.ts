@@ -68,7 +68,7 @@ import {
 	type LoopJob,
 	type TimingConfig,
 } from "./schedule.ts";
-import { formatDateTime as dateTime, truncate } from "./render.ts";
+import { formatDateTime as dateTime, releaseNotificationHover, setNotificationTui, truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
 /** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
@@ -1402,6 +1402,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
+		// The card says "click to show more" only where Pi actually delivers mouse
+		// events: fullscreen. An empty widget is the native way to reach the TUI.
+		if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.setWidget === "function") {
+			ctx.ui.setWidget("pi-cc-loop:screen", (tui) => {
+				setNotificationTui(tui);
+				return { render: () => [], invalidate() {} };
+			});
+		}
 		// Another process may have edited the shared settings file.
 		invalidateConfig();
 		durable?.stop();
@@ -1418,6 +1426,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		releaseNotificationHover();
 		// Close an open task overlay while the context is still valid.
 		tasks.close();
 		// Pi clears extension statuses when it unloads, but a reload should not

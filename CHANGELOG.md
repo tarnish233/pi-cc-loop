@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
+### Changed
+- Redraw a scheduled fire in Claude Code's notification shape: one collapsed line with the label, the model's `reason`, the stamp and the cadence, no preview rows (the prompt is behind the expansion), and a tool-card background with a `Schedule`/`Late`/`Reason`/`Job`/`Prompt` section tree on expansion. A missed-jobs card warns with `⚠`. The title carries the same colour as its icon.
+- Adapt the expand affordance to the host screen through native interfaces only: the fullscreen alt screen says `click to show more` and toggles on a left click (`Component.handleMouse`); the regular screen says `ctrl+o to show more` from `options.keyHint("app.tools.expand", …)` because it delivers no mouse events. Ctrl+O still goes through the host's own `CustomMessageComponent.setExpanded`. The hint brightens while the pointer rests on it, cleared by the same fullscreen viewport interception pi-cc-extensions uses.
+### Removed
+- The unused `renderBlock` helper in the shared `render.ts` (loop and monitor stay byte-identical).
+
 ## [0.11.2] - 2026-11-18
 
 ### Fixed

@@ -101,11 +101,16 @@ test("a scheduled fire draws Claude Code's block, without the provenance line", 
 		"[scheduled task 91e7u72h \u00b7 Every minute \u00b7 started by the schedule, not typed by the user; it fires the next tick on its own, so do not call schedule_wakeup]\nprint hi",
 		{ kind: "cron", jobId: "91e7u72h", cron: "* * * * *", prompt: "print hi" },
 	);
-	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
-	assert.match(text, /\u273b Running scheduled task \u00b7 \d{1,2}:\d{2}(am|pm)/);
-	assert.match(text, /print hi/);
-	assert.ok(!text.includes("[scheduled task"), "the envelope is for the model only");
-	assert.ok(!text.includes("schedule_wakeup"), "and so is the instruction");
+	const collapsed = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.equal(collapsed.lines.length, 1, "one line, always");
+	assert.match(collapsed.text, /\u273b Running scheduled task \u00b7 \d{1,2}:\d{2}(am|pm)/);
+	assert.match(collapsed.text, /Every minute/);
+	assert.ok(!collapsed.text.includes("print hi"), "the task is behind the expansion");
+	assert.ok(!collapsed.text.includes("[scheduled task"), "the envelope is for the model only");
+	assert.ok(!collapsed.text.includes("schedule_wakeup"), "and so is the instruction");
+	const expanded = render(renderers.get("pi-cc-loop-tick"), message, true).text;
+	assert.match(expanded, /print hi/);
+	assert.match(expanded, /Schedule[\s\S]*Every minute/);
 });
 
 test("a self-paced tick is a loop, not a scheduled task", async () => {
@@ -132,14 +137,13 @@ test("the expanded block names the job, and collapsed hides long prompts", async
 		prompt: long,
 	});
 
-	const collapsed = render(renderer, message, false).text;
-	assert.match(collapsed, /line 3/);
-	assert.ok(!collapsed.includes("line 10"), "collapsed stops after three lines");
-	assert.match(collapsed, /\+7 more lines/);
+	const collapsed = render(renderer, message, false);
+	assert.equal(collapsed.lines.length, 1, "one line, always");
+	assert.ok(!collapsed.text.includes("line 1"), "the prompt is behind the expansion");
 
 	const expanded = render(renderer, message, true).text;
 	assert.match(expanded, /line 10/);
-	assert.match(expanded, /job x/);
+	assert.match(expanded, /Job[\s\S]*x[\s\S]*scheduled by \/loop/, "the expanded card names the job");
 });
 
 test("the reason for the delay rides in the header", async () => {
@@ -151,7 +155,7 @@ test("the reason for the delay rides in the header", async () => {
 		reason: "CI run still going",
 	});
 	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
-	assert.match(text, /\u273b loop #7 \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 CI run still going/);
+	assert.match(text, /\u273b loop #7 \u00b7 CI run still going \u00b7 \d{1,2}:\d{2}(am|pm)/);
 });
 
 test("with compactMessages off, a scheduled fire is still a scheduled task, not a loop tick", async () => {
@@ -217,4 +221,44 @@ test("with compactMessages off, an emoji/CJK/ANSI prompt header stays within 80 
 		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
 		(await loadModule("config.ts")).invalidateConfig();
 	}
+});
+
+test("the regular screen offers the expand keybinding, never a click", async () => {
+	const { renderers } = makeHarness();
+	const { setNotificationTui } = await loadModule("render.ts");
+	setNotificationTui({ mode: "regular" });
+	const message = tickMessage("[loop tick #7 \u00b7 ...]\nwatch CI", { kind: "wakeup", jobId: "abc", prompt: "watch CI" });
+	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.match(text, /ctrl\+o to show more/);
+	assert.ok(!text.includes("click to show more"), "the regular screen delivers no mouse events");
+});
+
+test("fullscreen says click to show more, and a click expands the card", async () => {
+	const { renderers } = makeHarness();
+	const { setNotificationTui } = await loadModule("render.ts");
+	const { theme } = makeTheme();
+	setNotificationTui({ mode: "fullscreen" });
+	const message = tickMessage("[scheduled task x \u00b7 Every minute \u00b7 y]\nprint hi", {
+		kind: "cron", jobId: "x", cron: "* * * * *", prompt: "print hi",
+	});
+	const component = renderers.get("pi-cc-loop-tick")(message, { expanded: false, outputPad: 1 }, theme);
+	const collapsed = component.render(100);
+	const expandedTitle = collapsed.join("\n");
+	assert.match(expandedTitle, /click to show more/);
+
+	const event = (type) => ({ type, button: "left", x: 1, y: 0, screenX: 1, screenY: 0, width: 100, height: collapsed.length, shift: false, alt: false, ctrl: false });
+	assert.equal(component.handleMouse(event("click"))?.handled, true);
+	assert.match(component.render(100).join("\n"), /\u251c Schedule/);
+	component.handleMouse(event("click"));
+	assert.ok(!component.render(100).join("\n").includes("\u251c Schedule"), "a second click collapses it");
+	setNotificationTui({ mode: "regular" });
+});
+
+test("a missed-jobs card warns and lists what was late", async () => {
+	const { renderers } = makeHarness();
+	const message = tickMessage("[loop \u00b7 missed jobs]\njob a\njob b", { missed: true });
+	const { text, lines } = render(renderers.get("pi-cc-loop-tick"), message, false);
+	assert.equal(lines.length, 1, "one line, always");
+	assert.match(text, /\u26a0 loop \u00b7 missed jobs \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 2 jobs/);
+	assert.ok(!text.includes("job a"), "the list is behind the expansion");
 });

@@ -132,15 +132,18 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 定时触发只显示任务本身，给模型看的信封不上屏：
 
 ```text
-✻ Running scheduled task · 9:52pm
-   print hi
+✻ Running scheduled task · Every minute · 9:52pm · ctrl+o to show more
 
-✻ loop #3 · 9:53pm · watching CI run
-   check the deploy
+✻ loop #3 · watching CI run · 9:53pm · self-paced · ctrl+o to show more
 ```
 
-固定间隔按"定时任务"呈现；只有自选间隔叫 loop，表头带上模型给的 `reason`。折叠时正文最多 3 行，
-Ctrl+O 展开后多一行元信息（任务 id、节奏）。`compactMessages` 关闭时回到旧的带底色卡片。
+固定间隔按"定时任务"呈现；只有自选间隔叫 loop，表头带上模型给的 `reason`。折叠时只有一行，任务正文在展开里。
+展开是工具卡底色的段落树：`Schedule`（cron 节奏）、`Late`、`Reason`、`Job`（任务 id 与来源）、`Prompt`。
+
+按宿主屏幕模式给不同的展开入口，用的都是 Pi 原生接口：fullscreen 提示 `click to show more` 并支持左键点击展开/收起
+（`Component.handleMouse`，指针停在提示上时提亮）；regular 提示 `ctrl+o to show more`（`options.keyHint("app.tools.expand", …)`），因为主屏不投递鼠标事件。
+Ctrl+O 走宿主自己的 `CustomMessageComponent.setExpanded`，两种模式都有效。`missed` 列表用警告色和 `⚠`。
+`compactMessages` 关闭时回到旧的带底色卡片。
 
 ## 设置
 
@@ -222,7 +225,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 ## 兼容性
 
 - Node.js `>=22.19.0`
-- Pi 1.5.2（本轮修复与回归验收通过）；Pi 1.5.1 及更早版本本轮未重新验收
+- Pi 1.6.0（本轮修复与回归验收通过）；Pi 1.5.2 及更早版本本轮未重新验收
 - `pi-cc-monitor` 可选：自定步调 loop 需要等外部事件时会用它，loop 结束时连带停止；两者通过 `pi.events` 通信
 - 与 `pi-cc-extensions` 共存。本扩展不写其他插件的配置文件；旧版本在 `pi-cc-extensions.json` 里加过的
   `cron_create`、`cron_delete`、`cron_list`、`schedule_wakeup` 这几条 `excludeRenderers` 可以删掉

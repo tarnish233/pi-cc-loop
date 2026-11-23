@@ -18,8 +18,17 @@
  * fails when the two copies drift apart.
  */
 
-import { keyHint, type Theme } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { keyHint, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import {
+	Box,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+	type Component,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
 /** Flatten a custom message body to plain text. */
 export function contentText(content: unknown): string {
@@ -130,36 +139,349 @@ function expandHint(): string {
 	}
 }
 
-/**
- * Draw a quiet event block: one coloured header line, then an indented body.
- *
- * Collapsed shows at most `maxBodyLines` body lines (plus a "+N more" note);
- * expanded shows the whole body and the metadata line.
- */
-export function renderBlock(options: {
-	header: string;
-	body: string[];
-	meta?: string[];
-	expanded: boolean;
-	outputPad: number;
-	theme: Theme;
-	maxBodyLines?: number;
-}): Container {
-	const { header, body, meta, expanded, outputPad, theme } = options;
-	const limit = options.maxBodyLines ?? 3;
-	const container = new Container();
-	container.addChild(new Text(header, outputPad, 0));
+// ------------------------------------------------------- notification card
 
-	const indent = outputPad + 2;
-	const shown = expanded ? body : body.slice(0, limit);
-	for (const line of shown) {
-		container.addChild(new Text(theme.fg("customMessageText", line), indent, 0));
+/**
+ * The card pi-cc draws for an asynchronous fact: one collapsed line, and an
+ * expanded `├`/`│`/`└` tree inside the tool-card background Pi already has
+ * theme slots for. Pi's own screen mode decides the affordance: fullscreen
+ * delivers mouse events, the regular screen only has the expand keybinding.
+ */
+
+let screenMode: "regular" | "fullscreen" | undefined;
+
+/**
+ * SGR mouse packets, as `pi-cc-extensions` parses them (MIT). Copied rather than
+ * imported: the two packages ship separately and must not depend on each other.
+ */
+type SgrMousePacket = { code: number; col: number; row: number; final: "M" | "m" };
+
+function parseSgrMousePackets(data: string): SgrMousePacket[] | null {
+	const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+	const packets: SgrMousePacket[] = [];
+	let offset = 0;
+	for (const match of data.matchAll(pattern)) {
+		if (match.index !== offset) return null;
+		offset = match.index + match[0].length;
+		packets.push({ code: Number(match[1]), col: Number(match[2]), row: Number(match[3]), final: match[4] as "M" | "m" });
 	}
-	if (!expanded && body.length > shown.length) {
-		container.addChild(new Text(theme.fg("dim", `+${body.length - shown.length} more lines`), indent, 0));
+	return packets.length > 0 && offset === data.length ? packets : null;
+}
+
+/** Pointer motion with no button held (DECSET 1003 reports 35); a drag is not a hover. */
+function isIdleMotion(packet: SgrMousePacket): boolean {
+	return packet.final === "M" && (packet.code & 32) !== 0 && (packet.code & ~(4 | 8 | 16 | 32)) === 3;
+}
+
+/** A wheel tick scrolls the transcript under a still pointer, so the hover is stale too. */
+function isWheel(packet: SgrMousePacket): boolean {
+	return packet.final === "M" && (packet.code & 64) !== 0;
+}
+
+/** The one card the pointer is on right now; `move` alone can never report leaving it. */
+let hoveredCard: NotificationCardView | undefined;
+
+type HoverHost = { tui: any; original: (data: string) => unknown; wrapper: (data: string) => unknown };
+let hoverHost: HoverHost | undefined;
+
+/**
+ * Pi delivers `move` only to the component under the pointer, so a card never
+ * learns that the pointer left and its highlight would stick to every card the
+ * pointer crossed. Intercepting the fullscreen viewport input is what
+ * pi-cc-extensions does for the same reason: clear the highlight first, then let
+ * the official dispatch light whichever card the pointer is really on.
+ */
+function installHover(tui: any): void {
+	if (hoverHost?.tui === tui) return;
+	releaseNotificationHover();
+	const original = tui?.handleViewportInput;
+	// The regular screen has no viewport input: nothing to intercept.
+	if (typeof original !== "function") return;
+	const wrapper = function (this: unknown, data: string): unknown {
+		// Keystrokes and paste are the common case; skip the scan for them.
+		if (!data.includes("\u001b[<")) return Reflect.apply(original, this, [data]);
+		const packets = parseSgrMousePackets(data);
+		if (!packets?.some((packet) => isIdleMotion(packet) || isWheel(packet))) {
+			return Reflect.apply(original, this, [data]);
+		}
+		const previous = hoveredCard;
+		if (previous) previous.setHintHovered(false);
+		hoveredCard = undefined;
+		const result = Reflect.apply(original, this, [data]);
+		// The pointer left every card: nothing re-rendered, so ask for it here.
+		if (previous && !hoveredCard) tui.requestRender?.();
+		return result;
+	};
+	tui.handleViewportInput = wrapper;
+	hoverHost = { tui, original, wrapper };
+}
+
+/** Stop intercepting input; `/reload` and session end must not leave a stale wrapper. */
+export function releaseNotificationHover(): void {
+	const host = hoverHost;
+	hoverHost = undefined;
+	hoveredCard = undefined;
+	if (host && host.tui.handleViewportInput === host.wrapper) host.tui.handleViewportInput = host.original;
+}
+
+/** Pi hands its TUI to an extension through the setWidget factory (ExtensionUIContext). */
+export function setNotificationTui(tui: unknown): void {
+	const mode = (tui as { mode?: unknown } | undefined)?.mode;
+	screenMode = mode === "fullscreen" || mode === "regular" ? mode : undefined;
+	if (screenMode === "fullscreen") installHover(tui);
+}
+
+export type NotificationTone = "success" | "error" | "warning" | "accent";
+
+export interface NotificationSection {
+	heading: string;
+	/** Plain, unwrapped body lines; the card wraps them to the column it has. */
+	lines: string[];
+	color?: ThemeColor;
+}
+
+export interface NotificationCard {
+	title: string;
+	id?: string;
+	stamp?: string;
+	/** Short facts after the stamp, for example an exit code and a duration. */
+	stats?: string[];
+	/** What the card is about, written right after the id: a description or a reason. */
+	subtitle?: string;
+	tone: NotificationTone;
+	/** A finished thing, not an in-progress batch: ■ instead of ✻ for a neutral tone. */
+	terminal?: boolean;
+	sections: NotificationSection[];
+}
+
+const CARD_ICON: Record<NotificationTone, string> = {
+	success: "\u2713",
+	error: "\u2717",
+	warning: "\u26a0",
+	accent: "\u273b",
+};
+
+/**
+ * The neutral outcome marker. `pi-cc`'s dark theme maps every accent-ish UI slot
+ * (`accent`, `borderAccent`, `mdLink`, `customMessageLabel`) to the same blue, so
+ * the only distinct non-status hue left is this one. A theme that leaves it
+ * undefined falls back to `accent`.
+ */
+const QUIET_OUTCOME_COLOR: ThemeColor = "syntaxFunction";
+
+/**
+ * `accent` is the in-progress or verdict-less card, so it must not sit on the
+ * success background: a stopped monitor on a green card reads as a win.
+ */
+const CARD_BG: Record<NotificationTone, "toolSuccessBg" | "toolErrorBg" | "toolPendingBg"> = {
+	success: "toolSuccessBg",
+	error: "toolErrorBg",
+	warning: "toolPendingBg",
+	accent: "toolPendingBg",
+};
+
+/**
+ * Click expansion is remembered per message: CustomMessageComponent.rebuild()
+ * re-runs the renderer on every invalidate and theme change, so an instance
+ * field would snap back. The host's own Ctrl+O changes `base`; a local value
+ * recorded against the previous `base` is then stale and discarded.
+ */
+const cardExpansion = new WeakMap<object, { base: boolean; expanded: boolean }>();
+
+/** The host's `options.keyHint`, minus its keybinding-id union. */
+export type KeyHintFn = (keybinding: any, description: string) => string;
+
+function collapsedHint(keyHint: KeyHintFn | undefined): string {
+	if (screenMode === "fullscreen") return "click to show more";
+	try {
+		const hint = keyHint?.("app.tools.expand", "to show more");
+		if (hint) return hint;
+	} catch {
+		// A host without bound keybindings still has the default expand key.
 	}
-	if (expanded && meta?.length) {
-		container.addChild(new Text(theme.fg("dim", meta.join(" · ")), indent, 0));
+	return "ctrl+o to show more";
+}
+
+const RAIL = "\u2502 ";
+const LAST_INDENT = "  ";
+
+/** Section tree: `├`/`└` corners, accent-bold headings, body behind the rail. */
+function detailRows(sections: NotificationSection[], width: number, theme: Theme): string[] {
+	const room = Math.max(1, width - RAIL.length);
+	const rows: string[] = [];
+	sections.forEach((section, index) => {
+		const last = index === sections.length - 1;
+		const bodyPrefix = last ? LAST_INDENT : RAIL;
+		if (index) rows.push(theme.fg("dim", "\u2502"));
+		const heading = wrapTextWithAnsi(theme.fg("accent", theme.bold(section.heading)), room);
+		heading.forEach((line, lineIndex) => {
+			const corner = lineIndex ? bodyPrefix : `${last ? "\u2514" : "\u251c"} `;
+			rows.push(`${theme.fg("dim", corner)}${line}`);
+		});
+		for (const source of section.lines) {
+			for (const line of wrapTextWithAnsi(source, room)) {
+				rows.push(
+					line
+						? `${theme.fg("dim", bodyPrefix)}${theme.fg(section.color ?? "toolOutput", line)}`
+						: theme.fg("dim", last ? "" : "\u2502"),
+				);
+			}
+		}
+	});
+	return rows;
+}
+
+class NotificationCardView implements Component {
+	private expanded: boolean;
+	private hintHovered = false;
+	/** Columns of the collapsed hint, recorded by the last render. */
+	private hintStart = 0;
+	private hintEnd = 0;
+
+	constructor(
+		private readonly message: object,
+		private readonly card: NotificationCard,
+		private readonly theme: Theme,
+		private readonly pad: number,
+		private readonly base: boolean,
+		private readonly hint: string,
+	) {
+		const local = cardExpansion.get(message);
+		this.expanded = local?.base === base ? local.expanded : base;
+		if (local && local.base !== base) cardExpansion.delete(message);
 	}
-	return container;
+
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		// The hint is not drawn while expanded: leaving the flag set painted it
+		// bright when the card collapsed again with the pointer somewhere else.
+		this.setHintHovered(false);
+		cardExpansion.set(this.message, { base: this.base, expanded });
+	}
+
+	/** Any left click toggles; a move over the hint is what lights it. */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "click" && event.button === "left") {
+			this.setExpanded(!this.expanded);
+			return { handled: true, render: true };
+		}
+		if (event.type !== "move") return undefined;
+		return this.setHintHovered(
+			!this.expanded && event.y === 0 && event.x >= this.hintStart && event.x < this.hintEnd,
+		)
+			? { handled: true, render: true }
+			: undefined;
+	}
+
+	/** Only the card the pointer is on stays lit; the input wrapper clears the rest. */
+	setHintHovered(hovered: boolean): boolean {
+		if (this.hintHovered === hovered) return false;
+		this.hintHovered = hovered;
+		if (hovered) hoveredCard = this;
+		else if (hoveredCard === this) hoveredCard = undefined;
+		return true;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): readonly string[] {
+		return this.expanded ? this.expandedRows(width) : this.collapsedRows(width);
+	}
+
+	/** A card with no state of its own (a manual stop, a terminated command, a
+	 * closed socket) gets a violet square: a hue of its own, not one of the four
+	 * status colours and not the blue of a live batch. */
+	private isQuietOutcome(): boolean {
+		return this.card.terminal === true && this.card.tone === "accent";
+	}
+
+	/** The icon colour, and the title colour with it: a failed card reads red. */
+	private toneColor(): ThemeColor {
+		return this.isQuietOutcome() ? QUIET_OUTCOME_COLOR : this.card.tone;
+	}
+
+	private icon(): string {
+		return this.theme.fg(this.toneColor(), this.isQuietOutcome() ? "\u25a0" : CARD_ICON[this.card.tone]);
+	}
+
+	/** Title, id, then the facts a reader needs without expanding. */
+	private collapsedHeader(): string {
+		const theme = this.theme;
+		const card = this.card;
+		const sep = theme.fg("dim", " \u00b7 ");
+		const lead = [theme.fg(this.toneColor(), card.title), ...(card.id ? [theme.fg("muted", card.id)] : [])].join(" ");
+		const facts = [
+			...(card.subtitle ? [theme.fg("dim", card.subtitle)] : []),
+			...(card.stamp ? [theme.fg("muted", card.stamp)] : []),
+			...(card.stats ?? []).map((stat) => theme.fg("dim", stat)),
+		];
+		return `${this.icon()} ${facts.length ? `${lead}${sep}${facts.join(sep)}` : lead}`;
+	}
+
+	/** The expanded title drops every fact: the sections below carry them. */
+	private expandedHeader(): string {
+		const theme = this.theme;
+		const card = this.card;
+		const lead = [theme.fg(this.toneColor(), card.title), ...(card.id ? [theme.fg("muted", card.id)] : [])].join(" ");
+		return `${this.icon()} ${lead}`;
+	}
+
+	/** One line, always: the sections are one click or one Ctrl+O away. */
+	private collapsedRows(width: number): string[] {
+		const theme = this.theme;
+		const rowWidth = Math.max(1, width);
+		// The padding never eats the only column there is.
+		const indent = " ".repeat(Math.min(this.pad, rowWidth - 1));
+		const hint = ` ${theme.fg("dim", "\u00b7")} ${theme.fg(this.hintHovered ? "text" : "dim", this.hint)}`;
+		const head = `${indent}${this.collapsedHeader()}`;
+		// The hint keeps its columns; the title gives way with an ellipsis. A hard cut
+		// through "show more" reads like a bug, not like a narrow terminal.
+		const hintWidth = visibleWidth(hint);
+		const headRoom = Math.max(1, rowWidth - hintWidth);
+		const line =
+			hintWidth < rowWidth
+				? `${truncateToWidth(head, headRoom, "\u2026")}${hint}`
+				: truncateToWidth(`${head}${hint}`, rowWidth, "");
+		// 0-based columns of the hint inside this row, for the move hit test.
+		this.hintStart = Math.max(0, visibleWidth(line) - hintWidth);
+		this.hintEnd = visibleWidth(line);
+		return [line];
+	}
+
+	private expandedRows(width: number): readonly string[] {
+		const theme = this.theme;
+		const columns = Math.max(1, width);
+		// The frame never eats the only column there is.
+		const pad = Math.min(this.pad, Math.max(0, Math.floor((columns - 1) / 2)));
+		const box = new Box(pad, 1, (line) => theme.bg(CARD_BG[this.card.tone], line));
+		box.addChild({
+			invalidate() {},
+			// Headings wrap themselves; the section tree already wrapped its body.
+			render: (inner: number) => {
+				const room = Math.max(1, inner);
+				return [
+					...wrapTextWithAnsi(this.expandedHeader(), room),
+					...detailRows(this.card.sections, room, theme),
+				].map((line) => truncateToWidth(line, room, ""));
+			},
+		});
+		return box.render(columns);
+	}
+}
+
+/** Build the card component. `compactMessages` off keeps the padded legacy card. */
+export function renderNotificationCard(
+	message: object,
+	options: { expanded: boolean; outputPad: number; keyHint?: KeyHintFn },
+	theme: Theme,
+	card: NotificationCard,
+): Component {
+	return new NotificationCardView(
+		message,
+		card,
+		theme,
+		Math.max(0, Math.floor(Number(options.outputPad) || 0)),
+		options.expanded,
+		collapsedHint(options.keyHint),
+	);
 }
