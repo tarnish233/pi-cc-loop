@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-24
+
+### Changed
+- Replace the shared /pi_cc command with /loop_settings, showing only Loop's message style and footer controls.
+- Save Loop preferences in pi-cc-loop.json independently of Monitor. When the new file is absent, inherit valid Loop keys from pi-cc.json and copy them on the first save without modifying the legacy file; retain existing environment overrides.
+- Request a follow-up model response for recurring-job expiry, delivery failures and self-paced-chain stops. Preserve Esc cancellation without restarting the interrupted reply, and keep stopped chains protected from late re-arms.
+- Stop synchronizing config.ts and settings.ts across packages; only rendering, task-panel and log-tail sources remain shared with Monitor.
+
+### Fixed
+- Fit every settings-panel row to narrow terminal widths while preserving Pi's cached render arrays and save-failure rollback.
+
 ## [0.12.4] - 2026-11-23
 
 ### Fixed

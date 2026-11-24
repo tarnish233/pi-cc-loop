@@ -34,12 +34,12 @@ test("two Pi processes changing different settings retain both changes", async (
 	const file = path.join(dir, "pi-cc.json");
 	const ready = path.join(dir, "writer-ready");
 	const previous = process.env.PI_CC_CONFIG_FILE;
-	fs.writeFileSync(file, JSON.stringify({ draft: true, footer: true }));
+	fs.writeFileSync(file, JSON.stringify({ compactMessages: true, footer: true }));
 	const script = `const fs=require('node:fs'),os=require('node:os');
 		const [file,ready]=process.argv.slice(1),lock=file+'.write.lock';
 		fs.writeFileSync(lock,JSON.stringify({pid:process.pid,hostname:os.hostname()}));
 		fs.writeFileSync(ready,'ready');
-		setTimeout(()=>{fs.writeFileSync(file,JSON.stringify({draft:true,footer:false}));fs.unlinkSync(lock)},250);`;
+		setTimeout(()=>{fs.writeFileSync(file,JSON.stringify({compactMessages:true,footer:false}));fs.unlinkSync(lock)},250);`;
 	const child = spawn(process.execPath, ["-e", script, file, ready], { stdio: "ignore" });
 	try {
 		const until = Date.now() + 3000;
@@ -47,9 +47,9 @@ test("two Pi processes changing different settings retain both changes", async (
 		assert.ok(fs.existsSync(ready), "the other process holds the writer lock");
 		process.env.PI_CC_CONFIG_FILE = file;
 		config.invalidateConfig();
-		config.saveConfig({ draft: false });
+		config.saveConfig({ compactMessages: false });
 		await new Promise((resolve) => child.once("exit", resolve));
-		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { draft: false, footer: false });
+		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { compactMessages: false, footer: false });
 	} finally {
 		if (child.exitCode === null) child.kill();
 		if (previous === undefined) delete process.env.PI_CC_CONFIG_FILE;
@@ -63,7 +63,7 @@ test("an unreadable settings file is never rewritten: the save rejects and every
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-config-lock-"));
 	const file = path.join(dir, "pi-cc.json");
 	const previous = process.env.PI_CC_CONFIG_FILE;
-	const bytes = `${JSON.stringify({ footer: true, draft: false, futureSetting: "must survive" }, null, 2)}\n`;
+	const bytes = `${JSON.stringify({ footer: true, compactMessages: false, futureSetting: "must survive" }, null, 2)}\n`;
 	fs.writeFileSync(file, bytes);
 	fs.chmodSync(file, 0o200);
 	try {
@@ -96,8 +96,8 @@ test("missing and malformed files still fall back to a fresh write", () => {
 		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { footer: false }, "a missing file is created");
 		fs.writeFileSync(file, "{broken");
 		config.invalidateConfig();
-		config.saveConfig({ draft: false });
-		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { draft: false }, "malformed JSON is rebuilt, as before");
+		config.saveConfig({ compactMessages: false });
+		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { compactMessages: false }, "malformed JSON is rebuilt, as before");
 		assert.equal(fs.existsSync(`${file}.write.lock`), false);
 	} finally {
 		if (previous === undefined) delete process.env.PI_CC_CONFIG_FILE;

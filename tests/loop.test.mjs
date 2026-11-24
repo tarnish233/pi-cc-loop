@@ -152,12 +152,12 @@ test("stop and status use short management rules instead of the full loop tutori
 
 test("settings and help stay in code: they are not loop requests", async () => {
 	const h = await start(makeHarness());
-	await h.commands.get("pi_cc").handler("footer off", h.ctx);
+	await h.commands.get("loop_settings").handler("footer off", h.ctx);
 	assert.equal(h.sent.length, 0, "no message to the model");
 	assert.match(h.notifications.at(-1).message, /Footer summary disabled/);
 	await loop(h).handler("settings", h.ctx);
 	assert.equal(h.sent.length, 0);
-	assert.match(h.notifications.at(-1).message, /under \/pi_cc/);
+	assert.match(h.notifications.at(-1).message, /under \/loop_settings/);
 
 	await loop(h).handler("help", h.ctx);
 	assert.equal(h.sent.length, 0);
@@ -254,12 +254,13 @@ test("a failed loop.md/maintenance delivery retries with the full body", async (
 	makeDue(h, job.id);
 	h.scheduler().tick();
 	assert.ok(h.scheduler().get(job.id), "the rejected one-shot remains scheduled");
-	assert.equal(h.sent.length, 0);
+	assert.equal(h.sent.filter((entry) => entry.message.customType === "pi-cc-loop-tick").length, 0);
 
 	h.scheduler().tick();
-	assert.equal(h.sent.length, 1);
-	assert.match(textOf(h.sent[0]), /scheduled maintenance pass/);
-	assert.doesNotMatch(textOf(h.sent[0]), /instructions established earlier/, "the retry cannot refer to a body Pi never accepted");
+	const tick = h.sent.find((entry) => entry.message.customType === "pi-cc-loop-tick");
+	assert.ok(tick);
+	assert.match(textOf(tick), /scheduled maintenance pass/);
+	assert.doesNotMatch(textOf(tick), /instructions established earlier/, "the retry cannot refer to a body Pi never accepted");
 	assert.equal(h.scheduler().get(job.id), undefined);
 });
 

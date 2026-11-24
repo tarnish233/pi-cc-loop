@@ -22,7 +22,7 @@ export function makeHarness(workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-
 	const toolRenderers = [];
 	const handlers = new Map();
 	// Pi runs every handler an extension registered for an event, so more
-	// than one can exist (the /pi_cc claim adds a second session_shutdown).
+	// than one can exist, and none may be dropped by the test harness.
 	const handlerLists = new Map();
 	const busEvents = [];
 	const sent = [];

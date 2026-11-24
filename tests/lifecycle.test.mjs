@@ -493,8 +493,9 @@ test("a tick whose chain was retired before its run started cannot re-arm", asyn
 	await runTurn(h);
 	makeDue(h, chain.id);
 	h.scheduler().tick(); // the tick is queued; the host may compact before before_agent_start
+	const tick = h.sent.at(-1);
 	await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
-	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx); // the late run start
+	await h.handlers.get("before_agent_start")(runEvent(tick), h.ctx); // the late run start
 	for (const prompt of ["watch CI", "watch the CI run"]) {
 		await assert.rejects(() => wakeup(h, { delaySeconds: 600, prompt }), /was stopped/);
 	}

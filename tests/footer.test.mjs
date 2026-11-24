@@ -114,7 +114,7 @@ test("stopping a loop clears the footer", async () => {
 	assert.deepEqual(h.statusCalls.at(-1), { key: "loop", text: undefined });
 });
 
-test("/pi_cc footer on|off turns the footer summary off for every pi-cc package", async () => {
+test("/loop_settings footer on|off turns the footer summary off for Loop", async () => {
 	const configFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-footer-")), "pi-cc.json");
 	process.env.PI_CC_CONFIG_FILE = configFile;
 	try {
@@ -122,15 +122,15 @@ test("/pi_cc footer on|off turns the footer summary off for every pi-cc package"
 		await createCron(h, { cron: "*/5 * * * *", prompt: "check the deploy" });
 		schedule(h, h.scheduler().list()[0].id, 3 * 60_000);
 
-		await h.commands.get("pi_cc").handler("footer off", h.ctx);
+		await h.commands.get("loop_settings").handler("footer off", h.ctx);
 		assert.equal(h.status("loop"), undefined);
 		assert.equal(statusFile(configFile).footer, false);
-		assert.ok(h.busEvents.some((event) => event.channel === "pi-cc:config"), "the other packages are told");
+		assert.ok(h.busEvents.some((event) => event.channel === "pi-cc-loop:config"), "Loop is told");
 		const calls = h.statusCalls.length;
 		h.scheduler().tick();
 		assert.equal(h.statusCalls.length, calls, "and nothing is repainted while it is off");
 
-		await h.commands.get("pi_cc").handler("footer on", h.ctx);
+		await h.commands.get("loop_settings").handler("footer on", h.ctx);
 		assert.equal(h.status("loop"), "1 loop · next 3m");
 		assert.equal(statusFile(configFile).footer, true);
 	} finally {

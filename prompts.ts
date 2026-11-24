@@ -214,7 +214,8 @@ cron_create re-runs a prompt at fixed wall-clock intervals. To watch a log file,
 ## Runtime behavior
 Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: a recurring job runs up to half its period late (max 30 min), a "*/5 * * * *" job keeps its 5 minute cadence, late by that offset rather than early, and a one-shot job landing on :00 or :30 runs up to 90 s early. The result of this tool and of cron_list gives each job's actual next run time: when you tell the user when a job will run, give that time, not the minute in the cron expression.
 Recurring jobs auto-expire after 7 days by default \u2014 they fire one final time, then are deleted. The extension can change or disable this limit. Tell the user the actual expiry policy reported by this tool when scheduling recurring jobs.
-Returns a job ID you can pass to cron_delete.`;
+Returns a job ID you can pass to cron_delete.
+Ending, failing or stopping a job always wakes the model. There is no parameter to disable that.`;
 
 /**
  * Appended to the result of a recurring `cron_create` in a plain turn (not a
@@ -246,7 +247,8 @@ Do not poll work Pi/Monitor will report: schedule a 1200-1800s fallback so the l
 A /loop with an interval is a cron job: it fires itself, and calling this from its tick would run the prompt twice. Cancel that kind with \`cron_delete\`.
 
 ## The reason field
-One short sentence on what you chose and why, shown to the user: "watching CI run" beats "waiting".`;
+One short sentence on what you chose and why, shown to the user: "watching CI run" beats "waiting".
+Ending, failing or stopping this loop always wakes the model. There is no parameter to disable that.`;
 
 export const CRON_CREATE_SNIPPET = "Schedule a prompt on a 5-field cron expression, recurring or one-shot";
 export const CRON_DELETE_SNIPPET = "Cancel a scheduled job or a self-paced /loop by id";

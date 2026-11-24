@@ -373,7 +373,9 @@ test("both load orders expose exactly one /cc-tasks and open a native overlay wh
 		runtime.loadBoth(order);
 		await runtime.start();
 		assert.deepEqual(ccTasksCommands(runtime), ["cc-tasks"], `${order.join(" -> ")}: one unambiguous command`);
-		assert.equal(runtime.commands.get("pi_cc")?.description?.includes("settings"), true, "/pi_cc still exists");
+		assert.equal(runtime.commands.get("loop_settings")?.description?.includes("settings"), true, "/loop_settings stays available");
+		assert.ok(runtime.commands.get("monitor_settings"), "/monitor_settings is independent of load order");
+		assert.ok(!runtime.commands.has("pi_cc"), "there is no shared settings command");
 		assert.ok(runtime.commands.get("loop"), "/loop semantics stay unchanged");
 
 		const armed = await armMonitor(runtime, {

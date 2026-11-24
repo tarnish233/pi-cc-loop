@@ -57,7 +57,7 @@ import {
 	loopCommandGuidelines,
 } from "./prompts.ts";
 import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
-import { CONFIG_CHANNEL, registerPiCcCommand } from "./settings.ts";
+import { CONFIG_CHANNEL, registerSettingsCommand } from "./settings.ts";
 import { registerTaskProvider, type TaskDetail, type TaskItem, type TaskStopResult } from "./tasks.ts";
 import {
 	DEFAULT_TIMING,
@@ -230,14 +230,17 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		timing: timingConfig,
 		maxAgeMs,
 		onExpire: (job) => {
+			const text = `Loop ${job.id} ended: it ran its final time and recurring jobs expire after ${maxAgeDays()} days. Do not reschedule it.`;
 			const ctx = lastCtx;
-			if (ctx) notify(ctx, `loop ${job.id} ran its final time: recurring jobs expire after ${maxAgeDays()} days`);
+			if (ctx) notify(ctx, text, "info");
+			wakeOutcome(text);
 		},
 		onDispatchError: (job, error) => {
-			const ctx = lastCtx;
-			if (!ctx) return;
 			const outcome = job.kind === "wakeup" || !job.recurring ? "it remains due for retry" : "this tick was skipped without consuming a fire";
-			notify(ctx, `loop ${job.id}: delivery failed; ${outcome} (${error.message})`, "warning");
+			const text = `Loop ${job.id} failed to deliver (${error.message}). ${outcome}. Do not assume this tick ran.`;
+			const ctx = lastCtx;
+			if (ctx) notify(ctx, text, "warning");
+			wakeOutcome(text);
 		},
 		onScan: (now) => {
 			durable?.maintain(now);
@@ -375,8 +378,23 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		} catch {
 			// a listener must never break the loop
 		}
+		const text = `Loop ${chain.id} stopped (${reason}). Any Monitor bound to this loop was stopped with it. Do not reschedule this loop or re-arm those monitors unless the user asks.`;
 		const ctx = lastCtx;
-		if (ctx && !options.silent) notify(ctx, `loop ${chain.id} ended: ${reason}`, "info");
+		if (ctx && !options.silent) notify(ctx, text, "info");
+		// Esc already cancelled the reply; waking would restart it. Every other stop wakes.
+		if (!options.silent) wakeOutcome(text);
+	}
+
+	/** End, failure and stop have no launch parameter that can silence them. */
+	function wakeOutcome(text: string): void {
+		try {
+			pi.sendMessage(
+				{ customType: "pi-cc-loop-outcome", content: text, display: true, details: { ended: true } },
+				{ deliverAs: "followUp", triggerTurn: true },
+			);
+		} catch {
+			// a stale session must not break stop or expiry
+		}
 	}
 
 	function ensureDurable(): DurableRuntime {
@@ -617,14 +635,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const raw = args.trim();
 			const [head] = raw.split(/\s+/);
 
-			// Settings moved to /pi_cc: these words stay recognized so they cannot
-			// start a loop by mistake (everything else is a loop request).
+			// Keep old settings words from starting a loop by mistake.
 			switch ((head ?? "").toLowerCase()) {
 				case "footer":
 				case "statusline":
 				case "settings":
 				case "config":
-					notify(ctx, "Settings live under /pi_cc now: /pi_cc footer on|off, /pi_cc messages on|off", "info");
+					notify(ctx, "Settings live under /loop_settings: /loop_settings footer on|off, /loop_settings messages on|off", "info");
 					return;
 				case "help":
 				case "--help":
@@ -684,7 +701,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			"/loop [interval] <prompt>   run <prompt> every <interval> (e.g. 30s, 5m, 2h, 1d)",
 			"/loop <prompt>              self-paced: the agent picks the next delay",
 			"/loop [interval]            the .pi/loop.md tasks, or the built-in maintenance prompt",
-			"/pi_cc                      pi-cc settings, one page per plugin",
+			"/loop_settings              Loop settings: message style and footer summary",
 			"",
 			"Esc on a self-paced loop's own turn cancels that loop; fixed-interval loops keep running.",
 			"Flags: --durable  write the job to .pi/scheduled_tasks.json so it survives a restart.",
@@ -839,11 +856,9 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		stop: stopTask,
 	});
 
-	// The shared pi-cc settings and their /pi_cc command. The first pi-cc
-	// package to load registers it; this one re-claims its own claim on /reload.
-	registerPiCcCommand(pi, "pi-cc-loop");
+	registerSettingsCommand(pi);
 
-	// A setting changed (here or in another pi-cc package): the footer follows.
+	// A Loop setting changed: the footer follows.
 	pi.events.on(CONFIG_CHANNEL, () => {
 		invalidateConfig();
 		refreshStatus();
@@ -1410,7 +1425,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				return { render: () => [], invalidate() {} };
 			});
 		}
-		// Another process may have edited the shared settings file.
+		// Another process may have edited the Loop settings file.
 		invalidateConfig();
 		durable?.stop();
 		restoreState(ctx, (event as { reason?: string } | undefined)?.reason);

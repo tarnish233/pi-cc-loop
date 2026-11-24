@@ -38,8 +38,8 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 | 次数上限 | `maxFires`，到顶自动删除 | `--max N` |
 | 持久化 | `durable: true` 写入 `.pi/scheduled_tasks.json`，重启后继续；同一项目只由一个 Pi 会话执行 | `--durable` |
 | 任务面板 | 一个原生的 TUI 浮层，统一查看本会话的 Loop 和 Monitor 任务；本地命令，不进对话 | `/tasks`（重名时改用 `/cc-tasks`，二选一） |
-| 底部摘要 | Pi 底部状态栏一行：`2 loops · next 3m`，无任务时不占位 | `/pi_cc footer on\|off` |
-| 界面设置 | 按插件分页的设置面板，本地命令，不进对话 | `/pi_cc` |
+| 底部摘要 | Pi 底部状态栏一行：`2 loops · next 3m`，无任务时不占位 | `/loop_settings footer on\|off` |
+| 界面设置 | Loop 独立设置面板，本地命令，不进对话 | `/loop_settings` |
 
 ## 命令
 
@@ -50,13 +50,13 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 /loop status              列出当前任务
 /loop stop [id]           停止一个或全部
 /loop help                本地：帮助
-/pi_cc                    本地：pi-cc 设置面板（见下）
+/loop_settings            本地：Loop 设置面板（见下）
 /tasks                    本地：任务面板（All / Monitor / Loop），名称空闲时注册
 /cc-tasks                 本地：/tasks 已占用时改用；不与 /tasks 同时注册
 ```
 
-前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；`/loop help`、`/pi_cc` 和选中的任务面板入口（`/tasks` 或 `/cc-tasks`）只改界面，不进对话。
-旧的 `/loop footer`、`/loop settings` 会提示改用 `/pi_cc`，不会当成 loop 请求。
+前五个会作为普通 user 消息进入对话（内容就是你输入的那行），模型再按技能说明调用工具；`/loop help`、`/loop_settings` 和选中的任务面板入口（`/tasks` 或 `/cc-tasks`）只改界面，不进对话。
+旧的 `/loop footer`、`/loop settings` 会提示改用 `/loop_settings`，不会当成 loop 请求。
 
 间隔写法没有约束，模型自己解析：`30s`、`5m`、`2h`、`1d`、`check the deploy every 20m`、
 `每2分钟输出一次`、`每分钟打印一次hi` 都可以。小于一分钟会向上取整到每分钟。
@@ -112,7 +112,7 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
   - **停止的是计划，不是主 agent**：不会 abort 当前回复，也不会结束正在运行的 turn；要中断模型请照常按 Esc 或用 Pi 的 abort。
 - 已结束的 Monitor 记录在终态通知投递且资源释放后保留最近 50 条，停止动作禁用；活跃、待通知、清理中或仍被订阅引用的记录不会因数量上限被淘汰。v1 不做暂停/恢复、不改 cron、不做每个 loop 的独立 transcript，也不保留已结束 loop 的历史。
 
-两个包共用一套命令注册：只装 loop 或只装 monitor 都能使用；两个都装时也只注册一个面板入口。所有 `session_start` 处理完成、构建补全列表之前，会检查当时已加载的扩展命令和 prompt 模板（包括已重名的 `/tasks:1` 等入口）：名称空闲时只注册 `/tasks`；已占用时不抢占、不新增 `/tasks:1`，只注册 `/cc-tasks`。无法安全查询命令列表的旧版宿主也只提供 `/cc-tasks`。同一运行时不因再次资源发现而切换或补注册别名；`/reload` 会为新的扩展实例重新检查。检查不覆盖其他插件之后动态新增的命令。任务面板入口不是 `/pi_cc`（设置面板），也不改变 `/loop` 的语义。
+两个包共用一套命令注册：只装 loop 或只装 monitor 都能使用；两个都装时也只注册一个面板入口。所有 `session_start` 处理完成、构建补全列表之前，会检查当时已加载的扩展命令和 prompt 模板（包括已重名的 `/tasks:1` 等入口）：名称空闲时只注册 `/tasks`；已占用时不抢占、不新增 `/tasks:1`，只注册 `/cc-tasks`。无法安全查询命令列表的旧版宿主也只提供 `/cc-tasks`。同一运行时不因再次资源发现而切换或补注册别名；`/reload` 会为新的扩展实例重新检查。检查不覆盖其他插件之后动态新增的命令。任务面板入口不是 `/loop_settings`（Loop 设置面板），也不改变 `/loop` 的语义。
 
 ## 工具
 
@@ -145,51 +145,26 @@ ln -sfn "$PWD" ~/.pi/agent/extensions/pi-cc-loop
 Ctrl+O 走宿主自己的 `CustomMessageComponent.setExpanded`，两种模式都有效。`missed` 列表用警告色和 `⚠`。
 `compactMessages` 关闭时回到旧的带底色卡片。
 
-## 设置
+## /loop_settings
 
-四个 pi-cc 扩展共用 Pi 配置目录下的 `pi-cc.json`（默认 `~/.pi/agent/pi-cc.json`，跟随 `PI_CODING_AGENT_DIR`），文件不存在时用默认值：
+本包独立提供 `/loop_settings`，只包含 Loop 的消息样式和底部摘要。TUI 中打开单页设置面板，上下键选择、Enter/空格切换、Esc 关闭；改动立即保存，不进入模型对话。RPC 中不带参数时输出当前设置，也可以使用 `/loop_settings messages on|off`、`/loop_settings footer on|off`。
+
+默认配置文件是 `~/.pi/agent/pi-cc-loop.json`，跟随 `PI_CODING_AGENT_DIR`：
 
 ```jsonc
 {
-  "compactMessages": true,   // 触发块和 Monitor 事件用上面的样式；false 为旧的带底色卡片
-  "footer": true,            // 底部摘要：Loop 和 Monitor 的数量
-  "draft": true,             // pi-cc-plugins：Ctrl+C 找回
-  "turnSummary": true,       // pi-cc-plugins：回合摘要一行
-  "ccKeys": true,            // pi-cc-plugins：Enter 排队、↑ 取回待发消息
-  "compaction": true,        // pi-cc-compaction：Claude Code 的压缩
-  "idleCompaction": true     // pi-cc-compaction：空闲压缩
+  "compactMessages": true,   // Loop 触发消息用紧凑样式；false 为旧卡片
+  "footer": true             // Loop 底部摘要
 }
 ```
 
-draft、turnSummary、ccKeys 只被 pi-cc-plugins 读取，compaction、idleCompaction 只被 pi-cc-compaction 读取。面板和非 TUI 摘要只显示已加载包的页面；未安装包的值仍原样保留，文字命令仍可用来预配置。
+Loop 和 Monitor 各自保存设置，关闭本包的 footer 或修改消息样式不会改变 Monitor。`config.ts`、`settings.ts` 只维护本包的选项，不再同步其他包的设置定义。
 
-在 TUI 里输入 `/pi_cc` 会打开设置面板，和 pi-cc-extensions 的 `/ccstyle` 一样按页组织，每个插件一页：
-**Loop & Monitor**（消息样式、底部摘要，两个包共用）、**Plugins**（pi-cc-plugins）、**Compact**（pi-cc-compaction）。
-有多个页面时用 Tab / Shift+Tab 切换，上下键选择，Enter/空格切换，Esc 关闭；改动立即保存，所有 pi-cc 扩展同时生效。
-Pi 的 `/settings` 不接受扩展加项，所以 pi-cc 的设置放在 `/pi_cc` 下。
+兼容旧配置：新文件不存在时读取旧 `pi-cc.json` 中本包的有效字段；首次保存把这些选择带入新文件。已有新文件不会被旧配置覆盖，旧文件不会被修改或删除。`PI_CC_CONFIG_FILE` 可显式指定配置路径，此时不回读旧文件。
 
-`/pi_cc` 由四个 pi-cc 包（loop、monitor、plugins、compaction）共同提供：装了其中任意一个，命令就在；装了多个，也只有一个 `/pi_cc`
-（Pi 会把不同扩展的同名命令变成 `/pi_cc:1`、`/pi_cc:2`，所以由最先加载的包认领注册，会话结束时释放，`/reload` 会重新认领）。
+环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES` 仍优先于文件，且不会写进文件；设置了变量的选项在面板中锁定，文字命令仍可保存以后使用的值。旧变量名保留兼容：全局设置这两个变量仍会同时覆盖 Loop 和 Monitor，但两个包的文件和命令彼此独立。
 
-```text
-──────────────────────────────────────────────────────────────────────
-Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
-──────────────────────────────────────────────────────────────────────
-→ Message style    compact
-  Footer summary   on
-
-  How scheduled fires and Monitor events are drawn. compact: ✻ header
-  and indented body; card: the old padded card.
-──────────────────────────────────────────────────────────────────────
-  Enter/Space to change · Tab/Shift+Tab to switch pages · Esc to close
-──────────────────────────────────────────────────────────────────────
-```
-
-也可以用文字命令：`/pi_cc messages on|off`、`/pi_cc footer on|off`，适合脚本和 RPC；
-非 TUI 模式下，不带参数的 `/pi_cc` 按页输出当前设置。命令只写改动的那一项，文件里的其他内容原样保留。
-
-环境变量 `PI_CC_FOOTER`、`PI_CC_COMPACT_MESSAGES`（pi-cc-plugins 的三项是 `PI_CC_DRAFT`、`PI_CC_TURN_SUMMARY`、`PI_CC_KEYS`，pi-cc-compaction 的两项是 `PI_CC_COMPACTION`、`PI_CC_IDLE_COMPACTION`）优先于文件，但不会被写进文件。设着的时候，面板里这一项显示实际生效的值、不能切换，
-说明里写出是哪个变量；文字输出会在对应项后面标出来（如 `hidden (PI_CC_FOOTER=0)`）；用文字命令切换会写进文件，但提示会说明变量还在覆盖它。
+本包不再注册共享的 `/pi_cc`；旧脚本请改用 `/loop_settings`。Pi 内置的 `/settings` 不受影响。
 
 ## 底部摘要
 
@@ -207,7 +182,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 - 倒计时取整到分钟，配合"文本相同就不调用"的去重，最多每分钟重绘一次（Pi 每次 `setStatus` 都会触发重绘）
 - 装了 `pi-cc-extensions`：这一行会作为它的一个 chip 出现在第 2 行，可在它的配置面板里移动或隐藏；它会把 ANSI 去掉，所以这里只用纯文本
 - 没装 `pi-cc-extensions`：Pi 内置 footer 会把它和其他扩展的状态拼成一行，加在用量行下面，只在有任务时出现
-- 装了 `pi-cc-monitor`：运行中的 monitor 另有一项 `2 monitors`，和这一行用同一个开关
+- 装了 `pi-cc-monitor`：运行中的 monitor 另有一项 `2 monitors`，两个包各用自己的设置开关
 
 ## 环境变量
 
@@ -220,7 +195,7 @@ Loop & Monitor / Plugins / Compact             ~/.pi/agent/pi-cc.json
 | `PI_LOOP_DURABLE_SYNC_MS` | `5000` | 持久化任务文件的同步间隔 |
 | `PI_CC_FOOTER` | — | `0` / `1`，覆盖设置文件里的 `footer` |
 | `PI_CC_COMPACT_MESSAGES` | — | `0` / `1`，覆盖设置文件里的 `compactMessages` |
-| `PI_CC_CONFIG_FILE` | `~/.pi/agent/pi-cc.json` | 设置文件路径；不设时在 Pi 的配置目录里，跟随 `PI_CODING_AGENT_DIR` |
+| `PI_CC_CONFIG_FILE` | `~/.pi/agent/pi-cc-loop.json` | 显式指定配置文件；不设时跟随 `PI_CODING_AGENT_DIR`，新文件缺失时兼容旧配置 |
 
 ## 兼容性
 
@@ -238,7 +213,7 @@ npm run typecheck
 node scripts/cache-check.mjs    # 真实 provider 的缓存检查，默认用免费模型，发版前跑
 ```
 
-四个仓库共同使用的 `config.ts`、`settings.ts`（以及 loop/monitor 的 `render.ts`、`tasks.ts`）以本仓库为维护源。修改后在本仓库运行 `node scripts/sync-shared.mjs` 同步到同级仓库；`node scripts/sync-shared.mjs --check` 只检查，不改文件。各仓库的 `tests/shared.test.mjs` 也会检查副本一致。
+Loop/Monitor 的 `render.ts`、`tasks.ts`、`log-tail.ts` 以本仓库为维护源。修改后运行 `node scripts/sync-shared.mjs` 同步到 Monitor；`--check` 只检查不改文件，两个仓库的 `tests/shared.test.mjs` 检查这三份副本。各包的 `config.ts`、`settings.ts` 独立维护，不参与同步。
 
 类型检查使用本地 TypeScript 开发依赖，并自动定位本地 peer dependencies 或当前安装的 Pi release；`tsconfig.json` 不再包含个人目录或旧 release 的绝对路径。可用 `PI_AGENT_DIR` 选择隔离的 Pi 安装，用 `PI_TYPESCRIPT_PATH` 指向已有的 `typescript/lib/typescript.js`。
 
