@@ -12,7 +12,7 @@ const PACKAGES = [
 	["pi-cc-compaction", "compaction_settings", "Compaction"],
 ];
 const available = PACKAGES.every(([repo]) => fs.existsSync(path.join(siblingExtensionDir(repo), "package.json")));
-const ENV_KEYS = ["PI_CODING_AGENT_DIR", "PI_CC_CONFIG_FILE", "PI_CC_COMPACT_MESSAGES", "PI_CC_FOOTER", "PI_CC_DRAFT", "PI_CC_TURN_SUMMARY", "PI_CC_KEYS", "PI_CC_COMPACTION", "PI_CC_IDLE_COMPACTION"];
+const ENV_KEYS = ["PI_CODING_AGENT_DIR", "PI_CC_CONFIG_FILE", "PI_CC_COMPACT_MESSAGES", "PI_CC_FOOTER", "PI_CC_DRAFT", "PI_CC_TURN_SUMMARY", "PI_CC_KEYS", "PI_CC_COMPACTION", "PI_CC_IDLE_COMPACTION", "PI_MONITOR_LOG_RETENTION_DAYS", "PI_MONITOR_LOG_MAX_MIB", "PI_MONITOR_LOG_BUDGET_MIB"];
 
 for (const reverse of [false, true]) {
 	test("four independent settings commands coexist in " + (reverse ? "reverse" : "forward") + " load order", { skip: !available && "sibling checkouts not found" }, async () => {
@@ -58,9 +58,14 @@ for (const reverse of [false, true]) {
 			loop.invalidateConfig();
 			assert.equal(monitor.loadConfig().compactMessages, true);
 			assert.equal(loop.loadConfig().compactMessages, false, "Monitor's style does not change Loop's style");
+			const loopBefore = fs.readFileSync(loop.configPath(), "utf8");
+			await commands.get("monitor_settings").handler("logs 5", ctx);
+			assert.equal(monitor.loadConfig().logMaxMiB, 5);
+			assert.equal(fs.readFileSync(loop.configPath(), "utf8"), loopBefore, "Monitor log policy never changes Loop settings");
+			assert.ok(!("logMaxMiB" in loop.DEFAULT_CONFIG));
 			await commands.get("plugins_settings").handler("summary on", ctx);
 			await commands.get("compaction_settings").handler("idle off", ctx);
-			assert.deepEqual(changes.map(({ channel }) => channel), ["pi-cc-loop:config", "pi-cc-monitor:config", "pi-cc-plugins:config", "pi-cc-compaction:config"]);
+			assert.deepEqual(changes.map(({ channel }) => channel), ["pi-cc-loop:config", "pi-cc-monitor:config", "pi-cc-monitor:config", "pi-cc-plugins:config", "pi-cc-compaction:config"]);
 			assert.equal(fs.readFileSync(legacy, "utf8"), old, "all four packages leave the shared legacy file untouched");
 			for (const { repo, command, title, config } of modules) {
 				const file = path.join(dir, repo + ".json");

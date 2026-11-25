@@ -26,6 +26,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withFileLock } from "./config.ts";
+import { writeAtomic } from "./temp-files.ts";
 import { nextRunTime, storedJob, type LoopJob, type LoopScheduler, type TimingConfig } from "./schedule.ts";
 
 export const DURABLE_FILE = path.join(".pi", "scheduled_tasks.json");
@@ -37,16 +38,6 @@ const HEARTBEAT_MS = 15_000;
 interface DurableFileData {
 	version: 1;
 	jobs: LoopJob[];
-}
-
-function writeAtomic(file: string, text: string): void {
-	const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		fs.writeFileSync(temp, text, "utf8");
-		fs.renameSync(temp, file);
-	} finally {
-		fs.rmSync(temp, { force: true });
-	}
 }
 
 function isSymlink(file: string): boolean {

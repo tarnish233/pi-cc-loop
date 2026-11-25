@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeAtomic } from "./temp-files.ts";
 
 export interface PiCcConfig {
 	/** One-line notifications with expandable details instead of the legacy padded card. */
@@ -189,13 +190,7 @@ export function saveConfig(patch: Partial<PiCcConfig>): PiCcConfig {
 			if (code === "ENOENT") raw = legacyConfig();
 			else if (!(error instanceof SyntaxError)) throw error;
 		}
-		const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-		try {
-			fs.writeFileSync(temp, `${JSON.stringify({ ...raw, ...patch }, null, 2)}\n`, "utf8");
-			fs.renameSync(temp, file);
-		} finally {
-			fs.rmSync(temp, { force: true });
-		}
+		writeAtomic(file, `${JSON.stringify({ ...raw, ...patch }, null, 2)}\n`);
 	});
 	cached = undefined;
 	return loadConfig();

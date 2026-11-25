@@ -15,6 +15,14 @@ export function findPiInstall() {
 	}
 }
 
+// Each worker owns its whole scratch namespace; test runs must not leave
+// hundreds of unmarked temporary projects and config fixtures behind.
+const testTemp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-loop-tests-"));
+process.env.TMPDIR = testTemp;
+process.env.TMP = testTemp;
+process.env.TEMP = testTemp;
+process.on("exit", () => { try { fs.rmSync(testTemp, { recursive: true, force: true }); } catch { /* private test artifacts only; best effort */ } });
+
 // Isolate pi-cc-extensions' config as well: the compat sync must not touch
 // the real file when a test toggles compact tool rows.
 if (!process.env.PI_CC_EXTENSIONS_CONFIG_FILE) {

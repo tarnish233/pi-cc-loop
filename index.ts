@@ -29,13 +29,15 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { invalidateConfig, loadConfig } from "./config.ts";
+import path from "node:path";
+import { configPath, invalidateConfig, loadConfig } from "./config.ts";
+import { cleanRuntimeTemps } from "./temp-files.ts";
 import {
 	humanSchedule,
 	isUnreachable,
 	parseCron,
 } from "./cron.ts";
-import { DurableRuntime, type Placement } from "./durable.ts";
+import { DURABLE_FILE, LOCK_FILE, DurableRuntime, type Placement } from "./durable.ts";
 import { displayPrompt, isLoopFileSentinel, LoopFileDelivery } from "./loopfile.ts";
 import {
 	CRON_CREATE_DESCRIPTION,
@@ -182,6 +184,7 @@ export function getScheduler(pi: ExtensionAPI): LoopScheduler | undefined {
 export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	/** Cached context for UI helpers. */
 	let lastCtx: ExtensionContext | undefined;
+	let tempCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	/**
 	 * Prompts whose chain was stopped. A stopped chain must not be resurrected
 	 * by a late `schedule_wakeup` call from a turn that a still-running monitor
@@ -1427,6 +1430,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 		// Another process may have edited the Loop settings file.
 		invalidateConfig();
+		if (tempCleanupTimer) clearInterval(tempCleanupTimer);
+		const cleanupTemps = () => cleanRuntimeTemps([configPath(), path.join(ctx.cwd, DURABLE_FILE), path.join(ctx.cwd, LOCK_FILE)]);
+		cleanupTemps();
+		tempCleanupTimer = setInterval(cleanupTemps, 30 * 60 * 1000);
+		tempCleanupTimer.unref?.();
 		durable?.stop();
 		restoreState(ctx, (event as { reason?: string } | undefined)?.reason);
 		durable = createDurable(ctx.cwd);
@@ -1441,6 +1449,8 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		if (tempCleanupTimer) clearInterval(tempCleanupTimer);
+		tempCleanupTimer = undefined;
 		releaseNotificationHover();
 		// Close an open task overlay while the context is still valid.
 		tasks.close();

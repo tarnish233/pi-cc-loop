@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-25
+
+### Changed
+- Stage setting, durable-task and scheduler-heartbeat writes in private Loop-owned directories, preserving atomic rename and existing file-lock semantics.
+- Reclaim only closed or verified-dead local atomic-write scratch older than 24 hours at session startup and every 30 minutes; never delete settings, durable tasks, live locks, loop.md or Pi session history.
+- Make scratch-cleanup failure non-fatal to already-saved settings/durable ticks and cancel maintenance timers on shutdown/reload.
+
 ## [0.13.0] - 2026-11-24
 
 ### Changed
