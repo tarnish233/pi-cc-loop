@@ -21,7 +21,10 @@ function assertWake(h, pattern) {
 	assert.equal(messages.length, 1, "the terminal outcome is announced once");
 	assert.deepEqual(messages[0].options, { deliverAs: "followUp", triggerTurn: true });
 	assert.match(messages[0].message.content, pattern);
-	assert.deepEqual(messages[0].message.details, { ended: true });
+	// The details name why the loop ended so the card can title itself; `ended`
+	// remains the flag the renderer and tests key on.
+	assert.equal(messages[0].message.details.ended, true);
+	assert.ok(["stopped", "expired", "dispatch-failed"].includes(messages[0].message.details.cause), JSON.stringify(messages[0].message.details));
 }
 
 test("recurring expiry sends its own wakeup after the final accepted tick", async (t) => {
@@ -58,7 +61,7 @@ test("stopping a self-paced chain announces the outcome and keeps late re-arms b
 	const result = await h.tools.get("cron_delete").execute("c", { id: chain.id }, undefined, undefined, h.ctx);
 	assert.equal(result.details.cancelled, true);
 	assert.equal(h.scheduler().get(chain.id), undefined);
-	assertWake(h, /stopped.*Do not reschedule this loop or re-arm those monitors/);
+	assertWake(h, /stopped.*external runner jobs were not cancelled.*Do not reschedule this loop, re-arm those observations or resubmit/);
 	await assert.rejects(() => startSelfPaced(h, "watch CI", 1200), /was stopped/);
 });
 

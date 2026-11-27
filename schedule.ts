@@ -14,7 +14,7 @@
  *     fires one final time, then deletes itself."  -> a recurring job past its
  *     maximum age is deleted right after its next fire. One-shot jobs do not
  *     expire.
- *   - Run times carry Claude Code's fixed per-job offset (see nextRunTime).
+ *   - A host can supply a per-job offset policy; otherwise use exact cron slots.
  *
  * There is no delivery confirmation after Pi accepts a message: Pi marks the
  * session busy as soon as a tick starts a turn, so the idle check alone keeps
@@ -24,6 +24,8 @@
  */
 
 import { nextFireAfter, parseCron } from "./cron.ts";
+import { generateId } from "./plugin-settings.ts";
+export { generateId };
 
 export type JobKind = "cron" | "wakeup";
 
@@ -99,10 +101,10 @@ export interface TimingConfig {
 	oneShotMinuteMod: number;
 }
 
-export const DEFAULT_TIMING: TimingConfig = {
-	recurringFrac: 0.5,
-	recurringCapMs: 30 * 60_000,
-	oneShotMaxMs: 90_000,
+const EXACT_TIMING: TimingConfig = {
+	recurringFrac: 0,
+	recurringCapMs: 0,
+	oneShotMaxMs: 0,
 	oneShotMinuteMod: 30,
 };
 
@@ -117,14 +119,14 @@ export function idFraction(id: string): number {
 }
 
 /**
- * When a cron job runs next, measured from `from`, with Claude Code's
+ * When a cron job runs next, measured from `from`, using the supplied
  * offsets. Recurring jobs measure from their last fire (or creation); a
  * one-shot measures from its creation, so its run time never moves.
  */
 export function nextRunTime(
 	job: Pick<LoopJob, "id" | "cron" | "recurring">,
 	from: number,
-	timing: TimingConfig = DEFAULT_TIMING,
+	timing: TimingConfig = EXACT_TIMING,
 ): number | null {
 	if (!job.cron) return null;
 	const fields = parseCron(job.cron);
@@ -163,27 +165,6 @@ export interface SchedulerHooks {
 	onScan?: (now: number) => void;
 	/** Delivery threw before Pi accepted the tick; no fire was consumed. */
 	onDispatchError?: (job: LoopJob, error: Error) => void;
-}
-
-/** Claude Code checks for due tasks once a second. */
-export const SCAN_INTERVAL_MS = 1000;
-
-/** The scan interval can be raised for tests, where the scan is driven by hand. */
-export function scanIntervalMs(): number {
-	const raw = process.env.PI_LOOP_SCAN_MS;
-	if (raw === undefined) return SCAN_INTERVAL_MS;
-	const value = Number(raw);
-	return Number.isFinite(value) && value > 0 ? value : SCAN_INTERVAL_MS;
-}
-
-const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-
-export function generateId(length = 8): string {
-	let out = "";
-	for (let i = 0; i < length; i++) {
-		out += ID_ALPHABET[Math.floor(Math.random() * ID_ALPHABET.length)];
-	}
-	return out;
 }
 
 export class LoopScheduler {
@@ -268,10 +249,10 @@ export class LoopScheduler {
 
 	// ------------------------------------------------------------- lifecycle
 
-	/** Start the once-per-second scan. */
-	start(): void {
+	/** Start the scan at the cadence supplied by the host. */
+	start(intervalMs = 1000): void {
 		if (this.scanTimer) return;
-		this.scanTimer = setInterval(() => this.tick(), scanIntervalMs());
+		this.scanTimer = setInterval(() => this.tick(), intervalMs);
 		// Never keep the process alive just for a pending tick.
 		if (typeof this.scanTimer.unref === "function") this.scanTimer.unref();
 	}
@@ -393,7 +374,7 @@ export class LoopScheduler {
 	}
 
 	private timing(): TimingConfig {
-		return this.hooks.timing?.() ?? DEFAULT_TIMING;
+		return this.hooks.timing?.() ?? EXACT_TIMING;
 	}
 
 	private changed(): void {

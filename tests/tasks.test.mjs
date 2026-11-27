@@ -354,6 +354,12 @@ function openTasks(runtime) {
 	return promise;
 }
 
+let observationFileCounter = 0;
+function observationFiles(runtime, stdout = "", stderr) {
+	const file = path.join(runtime.workdir, "observed-" + (++observationFileCounter) + ".log"); fs.writeFileSync(file, stdout);
+	if (stderr === undefined) return { kind: "file", stdout: file };
+	const error = file + ".err"; fs.writeFileSync(error, stderr); return { kind: "file", stdout: file, stderr: error };
+}
 async function armMonitor(runtime, params) {
 	return runtime.tools
 		.get("Monitor")
@@ -379,7 +385,7 @@ test("both load orders expose exactly one /cc-tasks and open a native overlay wh
 		assert.ok(runtime.commands.get("loop"), "/loop semantics stay unchanged");
 
 		const armed = await armMonitor(runtime, {
-			command: "sleep 30",
+			source: observationFiles(runtime),
 			description: "wide \u4e2d\u6587\u65e5\u672c\u8a9e\ud83d\ude80 monitor",
 			persistent: true,
 		});
@@ -422,8 +428,8 @@ test("Tab/Shift+Tab, named select actions and Esc behave in both directions", as
 	await runtime.start();
 	let creationTime = Date.now();
 	const clock = t.mock.method(Date, "now", () => ++creationTime);
-	await armMonitor(runtime, { command: "sleep 30", description: "first monitor", persistent: true });
-	await armMonitor(runtime, { command: "sleep 30", description: "second monitor", persistent: true });
+	await armMonitor(runtime, { source: observationFiles(runtime), description: "first monitor", persistent: true });
+	await armMonitor(runtime, { source: observationFiles(runtime), description: "second monitor", persistent: true });
 	clock.mock.restore();
 
 	const overlay = openTasks(runtime);
@@ -454,7 +460,7 @@ test("non-TUI modes report text and never touch TUI methods; standalone plugins 
 
 	monitorOnly.load(monitorMod.default);
 	await monitorOnly.start();
-	await armMonitor(monitorOnly, { command: "sleep 30", description: "only monitor", persistent: true });
+	await armMonitor(monitorOnly, { source: observationFiles(monitorOnly), description: "only monitor", persistent: true });
 	assert.deepEqual(ccTasksCommands(monitorOnly), ["cc-tasks"]);
 	const overlay = openTasks(monitorOnly);
 	// One provider has one named view, not two identical All/Monitor tabs.
@@ -608,7 +614,7 @@ test("x/y stops the selected self-paced loop, cascades to its Monitor, and canno
 		.get("schedule_wakeup")
 		.execute("c", { delaySeconds: 600, reason: "waiting for CI", prompt: "watch CI" }, undefined, undefined, runtime.ctx);
 	const armedMonitor = await armMonitor(runtime, {
-		command: "sleep 30",
+		source: observationFiles(runtime),
 		description: "CI monitor",
 		loopPrompt: "watch CI",
 		persistent: true,
@@ -653,7 +659,7 @@ test("stopping a Monitor from the overlay uses monitor_stop's lifecycle and noti
 	t.after(() => stopAll(runtime));
 	runtime.load(monitorMod.default);
 	await runtime.start();
-	const armed = await armMonitor(runtime, { command: "sleep 30", description: "stoppable", persistent: true });
+	const armed = await armMonitor(runtime, { source: observationFiles(runtime), description: "stoppable", persistent: true });
 	const overlay = openTasks(runtime);
 	runtime.input("tab"); // Monitor tab
 	runtime.input("x");
@@ -663,7 +669,7 @@ test("stopping a Monitor from the overlay uses monitor_stop's lifecycle and noti
 	assert.equal(monitors.details.monitors[0].status, "stopped");
 	assert.ok(
 		runtime.sent.some(
-			(entry) => entry.kind === "custom" && entry.message?.customType === "Monitor" && entry.message.content.includes("[Monitor stopped]"),
+			(entry) => entry.kind === "custom" && entry.message?.customType === "Monitor" && entry.message.content.includes("[Monitor stopped"),
 		),
 		"the usual terminal notification was sent",
 	);
@@ -786,8 +792,7 @@ test("detail logs are bounded, sanitized tails; missing logs are a note, and rea
 	runtime.load(monitorMod.default);
 	await runtime.start();
 	const armed = await armMonitor(runtime, {
-		command:
-			"printf '\\033[31mRED\\033[0m \\001CLEAR\\n'; printf 'ERR \\033[32mGREEN\\033[0m\\n' >&2; sleep 30",
+		source: observationFiles(runtime, "\x1b[31mRED\x1b[0m \x01CLEAR\n", "ERR \x1b[32mGREEN\x1b[0m\n"),
 		description: "noisy log",
 		persistent: true,
 	});
@@ -859,7 +864,7 @@ test("narrow widths, resize, wide characters, theme invalidation and Esc detail-
 	runtime.loadBoth(["loop", "monitor"]);
 	await runtime.start();
 	await armMonitor(runtime, {
-		command: "sleep 30",
+		source: observationFiles(runtime),
 		description: "\u4e2d\u6587\u65e5\u672c\u8a9e\ud83d\ude80 monitor with a long description",
 		persistent: true,
 	});
@@ -1004,7 +1009,7 @@ test("two SDK-style runtimes do not mix task state or commands, reload creates a
 	assert.deepEqual(ccTasksCommands(a), ["cc-tasks"]);
 	assert.deepEqual(ccTasksCommands(b), ["cc-tasks"]);
 
-	await armMonitor(a, { command: "sleep 30", description: "only in A", persistent: true });
+	await armMonitor(a, { source: observationFiles(a), description: "only in A", persistent: true });
 	const overlayA = openTasks(a);
 	assert.match(a.text(), /only in A/);
 	const overlayB = openTasks(b);

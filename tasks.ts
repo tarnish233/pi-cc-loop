@@ -135,8 +135,6 @@ export interface TaskItem {
 	meta?: string;
 	/** User-facing role, separate from provider and lifecycle state. */
 	role?: string;
-	/** Actual parent id in this provider only; never inferred from titles. */
-	parentId?: string;
 	/** Scope of the locally confirmed stop, supplied by the resource owner. */
 	stopConfirmation?: string;
 }
@@ -145,9 +143,6 @@ export interface TaskItem {
 export interface TaskEntry extends TaskItem {
 	provider: string;
 	providerLabel: string;
-	/** Display-only tree information; not execution state. */
-	depth?: number;
-	hasChildren?: boolean;
 }
 
 export interface TaskDetailRow {
@@ -388,8 +383,7 @@ export function taskSummary(registry: TaskRegistry): string {
 		lines.push(`${provider.label} (${items.length})`);
 		for (const item of groupTaskEntries(items.map((item) => ({ ...item, provider: provider.id, providerLabel: provider.label })))) {
 			const role = item.role ? `${oneLine(item.role)}  ` : "";
-			const source = item.parentId ? ` → #${oneLine(item.parentId)}` : "";
-			lines.push(`  ${"  ".repeat(Math.min(item.depth ?? 0, 3))}${oneLine(item.state)}  ${role}${oneLine(item.id)}  ${oneLine(item.title)}${source}${item.meta ? `  ${oneLine(item.meta)}` : ""}`);
+			lines.push(`  ${oneLine(item.state)}  ${role}${oneLine(item.id)}  ${oneLine(item.title)}${item.meta ? `  ${oneLine(item.meta)}` : ""}`);
 		}
 	}
 	if (total === 0) lines.push("No tasks.");
@@ -498,7 +492,6 @@ interface DetailLogView {
 type PanelAction =
 	| { kind: "tab"; id: string }
 	| { kind: "task"; key: string }
-	| { kind: "toggle"; key: string }
 	| { kind: "detail" | "stop"; key: string }
 	| { kind: "back" | "close" | "confirmStop" | "cancelStop" };
 
@@ -531,40 +524,11 @@ function compareTaskCreation(a: TaskItem, b: TaskItem): number {
 	return aTime === bTime ? 0 : aTime > bTime ? -1 : 1;
 }
 
-/** Newest roots/siblings first, with parents before children and no hidden entries. */
+/** Deduplicated newest-first ordering across providers. */
 export function groupTaskEntries(entries: TaskEntry[]): TaskEntry[] {
 	const byKey = new Map<string, TaskEntry>();
-	for (const entry of entries) if (!byKey.has(taskKey(entry))) byKey.set(taskKey(entry), entry);
-	const newestFirst = [...byKey.values()].sort(compareTaskCreation);
-	const children = new Map<string, TaskEntry[]>();
-	const roots: TaskEntry[] = [];
-	for (const entry of newestFirst) {
-		const parent = entry.parentId ? byKey.get(taskKey({ provider: entry.provider, id: entry.parentId })) : undefined;
-		if (parent && parent !== entry) {
-			const key = taskKey(parent);
-			const siblings = children.get(key) ?? [];
-			siblings.push(entry);
-			children.set(key, siblings);
-		} else roots.push(entry);
-	}
-	const ordered: TaskEntry[] = [];
-	const seen = new Set<string>();
-	const visit = (root: TaskEntry) => {
-		const stack = [{ entry: root, depth: 0 }];
-		while (stack.length) {
-			const { entry, depth } = stack.pop()!;
-			const key = taskKey(entry);
-			if (seen.has(key)) continue;
-			seen.add(key);
-			const next = (children.get(key) ?? []).filter((child) => !seen.has(taskKey(child)));
-			ordered.push({ ...entry, depth, hasChildren: next.length > 0 });
-			for (let i = next.length - 1; i >= 0; i--) stack.push({ entry: next[i]!, depth: depth + 1 });
-		}
-	};
-	for (const root of roots) visit(root);
-	// A cycle has no root. Show it once rather than recurse indefinitely or drop it.
-	for (const entry of newestFirst) if (!seen.has(taskKey(entry))) visit(entry);
-	return ordered;
+	for (const entry of entries) if (!byKey.has(taskKey(entry))) byKey.set(taskKey(entry), { ...entry });
+	return [...byKey.values()].sort(compareTaskCreation);
 }
 
 function stateColor(state: string): ThemeColor {
@@ -599,7 +563,6 @@ class TasksOverlay {
 	private confirmationScroll = 0;
 	private confirmationLineCount = 0;
 	private confirmationViewport = 0;
-	private readonly collapsed = new Set<string>();
 	private hitRegions: HitRegion[] = [];
 	private bodyScrollbar: BodyScrollbar | undefined;
 	private scrollbarDragOffset: number | undefined;
@@ -711,20 +674,7 @@ class TasksOverlay {
 	}
 
 	private visible(): TaskEntry[] {
-		const entries = this.tab === "all" ? this.entries : this.entries.filter((entry) => entry.provider === this.tab);
-		if (!this.collapsed.size) return entries;
-		const visible: TaskEntry[] = [];
-		let hiddenBelow: number | undefined;
-		for (const entry of entries) {
-			const depth = entry.depth ?? 0;
-			if (hiddenBelow !== undefined) {
-				if (depth > hiddenBelow) continue;
-				hiddenBelow = undefined;
-			}
-			visible.push(entry);
-			if (entry.hasChildren && this.collapsed.has(taskKey(entry))) hiddenBelow = depth;
-		}
-		return visible;
+		return this.tab === "all" ? this.entries : this.entries.filter((entry) => entry.provider === this.tab);
 	}
 
 	private entryFor(key: string): TaskEntry | undefined {
@@ -751,7 +701,6 @@ class TasksOverlay {
 			if (added.length) this.recentTask = added[0]!.title;
 		}
 		this.knownKeys = keys;
-		for (const key of this.collapsed) if (!keys.has(key)) this.collapsed.delete(key);
 		this.ensureSelection();
 		if (this.detailKey && !this.entryFor(this.detailKey)) this.detailKey = undefined;
 		if (this.detailKey) this.reloadLogs();
@@ -853,23 +802,6 @@ class TasksOverlay {
 		this.detailScroll = 0;
 		this.status = "";
 		this.requestRender();
-	}
-
-	private toggleGroup(key: string): void {
-		const entry = this.entryFor(key);
-		if (!entry?.hasChildren) return;
-		if (this.collapsed.has(key)) this.collapsed.delete(key);
-		else this.collapsed.add(key);
-		this.ensureSelection();
-		this.requestRender();
-	}
-
-	private collapseSelected(expand: boolean): void {
-		const entry = this.selected();
-		if (!entry?.hasChildren) return;
-		const key = taskKey(entry);
-		if (expand ? !this.collapsed.has(key) : this.collapsed.has(key)) return;
-		this.toggleGroup(key);
 	}
 
 	private reloadLogs(): void {
@@ -1008,7 +940,6 @@ class TasksOverlay {
 				else this.requestRender();
 				break;
 			}
-			case "toggle": if (!this.detailKey) this.toggleGroup(action.key); break;
 			case "back": this.closeDetail(); break;
 			case "close": if (!this.detailKey) this.options.onClose(); break;
 			case "detail": {
@@ -1133,14 +1064,6 @@ class TasksOverlay {
 		}
 		if (this.isPageDown(data)) {
 			this.move(1, true);
-			return;
-		}
-		if (matchesKey(data, "left")) {
-			this.collapseSelected(false);
-			return;
-		}
-		if (matchesKey(data, "right")) {
-			this.collapseSelected(true);
 			return;
 		}
 		if (this.isConfirm(data)) {
@@ -1377,21 +1300,13 @@ class TasksOverlay {
 				: entry.provider === "loop" ? "L"
 					: (entry.providerLabel.charAt(0).toUpperCase() || "?");
 			const tag = this.tab === "all" ? `${theme.fg("dim", glyph)} ` : "";
-			const depth = Math.min(entry.depth ?? 0, 3);
-			const branch = entry.hasChildren
-				? `${"  ".repeat(depth)}${this.collapsed.has(key) ? "▸" : "▾"} `
-				: entry.depth ? `${"  ".repeat(depth)}↳ ` : "";
 			const state = theme.fg(stateColor(entry.state), entry.role ? oneLine(entry.state).padEnd(12) : oneLine(entry.state));
 			const title = selected ? theme.fg("text", theme.bold(oneLine(entry.title))) : entry.role && !entry.active ? theme.fg("dim", oneLine(entry.title)) : oneLine(entry.title);
 			const information = [entry.role, entry.meta].filter(Boolean).map(oneLine).join(" · ");
 			const meta = information ? theme.fg("dim", ` · ${information}`) : "";
-			const line = fitWidth(`${marker}${tag}${branch}${state} ${title}${meta}`, width);
+			const line = fitWidth(`${marker}${tag}${state} ${title}${meta}`, width);
 			const y = row + lines.length;
 			this.hitRegions.push({ x, y, width, action: { kind: "task", key } });
-			if (entry.hasChildren) {
-				const arrowX = x + visibleWidth(marker) + visibleWidth(tag) + depth * 2;
-				if (arrowX + 2 <= x + width) this.hitRegions.push({ x: arrowX, y, width: 2, action: { kind: "toggle", key } });
-			}
 			lines.push(selected ? this.styled(line, { bg: this.palette().selected }) : line);
 		}
 		return lines;

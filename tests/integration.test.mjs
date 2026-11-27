@@ -89,6 +89,7 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 	monitorMod.default(pi);
 
 	const ctx = makeCtx(workdir);
+	const source = path.join(workdir, "external.log"); fs.writeFileSync(source, "hello world\n");
 	t.after(async () => {
 		try {
 			const list = await tools.get("monitor_list").execute("cleanup", {}, undefined, undefined, ctx);
@@ -113,7 +114,7 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 		.execute(
 			"c",
 			{
-				command: "while true; do echo hello world; sleep 10; done",
+				source: { kind: "file", stdout: source },
 				description: "hello world every 10 seconds",
 				loopPrompt: "每10秒钟打印一次hello world",
 			},
@@ -142,9 +143,9 @@ test("/loop stop takes the chain's monitor down with it", async (t) => {
 		list = await tools.get("monitor_list").execute("c", {}, undefined, undefined, ctx);
 	}
 	assert.equal(list.details.monitors[0].status, "stopped", "the owned resource must really exit after loop retirement");
-	if (process.platform !== "win32") {
-		assert.throws(() => process.kill(-list.details.monitors[0].pid, 0), (error) => error.code === "ESRCH", "the process group must be gone, not just its UI record");
-	}
+	assert.equal(list.details.monitors[0].resourceActive, undefined, "observation handles/copies are released");
+	assert.equal(fs.existsSync(source), true, "Loop stop does not delete the external source");
+	fs.appendFileSync(source, "late external output\n");
 
 	// 5b. silently: nothing wakes the agent right after the user stopped the loop
 	await new Promise((resolve) => setTimeout(resolve, 500));

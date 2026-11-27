@@ -17,12 +17,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LOOP_FILE_SENTINEL, MAINTENANCE_PROMPT } from "./prompts.ts";
+export const LOOP_FILE_SENTINEL = "<<loop.md>>";
 
 /** Claude Code truncates loop.md beyond this many UTF-8 bytes. */
 export const LOOP_FILE_MAX_BYTES = 25_000;
 
-const MAINTENANCE_MARKER = "\u0000maintenance";
+const EMPTY_FILE_MARKER = ""; // readLoopFile never returns an empty body.
 
 export function isLoopFileSentinel(prompt: string | undefined): boolean {
 	return prompt?.trim() === LOOP_FILE_SENTINEL;
@@ -77,6 +77,8 @@ export class LoopFileDelivery {
 	private pending: { token: number; key: string } | null = null;
 	private nextToken = 0;
 
+	constructor(private readonly fallback: Readonly<{ body: string; reminder: string }>) {}
+
 	/** Send the full text on the next tick: after a compaction the earlier copy is gone. */
 	reset(): void {
 		this.lastDelivered = null;
@@ -111,15 +113,9 @@ export class LoopFileDelivery {
 				file.content,
 			].join("\n");
 		}
-		if (this.lastDelivered === MAINTENANCE_MARKER) {
-			return (
-				"# /loop tick \u2014 maintenance pass\n" +
-				"Run the maintenance pass using the instructions established earlier in this conversation. " +
-				"If you cannot find them, treat this as a no-op tick."
-			);
-		}
-		if (remember) this.lastDelivered = MAINTENANCE_MARKER;
-		return MAINTENANCE_PROMPT;
+		if (this.lastDelivered === EMPTY_FILE_MARKER) return this.fallback.reminder;
+		if (remember) this.lastDelivered = EMPTY_FILE_MARKER;
+		return this.fallback.body;
 	}
 
 	/**
@@ -131,7 +127,7 @@ export class LoopFileDelivery {
 	 */
 	peek(cwd: string): { text: string; token: number } | null {
 		const file = readLoopFile(cwd);
-		const key = file ? file.content : MAINTENANCE_MARKER;
+		const key = file ? file.content : EMPTY_FILE_MARKER;
 		if (this.lastDelivered === key) return null;
 		const token = ++this.nextToken;
 		this.pending = { token, key };

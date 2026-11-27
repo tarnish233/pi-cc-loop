@@ -13,7 +13,8 @@ import { createCron, makeDue, makeHarness, start, stateEntries } from "./harness
 import { loadModule } from "./helpers.mjs";
 
 const { DurableRuntime, DurableStore, SchedulerLock, LOCK_FILE, LOCK_STALE_MS } = await loadModule("durable.ts");
-const { DEFAULT_TIMING, LoopScheduler } = await loadModule("schedule.ts");
+const { LoopScheduler } = await loadModule("schedule.ts");
+const { CC_TIMING } = await loadModule("cc-loop-policy.ts");
 
 const tempProject = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-durable-"));
 const readFile = (cwd) => JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "scheduled_tasks.json"), "utf8")).jobs;
@@ -31,7 +32,7 @@ function session(cwd, pid, isAlive = () => true) {
 	runtime = new DurableRuntime({
 		cwd,
 		scheduler,
-		timing: () => DEFAULT_TIMING,
+		timing: () => CC_TIMING,
 		maxAgeMs: () => 7 * 86_400_000,
 		syncMs: () => 0,
 		onMissed: (jobs) => missed.push(...jobs),

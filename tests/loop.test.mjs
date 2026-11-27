@@ -59,14 +59,26 @@ test("a standalone request without an interval is self-paced without inventing a
 	assert.doesNotMatch(text, /loopPrompt/);
 });
 
-test("the initial self-paced run includes Monitor only when the tool is available", async () => {
+test("the initial self-paced run requires the observation capability, not a tool name", async () => {
 	const h = await start(makeHarness());
 	h.setRegisteredTools(["Monitor"]);
+	await loop(h).handler("check legacy tool", h.ctx);
+	const incompatible = runEvent(h.sent.at(-1));
+	await h.handlers.get("before_agent_start")(incompatible, h.ctx);
+	assert.doesNotMatch(guidelinesOf(incompatible), /loopPrompt/);
+	const ignoreIncompatible = h.pi.events.on("pi-cc:monitor:observation-link", request => { request.acceptedVersion = 2; });
+	await loop(h).handler("check mismatched capability", h.ctx);
+	const mismatched = runEvent(h.sent.at(-1));
+	await h.handlers.get("before_agent_start")(mismatched, h.ctx);
+	assert.doesNotMatch(guidelinesOf(mismatched), /loopPrompt/);
+	ignoreIncompatible();
+	h.setRegisteredTools([]);
+	h.pi.events.on("pi-cc:monitor:observation-link", request => { request.acceptedVersion = request.version; });
 	await loop(h).handler("check the deploy", h.ctx);
-	const event = runEvent(h.sent[0]);
+	const event = runEvent(h.sent.at(-1));
 	await h.handlers.get("before_agent_start")(event, h.ctx);
 	const text = guidelinesOf(event);
-	assert.match(text, /arm `Monitor` once/);
+	assert.match(text, /observe.*`Monitor` once/);
 	assert.ok(text.includes('loopPrompt` set to "check the deploy"'));
 });
 
@@ -345,7 +357,7 @@ test("the immediate /loop turn also gets loop.md content when the prompt needs i
 
 test("the Monitor guidance names the real loop prompt", async () => {
 	const h = await start(makeHarness());
-	h.setRegisteredTools(["Monitor"]);
+	h.pi.events.on("pi-cc:monitor:observation-link", request => { request.acceptedVersion = request.version; });
 	const chain = await startSelfPaced(h, "watch CI", 60);
 	await runTurn(h);
 	makeDue(h, chain.id);
@@ -446,7 +458,9 @@ test("an interval-bearing /loop can be restarted after it was stopped", async ()
 	await beginRun();
 	assert.ok(await startSelfPaced(h, "check the deploy", 900), "the task variant restarts too");
 
-	// Unrelated stopped marks survive: only this request's marks are cleared.
+	// Unrelated stopped marks survive: create that other activity in its own run.
+	await runTurn(h);
+	await h.handlers.get("before_agent_start")(runEvent({ kind: "user", content: "watch CI separately" }), h.ctx);
 	const unrelated = await startSelfPaced(h, "watch CI", 900);
 	await h.tools.get("cron_delete").execute("c", { id: unrelated.id }, undefined, undefined, h.ctx);
 	await loop(h).handler("15m check the deploy", h.ctx);

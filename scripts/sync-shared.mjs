@@ -11,7 +11,16 @@ let different = false;
 for (const name of siblings) {
 	const target = path.resolve(source, "..", name);
 	if (!fs.existsSync(path.join(target, "package.json"))) continue;
-	const shared = ["render.ts", "tasks.ts", "log-tail.ts"];
+	const shared = [
+		"render.ts",
+		"tasks.ts",
+		"log-tail.ts",
+		"observation-link.ts",
+		"terminal-outbox.ts",
+		"plugin-settings.ts",
+		"scripts/host-paths.mjs",
+		"scripts/typecheck.mjs",
+	];
 	for (const file of shared) {
 		const from = path.join(source, file);
 		const to = path.join(target, file);

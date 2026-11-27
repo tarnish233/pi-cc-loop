@@ -31,14 +31,19 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "typebox";
 import path from "node:path";
 import { configPath, invalidateConfig, loadConfig } from "./config.ts";
-import { cleanRuntimeTemps } from "./temp-files.ts";
 import {
 	humanSchedule,
 	isUnreachable,
 	parseCron,
 } from "./cron.ts";
 import { DURABLE_FILE, LOCK_FILE, DurableRuntime, type Placement } from "./durable.ts";
-import { displayPrompt, isLoopFileSentinel, LoopFileDelivery } from "./loopfile.ts";
+import { cleanRuntimeTemps } from "./temp-files.ts";
+import { CC_EMPTY_LOOP_TASK, durableSyncMs, keepaliveSeconds, maxAgeDays, maxAgeMs, RUN_NOW_HINT, scanIntervalMs, timingConfig } from "./cc-loop-policy.ts";
+import { displayPrompt, isLoopFileSentinel, LOOP_FILE_SENTINEL, LoopFileDelivery } from "./loopfile.ts";
+import { loopTaskDetail, loopTaskItem, type ListedSchedule } from "./loop-task-view.ts";
+import { LOOP_STOPPED_CHANNEL, MONITOR_EVENT_TYPE, supportsObservationMonitor } from "./observation-link.ts";
+import { IMPLICIT_ACTIVITY_CONFLICT, ObservationOwnership, type ObservationRun } from "./observation-ownership.ts";
+import { TerminalOutbox } from "./terminal-outbox.ts";
 import {
 	CRON_CREATE_DESCRIPTION,
 	CRON_CREATE_SNIPPET,
@@ -46,52 +51,45 @@ import {
 	CRON_DELETE_SNIPPET,
 	CRON_LIST_DESCRIPTION,
 	CRON_LIST_SNIPPET,
-	LOOP_FILE_SENTINEL,
 	loopGuidelines,
 	missedJobsMessage,
 	monitorGuidelines,
 	provenance,
 	RULES_PROVENANCE,
-	RUN_NOW_HINT,
 	SCHEDULE_WAKEUP_DESCRIPTION,
 	scheduledTaskProvenance,
 	SCHEDULE_WAKEUP_SNIPPET,
 	loopCommandGuidelines,
 } from "./prompts.ts";
-import { formatClock, formatEta, renderScheduledMessage } from "./renderers.ts";
+import { formatClock, formatEta, renderOutcomeMessage, renderScheduledMessage } from "./renderers.ts";
+import type { OutcomeDetails } from "./renderers.ts";
+
+/**
+ * A scheduled fire and a loop ending are custom messages, never user messages:
+ * the provenance text is addressed to the model, and only a renderer replaces
+ * Pi's raw `[customType]` title for the reader.
+ */
+const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
+const OUTCOME_MESSAGE_TYPE = "pi-cc-loop-outcome";
 import { CONFIG_CHANNEL, registerSettingsCommand } from "./settings.ts";
-import { registerTaskProvider, type TaskDetail, type TaskItem, type TaskStopResult } from "./tasks.ts";
+import { registerTaskProvider, type TaskStopResult } from "./tasks.ts";
 import {
-	DEFAULT_TIMING,
 	generateId,
 	LoopScheduler,
 	nextRunTime,
 	storedJob,
 	type LoopJob,
-	type TimingConfig,
 } from "./schedule.ts";
-import { formatDateTime as dateTime, releaseNotificationHover, setNotificationTui, truncate } from "./render.ts";
+import { releaseNotificationHover, setNotificationTui, truncate } from "./render.ts";
 
 const STATE_ENTRY = "pi-cc-loop-state";
-/** pi-cc-monitor's notification type; its details name the loop a monitor belongs to. */
-const MONITOR_EVENT_TYPE = "Monitor";
 /** Footer status key, shared with every other extension's status line. */
 const STATUS_KEY = "loop";
-
-/**
- * The event channel this extension publishes on when a chain ends. pi-cc-monitor
- * listens to it and stops any monitor that belongs to the chain, the way
- * Claude Code requires ("call ScheduleWakeup with stop: true and TaskStop any
- * Monitor you armed").
- */
-const LOOP_STOPPED_CHANNEL = "loop:stopped";
 
 const MAX_JOBS = 50;
 const MIN_DELAY_SECONDS = 60;
 const MAX_DELAY_SECONDS = 3600;
-/** The one fallback wakeup a self-paced chain gets when the model forgot to reschedule. */
-const DEFAULT_KEEPALIVE_SECONDS = 1200;
-const DEFAULT_MAX_AGE_DAYS = 7;
+const TEMP_CLEANUP_MS = 30 * 60 * 1000;
 /** How many stopped prompts are remembered (and persisted). */
 const MAX_STOPPED_PROMPTS = 20;
 
@@ -101,44 +99,6 @@ interface PersistedState {
 	jobs: LoopJob[];
 	/** Prompts whose chain was stopped and must not be rescheduled. */
 	stopped?: string[];
-}
-
-function envNumber(name: string, fallback: number): number {
-	const raw = process.env[name];
-	if (raw === undefined) return fallback;
-	const value = Number(raw);
-	return Number.isFinite(value) ? value : fallback;
-}
-
-function maxAgeDays(): number {
-	return Math.max(0, envNumber("PI_LOOP_MAX_AGE_DAYS", DEFAULT_MAX_AGE_DAYS));
-}
-
-function maxAgeMs(): number {
-	return maxAgeDays() * 86_400_000;
-}
-
-/**
- * Fallback delay used when the model forgot to reschedule a self-paced loop.
- * Set to 0 to disable the fallback: the chain then ends as soon as a turn
- * finishes without a reschedule.
- */
-function keepaliveSeconds(): number {
-	return Math.max(0, envNumber("PI_LOOP_KEEPALIVE_SECONDS", DEFAULT_KEEPALIVE_SECONDS));
-}
-
-/** Claude Code's offsets; `PI_LOOP_JITTER=0` runs jobs exactly on their cron minute. */
-function timingConfig(): TimingConfig {
-	const fraction = Math.min(1, Math.max(0, envNumber("PI_LOOP_JITTER", DEFAULT_TIMING.recurringFrac)));
-	return {
-		...DEFAULT_TIMING,
-		recurringFrac: fraction,
-		oneShotMaxMs: fraction > 0 ? DEFAULT_TIMING.oneShotMaxMs : 0,
-	};
-}
-
-function durableSyncMs(): number {
-	return Math.max(0, envNumber("PI_LOOP_DURABLE_SYNC_MS", 5000));
 }
 
 /** Models used to Claude Code may echo the prompt with its `/loop ` prefix. */
@@ -184,7 +144,12 @@ export function getScheduler(pi: ExtensionAPI): LoopScheduler | undefined {
 export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	/** Cached context for UI helpers. */
 	let lastCtx: ExtensionContext | undefined;
-	let tempCleanupTimer: ReturnType<typeof setInterval> | undefined;
+	let disposed = false;
+	let runtimeGeneration = 0;
+	let settling = false;
+	const createOutcomeOutbox = () => new TerminalOutbox<number>(pi, () => lastCtx?.isIdle() === true);
+	let outcomes = createOutcomeOutbox();
+	let outcomeSequence = 0;
 	/**
 	 * Prompts whose chain was stopped. A stopped chain must not be resurrected
 	 * by a late `schedule_wakeup` call from a turn that a still-running monitor
@@ -193,22 +158,19 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	const stoppedPrompts = new Set<string>();
 	/** Signature of the last persisted state, to avoid redundant session entries. */
 	let lastPersistedSignature = "";
-	/**
-	 * How many times each prompt has been run as a loop tick. The immediate run
-	 * of `/loop` and the fires of the job created afterwards share a counter.
-	 */
-	const tickCounters = new Map<string, number>();
-	const loopFile = new LoopFileDelivery();
+	const loopFile = new LoopFileDelivery(CC_EMPTY_LOOP_TASK);
 	let durable: DurableRuntime | undefined;
+	let tempCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	/**
 	 * What the current run belongs to, derived from its starting message:
-	 * `chainId` is the self-paced chain whose tick (or monitor) started it,
+	 * `activityId` is the stable identity allocated before a Loop's first arm,
+	 * `chainId` is the existing wakeup named by a tick or a legacy event,
 	 * `cronId` the fixed-interval job whose tick started it, `armed` the chains
-	 * it armed, `tick` the tick number of a /loop run, `loopRequest` set when a
+	 * it armed, `loopRequest` set when a
 	 * typed /loop started it (its rules already say to do the task now),
 	 * `cancelled` set when the run's own chain was stopped while it was running.
 	 */
-	let currentRun: { chainId?: string; cronId?: string; armed?: Set<string>; tick?: number; loopRequest?: boolean; cancelled?: boolean } = {};
+	let currentRun: ObservationRun & { armed?: Set<string> } = {};
 
 	const scheduler = new LoopScheduler({
 		dispatch: (job) => deliverTick(job),
@@ -236,14 +198,15 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const text = `Loop ${job.id} ended: it ran its final time and recurring jobs expire after ${maxAgeDays()} days. Do not reschedule it.`;
 			const ctx = lastCtx;
 			if (ctx) notify(ctx, text, "info");
-			wakeOutcome(text);
+			wakeOutcome(text, { cause: "expired", jobId: job.id, prompt: job.prompt });
 		},
 		onDispatchError: (job, error) => {
 			const outcome = job.kind === "wakeup" || !job.recurring ? "it remains due for retry" : "this tick was skipped without consuming a fire";
 			const text = `Loop ${job.id} failed to deliver (${error.message}). ${outcome}. Do not assume this tick ran.`;
 			const ctx = lastCtx;
 			if (ctx) notify(ctx, text, "warning");
-			wakeOutcome(text);
+			// Still due or skipped, not a dead loop: a warning, not a red terminal card.
+			wakeOutcome(text, { cause: "dispatch-failed", jobId: job.id, prompt: job.prompt, reason: error.message, retry: job.kind === "wakeup" || !job.recurring ? "due" : "skipped" });
 		},
 		onScan: (now) => {
 			durable?.maintain(now);
@@ -252,8 +215,34 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		},
 	});
 	schedulers.set(pi, scheduler);
+	const createObservationOwnership = () => new ObservationOwnership(pi, {
+		run: () => currentRun,
+		createId: () => {
+			let id: string;
+			do { id = generateId(); } while (scheduler.get(id));
+			return id;
+		},
+		normalize: normalizePrompt,
+		findChain: findLegacyChain,
+		getChain: id => { const job = scheduler.get(id); return job?.kind === "wakeup" ? job : undefined; },
+		isStopped: prompt => stoppedPrompts.has(prompt),
+	});
+	let observationOwnership = createObservationOwnership();
 
 	// ---------------------------------------------------------------- helpers
+
+	/** Text is a compatibility selector only; never silently choose a same-name activity. */
+	function findLegacyChain(prompt: string): LoopJob | undefined {
+		const matches = scheduler.byKind("wakeup").filter(job => job.prompt === prompt);
+		if (matches.length > 1) throw new Error("Ambiguous /loop prompt: more than one activity has this text. Use an identified Loop run; use cron_list/cron_delete ids to manage individual activities.");
+		return matches[0];
+	}
+
+	function currentChain(): LoopJob | undefined {
+		const id = currentRun.activityId === null ? undefined : currentRun.activityId ?? currentRun.chainId;
+		const job = id ? scheduler.get(id) : undefined;
+		return job?.kind === "wakeup" ? job : undefined;
+	}
 
 	/** What a job's persisted signature depends on; per-fire bookkeeping is left out. */
 	function signatureOf(job: LoopJob): unknown[] {
@@ -304,7 +293,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * message carries no details, so the run's guidelines wait here for
 	 * before_agent_start to pick them up.
 	 */
-	const queuedRuns: Array<{ content: string; guidelines: string[] }> = [];
+	const queuedRuns: Array<{ content: string; guidelines: string[]; activityPrompt?: string }> = [];
 
 	function queueRun(run: (typeof queuedRuns)[number]): void {
 		queuedRuns.push(run);
@@ -368,36 +357,37 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * last part a monitor that keeps firing wakes the agent, the agent
 	 * reschedules, and the loop the user just stopped comes back.
 	 */
-	function retireChain(chain: LoopJob, reason: string, options: { silent?: boolean } = {}): void {
+	function retireChain(chain: LoopJob, reason: string, options: { silent?: boolean; cause?: "stopped" | "expired" } = {}): void {
 		rememberStopped(chain.prompt);
 		// The run whose chain this was must not arm again, even under a reworded
 		// prompt: the stopped-prompt memory only matches the exact text.
-		if (currentRun.chainId === chain.id || currentRun.armed?.has(chain.id)) {
+		if (currentRun.activityId === chain.id || currentRun.chainId === chain.id || currentRun.armed?.has(chain.id)) {
 			currentRun.cancelled = true;
 		}
+		const observationGroups = observationOwnership.retire(chain);
 		scheduler.remove(chain.id);
 		try {
-			pi.events.emit(LOOP_STOPPED_CHANNEL, { prompt: chain.prompt, reason });
+			pi.events.emit(LOOP_STOPPED_CHANNEL, { prompt: chain.prompt, observationGroups, reason });
 		} catch {
 			// a listener must never break the loop
 		}
-		const text = `Loop ${chain.id} stopped (${reason}). Any Monitor bound to this loop was stopped with it. Do not reschedule this loop or re-arm those monitors unless the user asks.`;
+		// A duration limit ends a loop exactly as the scheduler's own expiry does, so
+		// both name the same outcome instead of calling one of them a manual stop.
+		const cause = options.cause ?? "stopped";
+		const text = `Loop ${chain.id} ${cause === "expired" ? "ended" : "stopped"} (${reason}). Any Monitor observation bound to this loop was stopped with it; independent external runner jobs were not cancelled. Do not reschedule this loop, re-arm those observations or resubmit the business jobs unless the user asks.`;
 		const ctx = lastCtx;
 		if (ctx && !options.silent) notify(ctx, text, "info");
 		// Esc already cancelled the reply; waking would restart it. Every other stop wakes.
-		if (!options.silent) wakeOutcome(text);
+		if (!options.silent) wakeOutcome(text, { cause, jobId: chain.id, prompt: chain.prompt, reason });
 	}
 
 	/** End, failure and stop have no launch parameter that can silence them. */
-	function wakeOutcome(text: string): void {
-		try {
-			pi.sendMessage(
-				{ customType: "pi-cc-loop-outcome", content: text, display: true, details: { ended: true } },
-				{ deliverAs: "followUp", triggerTurn: true },
-			);
-		} catch {
-			// a stale session must not break stop or expiry
-		}
+	function wakeOutcome(text: string, outcome: OutcomeDetails): void {
+		outcomes.enqueue(
+			++outcomeSequence,
+			{ customType: OUTCOME_MESSAGE_TYPE, content: text, display: true, details: { ended: true, ...outcome } },
+			!settling,
+		);
 	}
 
 	function ensureDurable(): DurableRuntime {
@@ -429,7 +419,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	}
 
 	/** This session's jobs plus the durable jobs it can see but does not run. */
-	function listJobs(): Array<LoopJob & { foreignReason?: "other-session" | "other-folder" }> {
+	function listJobs(): ListedSchedule[] {
 		return [...scheduler.list(), ...(durable?.foreignJobs() ?? [])];
 	}
 
@@ -472,12 +462,6 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	/**
-	 * A scheduled fire is a custom message, not a user message: the provenance
-	 * line in its content is addressed to the model, and only a custom message
-	 * can draw something else for the reader (`renderScheduledMessage`).
-	 */
-	const TICK_MESSAGE_TYPE = "pi-cc-loop-tick";
 
 	/**
 	 * The per-run rules, appended to the run as a hidden message instead of
@@ -514,7 +498,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * mid-response."
 	 */
 	function deliverTick(job: LoopJob): void {
-		const tick = Math.max(tickCounters.get(job.prompt) ?? 0, job.tickCount ?? 0) + 1;
+		const tick = (job.tickCount ?? 0) + 1;
 		const body = resolvePrompt(job.prompt);
 		// A fixed-interval tick is what it is - a scheduled task - and a
 		// self-paced tick keeps the loop framing. The rules for the run are
@@ -552,21 +536,11 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}
 		// Counted only once the message is in: a throw here means the tick never
 		// happened, so it must not use up a number.
-		tickCounters.set(job.prompt, tick);
 		job.tickCount = tick;
 
 		if (job.maxFires !== undefined && (job.fireCount ?? 0) >= job.maxFires) {
 			const ctx = lastCtx;
-			if (ctx) notify(ctx, `loop ${job.id} reached its cap of ${job.maxFires} fires`, "info");
-		}
-	}
-
-	/** True when the pi-cc-monitor extension registered its Monitor tool. */
-	function monitorToolAvailable(): boolean {
-		try {
-			return pi.getAllTools().some((tool) => tool.name === "Monitor");
-		} catch {
-			return false;
+			if (ctx) notify(ctx, `Loop ${job.id} reached its cap of ${job.maxFires} fires`, "info");
 		}
 	}
 
@@ -586,7 +560,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 			const limit = maxAgeMs();
 			if (limit > 0 && now - (chain.chainStartedAt ?? chain.createdAt) >= limit) {
-				retireChain(chain, `reached its ${maxAgeDays()}-day limit`);
+				retireChain(chain, `reached its ${maxAgeDays()}-day limit`, { cause: "expired" });
 				continue;
 			}
 			if (chain.keepaliveUsed) continue;
@@ -619,14 +593,34 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * an interrupted unrelated turn leaves the loops alone; `/loop stop` stops
 	 * them. Fixed-interval jobs keep running either way, as in Claude Code.
 	 */
+	function stopUnarmedObservations(reason: string, silent = true): number {
+		const ended = observationOwnership.cancelPending(currentRun);
+		if (!ended.length) return 0;
+		currentRun.cancelled = true;
+		// An initial request may observe an older same-prompt chain. Stop only
+		// its new group; don't bar or retire the older chain by prompt alone.
+		for (const owner of ended) if (!scheduler.byKind("wakeup").some(chain => chain.prompt === owner.prompt)) rememberStopped(owner.prompt);
+		persist(scheduler.list());
+		try { pi.events.emit(LOOP_STOPPED_CHANNEL, { observationGroups: ended.map(owner => owner.id), reason }); }
+		catch { /* ownership is already retired, so a late event cannot re-arm */ }
+		if (!silent) wakeOutcome(
+			`Initial /loop stopped (${reason}). Its unarmed observations were stopped; independent external runner jobs were not cancelled. Do not re-arm or resubmit unless the user asks.`,
+			{ cause: "stopped", prompt: ended[0]?.prompt, reason },
+		);
+		return ended.length;
+	}
+
 	function cancelCurrentLoop(ctx: ExtensionContext): void {
-		const ids = new Set([...(currentRun.chainId ? [currentRun.chainId] : []), ...(currentRun.armed ?? [])]);
+		const ids = new Set([...(currentRun.activityId ? [currentRun.activityId] : []), ...(currentRun.chainId ? [currentRun.chainId] : []), ...(currentRun.armed ?? [])]);
 		const chains = [...ids]
 			.map((id) => scheduler.get(id))
 			.filter((chain): chain is LoopJob => chain?.kind === "wakeup");
-		if (!chains.length) return;
 		for (const chain of chains) retireChain(chain, "pending wakeup cancelled (Esc)", { silent: true });
-		notify(ctx, `Pending wakeup cancelled \u00b7 loop ${chains.map((chain) => chain.id).join(", ")} ended`, "info");
+		const unarmed = stopUnarmedObservations("pending wakeup cancelled (Esc)");
+		if (chains.length || unarmed) notify(ctx,
+			`Pending wakeup cancelled \u00b7 ${chains.length ? "loop " + chains.map(chain => chain.id).join(", ") + " ended" : "initial /loop observations ended"}`,
+			"info",
+		);
 	}
 
 	// ---------------------------------------------------------------- command
@@ -660,8 +654,10 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// drives cron_create / cron_list / cron_delete / schedule_wakeup itself.
 			// The per-run rules travel with the run through before_agent_start.
 			const text = raw ? `/loop ${raw}` : "/loop";
-			const guidelines = [loopCommandGuidelines(raw, { monitorAvailable: monitorToolAvailable() })];
+			const guidelines = [loopCommandGuidelines(raw, { monitorAvailable: supportsObservationMonitor(pi) })];
+			const generation = runtimeGeneration;
 			const send = () => {
+				if (disposed || generation !== runtimeGeneration) return;
 				// The user asking for this loop again is a new loop: the mark that
 				// keeps a late schedule_wakeup from reviving a stopped chain must
 				// not block it.
@@ -673,11 +669,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				// end at whitespace: `5m.js audit` is a task, not an interval.
 				const withoutInterval = prompt.replace(/^\d+[smhd](?=\s|$)\s*/i, "").trim();
 				if (withoutInterval !== prompt) stoppedPrompts.delete(withoutInterval || LOOP_FILE_SENTINEL);
-				queueRun({ content: text, guidelines });
+				const management = /^(?:status|list)$|^stop(?:\s+\S+)?$/i.test(raw);
+				const entry = { content: text, guidelines, ...(!management ? { activityPrompt: withoutInterval || LOOP_FILE_SENTINEL } : {}) };
+				queueRun(entry);
 				try {
 					pi.sendUserMessage(text, { expandPromptTemplates: false, deliverAs: "followUp" });
 				} catch {
-					// The session was replaced while this request waited.
+					const index = queuedRuns.indexOf(entry);
+					if (index >= 0) queuedRuns.splice(index, 1);
 				}
 			};
 
@@ -716,108 +715,13 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	// ------------------------------------------------------------- task panel
 
 	/** One job by id, including a durable job another session runs. */
-	function jobFor(id: string): (LoopJob & { foreignReason?: "other-session" | "other-folder" }) | undefined {
+	function jobFor(id: string): ListedSchedule | undefined {
 		return scheduler.get(id) ?? durable?.foreignJobs().find((job) => job.id === id);
 	}
 
-	/** The live state a pending/wakeup job is in right now. */
-	function jobState(job: LoopJob & { foreignReason?: string }, now: number): string {
-		if (job.foreignReason) return job.foreignReason === "other-folder" ? "foreign (other folder)" : "foreign (other session)";
-		if (job.pending) return "pending (waiting for idle)";
-		if (job.kind === "wakeup") {
-			if (job.keepaliveTurn) return "keepalive turn";
-			if (job.awaitingReschedule) {
-				try {
-					return lastCtx?.isIdle() === false ? "active (turn running)" : "active / awaiting reschedule";
-				} catch {
-					return "active / awaiting reschedule";
-				}
-			}
-		}
-		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
-		if (at !== undefined && at <= now) return "due";
-		return at !== undefined ? "scheduled" : "armed";
-	}
-
-	function jobItem(job: LoopJob & { foreignReason?: string }, now: number): TaskItem {
-		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
-		const meta: string[] = [];
-		if (job.pending) meta.push("waiting for idle");
-		else if (job.foreignReason) meta.push(job.foreignReason === "other-folder" ? "other folder" : "other session");
-		else if (at !== undefined) meta.push(`${at <= now ? "due" : "next"} ${at <= now ? "now" : formatEta(at - now)}`);
-		meta.push(`${job.fireCount ?? 0} fire${job.fireCount === 1 ? "" : "s"}`);
-		if (job.durable) meta.push("durable");
-		return {
-			id: job.id,
-			title: displayPrompt(job.prompt),
-			createdAt: job.createdAt,
-			state: jobState(job, now).replace(/ \(.*$/, ""),
-			active: true,
-			meta: meta.join(" · "),
-
-		};
-	}
-
-	function jobDetail(job: LoopJob & { foreignReason?: string }, now: number): TaskDetail {
-		const at = job.kind === "cron" ? job.nextFireAt : job.scheduledFor;
-		const state = jobState(job, now);
-		const ownership = job.foreignReason
-			? job.foreignReason === "other-folder"
-				? "durable · copied from another folder (listed, not run here)"
-				: "durable · run by another Pi session in this project"
-			: job.durable
-				? durable?.owner
-					? "durable · run by this session"
-					: "durable · loaded, but another session holds the scheduler lock"
-				: "session only";
-		const fires = `${job.fireCount ?? 0}${job.maxFires !== undefined ? `/${job.maxFires}` : ""}` +
-			(job.lastFiredAt !== undefined ? ` · last ${dateTime(job.lastFiredAt)}` : "");
-		const rows = [
-			{ label: "Kind", value: job.kind === "cron" ? "fixed interval (cron)" : "self-paced wakeup" },
-			{ label: "State", value: state },
-			{
-				label: "Schedule",
-				value: job.kind === "cron" ? `${job.cron ?? "?"} (${humanSchedule(job.cron ?? "")})` : "self-paced: the model picks the next delay",
-			},
-			{
-				label: "Next run",
-				value:
-					at === undefined
-						? "unscheduled"
-						: `${dateTime(at)} · ${at <= now ? "due now" : `in ${formatEta(at - now)}`} · ${at} ms`,
-			},
-			{ label: "Reason", value: job.reason ?? "—" },
-			{ label: "Fires", value: fires },
-			{
-				label: "Pending",
-				value: job.pending
-					? `yes · since ${dateTime(job.dueAt)} · waiting for the agent to go idle`
-					: "no",
-			},
-			{
-				label: "Chain",
-				value:
-					job.kind === "wakeup"
-						? job.awaitingReschedule
-							? "active · the turn is running or waiting to reschedule"
-							: job.keepaliveUsed
-								? "keepalive used"
-								: "armed"
-						: "fixed interval · fires its own next tick",
-			},
-			{ label: "Ownership", value: ownership },
-			{ label: "Prompt", value: displayPrompt(job.prompt) },
-			{ label: "Source", value: job.source },
-			{ label: "Created", value: dateTime(job.createdAt) },
-			{ label: "Project", value: job.createdInProject ?? "—" },
-			{ label: "Keepalive", value: job.keepaliveUsed ? (job.keepaliveTurn ? "this turn is the keepalive" : "used once") : "not used" },
-		] satisfies TaskDetail["rows"];
-		return {
-			rows,
-			note: job.foreignReason
-				? "Not running here. x removes it from .pi/scheduled_tasks.json; it does not abort another session's turn."
-				: "x removes the schedule (and any Monitor bound to a stopped self-paced loop). It does not abort the main agent.",
-		};
+	function isRunningSchedule(id: string): boolean {
+		if (currentChain()?.id !== id) return false;
+		try { return lastCtx?.isIdle() === false; } catch { return false; }
 	}
 
 	function stopTask(id: string): TaskStopResult {
@@ -847,14 +751,14 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	const tasks = registerTaskProvider(pi, {
 		id: "loop",
 		label: "Loop",
-		list(): TaskItem[] {
+		list() {
 			const now = Date.now();
-			return listJobs().map((job) => jobItem(job, now));
+			return listJobs().map(job => loopTaskItem(job, now, isRunningSchedule(job.id)));
 		},
-		detail(item: TaskItem): TaskDetail {
+		detail(item) {
 			const job = jobFor(item.id);
 			if (!job) throw new Error("this job is no longer listed");
-			return jobDetail(job, Date.now());
+			return loopTaskDetail(job, Date.now(), isRunningSchedule(job.id), durable?.owner === true);
 		},
 		stop: stopTask,
 	});
@@ -913,6 +817,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
+			if (currentRun.cancelled) throw new Error("The /loop this turn belongs to was stopped and must not be rescheduled. Do not create a replacement cron; ask the user to start a new /loop.");
 			if (!parseCron(params.cron)) {
 				throw new Error(`Invalid cron expression '${params.cron}'. Expected 5 fields: M H DoM Mon DoW.`);
 			}
@@ -936,12 +841,12 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				createdAt: Date.now(),
 				durable: params.durable ?? false,
 				maxFires: params.maxFires,
-				// Continue the tick numbering of the /loop run that led here.
-				tickCount: tickCounters.get(params.prompt) ?? currentRun.tick ?? 0,
 				label: humanSchedule(params.cron),
 				source: "cron_create",
 			};
 			const placement = addJob(job);
+			(currentRun.createdCronPrompts ??= new Set()).add(normalizePrompt(job.prompt));
+			observationOwnership.detachForCron(currentRun, job.prompt);
 			const nextAt = job.nextFireAt ?? nextRunTime(job, job.createdAt, timingConfig()) ?? undefined;
 
 			const lines = [`Scheduled ${job.id} (${job.label}, next run ${formatClock(nextAt)})`];
@@ -1143,21 +1048,27 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				};
 			}
 
+			const implicitPrompt = observationOwnership.implicitPrompt(currentRun);
 			if (params.stop === true) {
-				// Stop the loop this turn belongs to; otherwise the named one, or all.
-				const current = currentRun.chainId ? scheduler.get(currentRun.chainId) : undefined;
-				const named = params.prompt ? scheduler.findChain(normalizePrompt(params.prompt)) : undefined;
-				const chains = current ? [current] : named ? [named] : scheduler.byKind("wakeup");
+				if (implicitPrompt !== undefined && params.prompt && normalizePrompt(params.prompt) !== implicitPrompt) {
+					throw new Error("That prompt is not this turn’s implicit Loop. To stop a different Loop, use cron_delete with its id.");
+				}
+				// The current activity wins, even before its first arm; text is legacy-only.
+				const current = currentChain();
+				const scoped = currentRun.activityId !== undefined || currentRun.chainId !== undefined || currentRun.cancelled;
+				const named = !scoped && params.prompt ? findLegacyChain(normalizePrompt(params.prompt)) : undefined;
+				const chains = scoped ? current ? [current] : [] : named ? [named] : scheduler.byKind("wakeup");
 				for (const chain of chains) retireChain(chain, "stopped by the agent");
+				const unarmed = stopUnarmedObservations("stopped by the agent", false);
 				const value = { stopped: true, cancelledWakeups: chains.length };
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: chains.length
-								? `Loop stopped \u2014 cancelled ${chains.length} pending wakeup(s); no further dynamic-loop wakeups scheduled. ` +
+							text: chains.length || unarmed
+								? `Loop stopped \u2014 cancelled ${chains.length} pending wakeup(s); ${unarmed ? unarmed + " unarmed observation group(s) stopped; " : ""}no further dynamic-loop wakeups scheduled. ` +
 									"Any Monitor armed for this loop was stopped with it. Write the loop's outcome for the user, then end the turn."
-								: "Loop stopped \u2014 any dynamic loop in this session is ended; there was no pending wakeup to cancel. " +
+								: "Loop stopped \u2014 there was no pending wakeup to cancel for this run; unrelated loops were left unchanged. " +
 									"If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call \u2014 cancel it with cron_delete.",
 						},
 					],
@@ -1182,7 +1093,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 
 			// This run's own chain was stopped mid-run: a late arm must not start a
 			// replacement chain, even under a reworded prompt.
-			if (currentRun.cancelled) {
+			if (currentRun.cancelled || typeof currentRun.activityId === "string" && !observationOwnership.owner(currentRun.activityId)) {
 				throw new Error(
 					"The /loop this turn belongs to was stopped and must not be rescheduled. " +
 						"Do not call schedule_wakeup for it again. If the work should continue, ask the user to start a new /loop.",
@@ -1196,13 +1107,20 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			const wasClamped = !Number.isFinite(requested) || delay !== rounded;
 
 			const now = Date.now();
-			// A tick of a chain re-arms that chain even if the model reworded the prompt.
-			let chain =
-				scheduler.findChain(prompt) ?? (currentRun.chainId ? scheduler.get(currentRun.chainId) : undefined);
+			// An activity id cannot overwrite a different kind of schedule, even on collision.
+			const occupying = currentRun.activityId ? scheduler.get(currentRun.activityId) : undefined;
+			if (occupying && occupying.kind !== "wakeup") throw new Error("Loop activity identity is occupied by a different schedule; no wakeup was created");
+			// A tentative binding in an ordinary user run is scoped to its own
+			// prompt. Explicit /loop runs and identified wakes stay ID-scoped.
+			const differentImplicitActivity = implicitPrompt !== undefined && implicitPrompt !== prompt;
+			const scoped = !differentImplicitActivity && (currentRun.activityId !== undefined || currentRun.chainId !== undefined);
+			let chain = scoped ? currentChain() : findLegacyChain(prompt);
+			if (differentImplicitActivity && !chain) throw new Error(IMPLICIT_ACTIVITY_CONFLICT);
+			const activityRun: ObservationRun = scoped ? currentRun : {};
 			if (chain) {
 				const limit = maxAgeMs();
 				if (limit > 0 && now - (chain.chainStartedAt ?? chain.createdAt) >= limit) {
-					retireChain(chain, `reached its ${maxAgeDays()}-day limit`);
+					retireChain(chain, `reached its ${maxAgeDays()}-day limit`, { cause: "expired" });
 					const value = { stopped: true, agedOut: true, id: chain.id, cancelledWakeups: 1 };
 					return {
 						content: [
@@ -1218,25 +1136,27 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 					};
 				}
 			} else {
-				if (stoppedPrompts.has(prompt)) {
+				const initialPrompt = currentRun.activityId ? observationOwnership.owner(currentRun.activityId)?.prompt : undefined;
+				if (stoppedPrompts.has(prompt) && initialPrompt !== prompt) {
 					throw new Error(
 						`The /loop chain for "${prompt}" was stopped and must not be rescheduled. ` +
 							"Do not call schedule_wakeup for it again. If the work should continue, ask the user to start a new /loop.",
 					);
 				}
+				if (!activityRun.activityId) observationOwnership.begin(activityRun, prompt);
 				chain = {
-					id: generateId(),
+					id: activityRun.activityId!,
 					kind: "wakeup",
 					prompt,
 					recurring: false,
 					createdAt: now,
 					chainStartedAt: now,
 					durable: false,
-					tickCount: tickCounters.get(prompt) ?? currentRun.tick ?? 0,
 					source: "schedule_wakeup",
 				};
 				addJob(chain);
 			}
+			observationOwnership.link(activityRun, chain);
 
 			// The run that arms a chain belongs to it: Esc in this run cancels it.
 			(currentRun.armed ??= new Set()).add(chain.id);
@@ -1289,33 +1209,58 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * it wants a different time.
 	 */
 	pi.registerMessageRenderer(TICK_MESSAGE_TYPE, renderScheduledMessage);
+	// Without a renderer Pi titles this card with the raw custom type.
+	pi.registerMessageRenderer(OUTCOME_MESSAGE_TYPE, renderOutcomeMessage);
+
+	pi.on("turn_end", (event, ctx) => {
+		lastCtx = ctx;
+		if (disposed || event.outcome !== "completed" || ctx.signal?.aborted) return;
+		if (outcomes.flush(false)) return { continue: true };
+	});
+	pi.on("session_before_compact", (event) => {
+		if (event.reason === "manual") outcomes.cancelWakeRetry();
+	});
+	pi.on("session_compact_failed", (event, ctx) => {
+		lastCtx = ctx;
+		if (event.reason === "manual") outcomes.flush(false);
+	});
 
 	pi.on("before_agent_start", (event, ctx) => {
+		if (disposed) return;
 		lastCtx = ctx;
+		outcomes.cancelWakeRetry();
+		observationOwnership.settle(currentRun);
 		currentRun = {};
 
 		// Our own messages are ordinary user messages now, so the instructions
 		// for the run travel with the queued entry.
 		if (event.messageType === "user") {
 			const queued = takeQueuedRun(event.prompt);
-			if (!queued) return;
+			if (!queued) {
+				currentRun = { userTurn: true };
+				return;
+			}
 			currentRun = { loopRequest: true };
+			if (queued.activityPrompt !== undefined) observationOwnership.begin(currentRun, queued.activityPrompt);
 			return rulesFor(queued.guidelines);
 		}
 		if (event.messageType !== "custom") return;
+
+		// An outcome is a fact, not a new request to borrow another same-name activity.
+		if (event.message.customType === OUTCOME_MESSAGE_TYPE) {
+			currentRun.activityId = null;
+			return;
+		}
 
 		if (event.message.customType === TICK_MESSAGE_TYPE) {
 			const details = (event.message.details ?? {}) as {
 				kind?: "cron" | "wakeup";
 				jobId?: string;
-				cron?: string;
-				tickCount?: number;
 				loopFile?: boolean;
 			};
 			currentRun = {
 				chainId: details.kind === "wakeup" ? details.jobId : undefined,
 				cronId: details.kind === "cron" ? details.jobId : undefined,
-				tick: details.tickCount,
 			};
 			// Pi compacts before before_agent_start, so a compaction reset only
 			// repairs the next tick: this run's reminder may point at a body the
@@ -1344,20 +1289,38 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 				if (details.jobId) currentRun.cancelled = true;
 				return;
 			}
+			currentRun.activityId = observationOwnership.forChain(chain);
 			const guidelines = [loopGuidelines(chain.prompt)];
-			if (monitorToolAvailable()) guidelines.push(monitorGuidelines(chain.prompt));
+			if (supportsObservationMonitor(pi)) guidelines.push(monitorGuidelines(chain.prompt));
 			const full = supplement();
 			if (full) guidelines.push(full.text);
 			return rulesFor(guidelines, full?.token);
 		}
 
 		if (event.message.customType === MONITOR_EVENT_TYPE) {
-			// A monitor bound to a loop woke the agent: the run belongs to that loop.
-			// The monitor stores the prompt the model gave it; the chain is keyed
-			// without a leading `/loop`, so both spellings find it.
-			const loopPrompt = (event.message.details as { loopPrompt?: unknown } | undefined)?.loopPrompt;
-			const prompt = typeof loopPrompt === "string" ? normalizePrompt(loopPrompt) : undefined;
-			const chain = prompt !== undefined ? scheduler.findChain(prompt) : undefined;
+			// Identified events retain their activity even when their text names another Loop.
+			const details = event.message.details as { loopPrompt?: unknown; loopObservationGroup?: unknown } | undefined;
+			const prompt = typeof details?.loopPrompt === "string" ? normalizePrompt(details.loopPrompt) : undefined;
+			// null is deliberate no-affinity; only an absent field uses legacy lookup.
+			if (details?.loopObservationGroup === null) { currentRun.activityId = null; return; }
+			const group = typeof details?.loopObservationGroup === "string" ? details.loopObservationGroup : undefined;
+			const owner = group ? observationOwnership.owner(group) : undefined;
+			let chain: LoopJob | undefined;
+			if (group) {
+				currentRun.activityId = group;
+				chain = owner?.chainId ? scheduler.get(owner.chainId) : undefined;
+				if (!owner || owner.chainId && !chain) {
+					currentRun.cancelled = true;
+					return rulesFor(["This Monitor's /loop attempt was stopped or replaced. Do not execute its loop task, re-arm observations, reschedule or resubmit external jobs. Acknowledge the external fact only if needed."]);
+				}
+			} else if (prompt !== undefined) {
+				try { chain = findLegacyChain(prompt); }
+				catch {
+					currentRun.cancelled = true;
+					return rulesFor(["This legacy Monitor event matches more than one /loop activity. Do not guess by task text, execute a loop task, re-arm, reschedule or resubmit external jobs. Use explicit ids to manage the activities."]);
+				}
+				if (chain) currentRun.activityId = observationOwnership.forChain(chain);
+			}
 			if (chain) {
 				currentRun.chainId = chain.id;
 				// A monitor can wake the agent after a compaction or tree navigation
@@ -1370,7 +1333,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			}
 			// A queued monitor event can outlive its stopped loop: the stopped memo
 			// still bars a re-arm. No memo means a genuinely new loop; allow it.
-			else if (prompt !== undefined && stoppedPrompts.has(prompt)) currentRun.cancelled = true;
+			else if (!group && prompt !== undefined && stoppedPrompts.has(prompt)) currentRun.cancelled = true;
 			return;
 		}
 	});
@@ -1381,16 +1344,26 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * keepalive. Then a pending tick may go out.
 	 */
 	pi.on("agent_settled", async (event, ctx) => {
+		if (disposed) return;
 		lastCtx = ctx;
-		if ((event as { aborted?: boolean } | undefined)?.aborted) cancelCurrentLoop(ctx);
-		settleChains(ctx);
-		currentRun = {};
-		scheduler.notifyIdle();
+		settling = true;
+		try {
+			if (event.aborted) cancelCurrentLoop(ctx);
+			else settleChains(ctx);
+			observationOwnership.settle(currentRun);
+			currentRun = {};
+		} finally {
+			settling = false;
+			outcomes.flush(!event.aborted);
+		}
+		if (!event.aborted || ctx.isIdle()) scheduler.notifyIdle();
 	});
 
 	/** After a compaction, send the full loop.md tasks again on the next tick. */
-	pi.on("session_compact", async () => {
+	pi.on("session_compact", async (event, ctx) => {
+		lastCtx = ctx;
 		loopFile.reset();
+		if (event.reason === "manual") outcomes.flush(false);
 	});
 
 	/**
@@ -1412,14 +1385,26 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 	 * most one conservative full resend.
 	 */
 	pi.on("session_before_tree", async () => {
+		outcomes.cancelWakeRetry();
 		loopFile.reset();
 	});
-	pi.on("session_tree", async () => {
+	pi.on("session_tree", async (_event, ctx) => {
+		if (disposed) return;
+		lastCtx = ctx;
 		loopFile.reset();
+		if (ctx.isIdle()) outcomes.flush(true);
 	});
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
+		// Rebinding a stopped facade must not retain closed delivery resources
+		// or ownership; normal host replacement starts with a fresh factory.
+		if (disposed) {
+			disposed = false;
+			outcomes = createOutcomeOutbox();
+			observationOwnership = createObservationOwnership();
+			schedulers.set(pi, scheduler);
+		}
 		// The card says "click to show more" only where Pi actually delivers mouse
 		// events: fullscreen. An empty widget is the native way to reach the TUI.
 		if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.setWidget === "function") {
@@ -1433,7 +1418,7 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 		if (tempCleanupTimer) clearInterval(tempCleanupTimer);
 		const cleanupTemps = () => cleanRuntimeTemps([configPath(), path.join(ctx.cwd, DURABLE_FILE), path.join(ctx.cwd, LOCK_FILE)]);
 		cleanupTemps();
-		tempCleanupTimer = setInterval(cleanupTemps, 30 * 60 * 1000);
+		tempCleanupTimer = setInterval(cleanupTemps, TEMP_CLEANUP_MS);
 		tempCleanupTimer.unref?.();
 		durable?.stop();
 		restoreState(ctx, (event as { reason?: string } | undefined)?.reason);
@@ -1445,12 +1430,18 @@ export default function piCcLoopExtension(pi: ExtensionAPI): void {
 			// this session's ordinary (non-durable) scheduled jobs.
 			notify(ctx, `Durable jobs unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
-		scheduler.start();
+		scheduler.start(scanIntervalMs());
 	});
 
 	pi.on("session_shutdown", async () => {
+		disposed = true;
+		runtimeGeneration++;
 		if (tempCleanupTimer) clearInterval(tempCleanupTimer);
 		tempCleanupTimer = undefined;
+		outcomes.dispose();
+		observationOwnership.dispose();
+		currentRun = {};
+		queuedRuns.length = 0;
 		releaseNotificationHover();
 		// Close an open task overlay while the context is still valid.
 		tasks.close();

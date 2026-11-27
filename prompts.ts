@@ -7,20 +7,8 @@
  * and a provider-neutral note about prompt caching.
  */
 
-/** A bare `/loop` stores this as its prompt; it expands to loop.md (or the maintenance pass) at fire time. */
-export const LOOP_FILE_SENTINEL = "<<loop.md>>";
-
-/** Claude Code's built-in maintenance prompt, used when there is no loop.md. */
-export const MAINTENANCE_PROMPT = [
-	"You are running a scheduled maintenance pass.",
-	"Work through the following, in order:",
-	"1. Continue any unfinished work from the conversation.",
-	"2. Tend to the current branch's pull request: review comments, failed CI runs, merge conflicts.",
-	"3. Run cleanup passes such as bug hunts or simplification when nothing else is pending.",
-	"Do not start new initiatives outside that scope, and only perform irreversible actions",
-	"(push, delete) that continue something the transcript already authorized.",
-	"If nothing needs doing, say so in one line.",
-].join("\n");
+import { EVENT_FALLBACK_RANGE } from "./cc-loop-policy.ts";
+import { LOOP_FILE_SENTINEL } from "./loopfile.ts";
 
 export const PROVENANCE = "[loop tick #{n} \u00b7 scheduled by /loop, not typed by the user]";
 /**
@@ -39,7 +27,7 @@ export const SCHEDULED_TASK_PROVENANCE =
 export const RULES_PROVENANCE = "[/loop instructions for this run \u00b7 added by pi-cc-loop, not typed by the user]";
 
 const DELAY_ADVICE = [
-	"- Do not poll work Pi/Monitor will report: keep a 1200-1800s fallback; use the same range for idle ticks.",
+	`- Do not poll work Pi/Monitor will report: keep a ${EVENT_FALLBACK_RANGE}s fallback; use the same range for idle ticks.`,
 	"  For external state nothing reports, match its rate of change and commit instead of stacking short waits.",
 ].join("\n");
 
@@ -58,6 +46,7 @@ const STOP_COMMAND_GUIDELINES = [
 	"This is a `/loop stop` request from the user: {raw}",
 	"Use `cron_list` if needed to resolve the target. Cancel with `cron_delete` by id; this works for both fixed and self-paced loops. With no id, list and cancel all jobs.",
 	"Do not use `schedule_wakeup` for a `/loop stop` request, and do not execute the loop tasks. Its `stop: true` is only for ending the current self-paced loop from inside its own run.",
+	"Stop schedules/observations only, not independent business jobs; cancel a runner job only when the user explicitly asks.",
 ].join("\n");
 
 const LOOP_COMMAND_GUIDELINES = [
@@ -104,7 +93,8 @@ const LOOP_GUIDELINES = [
  */
 const MONITOR_GUIDELINES = [
 	"If the next iteration is gated on an external event, call `monitor_list`; unless a monitor already covers it,",
-	"arm one `Monitor` with `loopPrompt` set to {quoted}. Keep `delaySeconds` at 1200-1800 as the fallback heartbeat:",
+	`arm one observation-only \`Monitor\` for the existing file/job/WebSocket source, with \`loopPrompt\` set to {quoted}. Keep \`delaySeconds\` at ${EVENT_FALLBACK_RANGE} as the fallback heartbeat:`,
+	"Submit business background work through the execution host's native external runner first, never through Monitor. Reconnect to the original jobId/runId; an observation timeout/error or loop stop is not a job result and must not resubmit or cancel it.",
 	"an event does not cancel it. Handle events and decide whether to continue; finish Monitor calls before the final standalone `schedule_wakeup` call.",
 ].join("\n");
 
@@ -146,12 +136,12 @@ export function loopCommandGuidelines(raw: string, options: { monitorAvailable?:
 	// Management needs only its own short protocol, not the fixed/self-paced
 	// tutorial. Keep the match narrow so a task such as "status report" is not
 	// accidentally reclassified as a management command.
-	if (/^status$/i.test(trimmed)) return fill(STATUS_COMMAND_GUIDELINES, { raw: quotedRaw });
+	if (/^(?:status|list)$/i.test(trimmed)) return fill(STATUS_COMMAND_GUIDELINES, { raw: quotedRaw });
 	if (/^stop(?:\s+\S+)?$/i.test(trimmed)) return fill(STOP_COMMAND_GUIDELINES, { raw: quotedRaw });
 
 	const quoted = quote(raw || LOOP_FILE_SENTINEL);
 	const monitorStep = options.monitorAvailable === true
-		? `- If the next iteration waits on an external event and no monitor covers it, arm \`Monitor\` once with \`loopPrompt\` set to ${quoted}; keep the wakeup at 1200-1800s as fallback.`
+		? `- If the next iteration waits on an external event and no monitor covers it, observe the existing file/job/WebSocket source with \`Monitor\` once and \`loopPrompt\` set to ${quoted}; keep the wakeup at ${EVENT_FALLBACK_RANGE}s as fallback. Business background work belongs to an external runner, not Monitor. Loop/observation stop must not cancel or resubmit that job.`
 		: "";
 	return fill(LOOP_COMMAND_GUIDELINES, {
 		raw: quotedRaw,
@@ -209,7 +199,7 @@ Only use minute 0 or 30 when the user names that exact time and clearly means it
 By default (durable: false) the job belongs to this Pi session: it is restored if the session is resumed and gone otherwise. Pass durable: true to write it to .pi/scheduled_tasks.json so it survives restarts; one Pi session per project runs the durable jobs. Only use durable: true when the user explicitly asks for the task to persist ("keep doing this every day", "set this up permanently").
 
 ## Not for live watching
-cron_create re-runs a prompt at fixed wall-clock intervals. To watch a log file, process, or command output and be told the moment something changes, use the Monitor tool instead when it is available \u2014 it streams events as they happen; cron polls on a schedule.
+cron_create re-runs a prompt at fixed wall-clock intervals. To watch an existing file, external job status or WebSocket and be told when something changes, use the observation-only Monitor tool when available \u2014 it streams events; cron polls on a schedule. Submit business background work through a native external runner, not Monitor. Stopping a loop or its observation does not cancel the external job.
 
 ## Runtime behavior
 Jobs only fire while the agent is idle (not mid-turn). The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: a recurring job runs up to half its period late (max 30 min), a "*/5 * * * *" job keeps its 5 minute cadence, late by that offset rather than early, and a one-shot job landing on :00 or :30 runs up to 90 s early. The result of this tool and of cron_list gives each job's actual next run time: when you tell the user when a job will run, give that time, not the minute in the cron expression.
@@ -217,21 +207,8 @@ Recurring jobs auto-expire after 7 days by default \u2014 they fire one final ti
 Returns a job ID you can pass to cron_delete.
 Ending, failing or stopping a job always wakes the model. There is no parameter to disable that.`;
 
-/**
- * Appended to the result of a recurring `cron_create` in a plain turn (not a
- * /loop request, not a scheduled tick). Claude Code's /loop skill says "Then
- * immediately run it now ... Don't wait for the first cron fire", and its model
- * reaches that skill for "every 5 minutes ..." typed without /loop: the skill is
- * listed every turn and CronCreate is a deferred tool. This package exposes
- * cron_create directly, so its result supplies that guidance instead. A
- * tool result is appended at the end of the transcript; the cache is untouched.
- */
-export const RUN_NOW_HINT =
-	'If the user asked for this to repeat on an interval ("every 5 minutes"), do the task once now as well \u2014 ' +
-	'don\'t wait for the first fire, as /loop does. A job at set times ("every day at 9am") only runs at those times.';
-
 export const CRON_DELETE_DESCRIPTION =
-	"Cancel a job scheduled with cron_create, or end a self-paced /loop, by its id. Removes it from .pi/scheduled_tasks.json (durable jobs) or from this session (session-only jobs).";
+	"Cancel a scheduled prompt or end a self-paced /loop by id. Remove it from .pi/scheduled_tasks.json or this session. Ending a self-paced loop also stops its bound observations. It does not cancel independent external-runner business jobs.";
 
 export const CRON_LIST_DESCRIPTION =
 	"List the scheduled jobs, both durable (.pi/scheduled_tasks.json) and session-only, with their ids, schedules, actual next run times and prompts.";
@@ -241,7 +218,7 @@ export const SCHEDULE_WAKEUP_DESCRIPTION = `Schedule the next iteration of a sel
 Call directly as the last and only tool call in that assistant response, never through codemode or in a batch. Finish Monitor and other tools in earlier responses and write your update first: the turn ends as soon as it returns. To end the current self-paced loop, call it with \`stop: true\` alone and explain the outcome; stopping does not force the turn to end. For a \`/loop stop <id>\` request, use \`cron_delete\` instead: it cancels either kind by id.
 
 ## Picking delaySeconds
-Do not poll work Pi/Monitor will report: schedule a 1200-1800s fallback so the loop survives if no event arrives. Use the same default for idle ticks. For external state nothing reports, match its rate of change and commit instead of stacking short waits. The runtime clamps to [60, 3600].
+Do not poll work Pi/Monitor will report: schedule a ${EVENT_FALLBACK_RANGE}s fallback so the loop survives if no event arrives. Use the same default for idle ticks. For external state nothing reports, match its rate of change and commit instead of stacking short waits. The runtime clamps to [60, 3600].
 
 ## Only for self-paced loops
 A /loop with an interval is a cron job: it fires itself, and calling this from its tick would run the prompt twice. Cancel that kind with \`cron_delete\`.

@@ -262,13 +262,11 @@ test("All and provider tabs are newest-first, and refresh retains identity while
 	v.panel.handleInput("\t");
 	assert.equal(v.panel.selected().id, "loop");
 
-	v.state.items.push(item("older addition", 100), item("newest addition", 200), { ...item("new child", 190), parentId: "1" });
+	v.state.items.push(item("older addition", 100), item("newest addition", 200));
 	v.panel.refreshNow(false);
 	assert.equal(v.panel.selected().id, "loop", "a new task never steals the reader's selection");
 	assert.equal(v.panel.entries[0].id, "newest addition");
-	assert.equal(v.panel.recentTask, "task newest addition", "a grouped child must not make the new-task hint name an older addition");
-	const sourceIndex = v.panel.entries.findIndex((entry) => entry.id === "1");
-	assert.equal(v.panel.entries[sourceIndex + 1].id, "new child", "subscriptions remain attached to their source");
+	assert.equal(v.panel.recentTask, "task newest addition");
 	v.panel.handleInput("\x1b[Z");
 	assert.equal(v.panel.selected().id, "newest addition", "the Monitor tab has the same chronological order");
 	assert.deepEqual(v.state.effects, []);
@@ -427,35 +425,6 @@ test("long stop scope scrolls independently while Cancel and Stop stay visible a
 	v.clickAction("confirmStop");
 	await Promise.resolve();
 	assert.deepEqual(v.state.effects, ["stop long"]);
-});
-
-test("group arrows collapse real descendants, keyboard can restore them, and hidden selection is repaired", (t) => {
-	const v = view(t, { items: [
-		{ ...item("parent", 100) }, { ...item("child-a", 90), parentId: "parent" },
-		{ ...item("other", 95) }, { ...item("child-b", 80), parentId: "parent" },
-	] });
-	assert.equal(v.panel.visible().length, 4);
-	v.clickAction("toggle", "parent");
-	assert.deepEqual(v.panel.visible().map(({ id }) => id), ["parent", "other"]);
-	assert.equal(v.panel.selected().id, "parent");
-	v.render();
-	assert.doesNotMatch(v.text(), /child-a|child-b/);
-	v.panel.handleInput("\x1b[C");
-	assert.equal(v.panel.visible().length, 4, "Right expands the selected group");
-	v.render();
-	v.clickTask("child-a");
-	assert.equal(v.panel.selected().id, "child-a");
-	v.render();
-	v.clickAction("toggle", "parent");
-	assert.equal(v.panel.visible().some(({ id }) => id === "child-a"), false);
-	assert.equal(v.panel.visible().some(({ id }) => id === v.panel.selected().id), true, "selection never remains hidden");
-	v.render();
-	v.clickTask("parent");
-	v.panel.handleInput("\x1b[C");
-	assert.equal(v.panel.visible().length, 4, "Right expands a collapsed selected group");
-	v.panel.handleInput("\x1b[D");
-	assert.equal(v.panel.visible().length, 2, "Left collapses an expanded selected group");
-	assert.deepEqual(v.state.effects, []);
 });
 
 test("clicks retain task identity across refresh and use fresh Unicode geometry after resize", (t) => {

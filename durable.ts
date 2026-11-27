@@ -25,9 +25,9 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withFileLock } from "./config.ts";
-import { writeAtomic } from "./temp-files.ts";
+import { isPidAlive, withFileLock } from "./plugin-settings.ts";
 import { nextRunTime, storedJob, type LoopJob, type LoopScheduler, type TimingConfig } from "./schedule.ts";
+import { writeAtomic } from "./temp-files.ts";
 
 export const DURABLE_FILE = path.join(".pi", "scheduled_tasks.json");
 export const LOCK_FILE = path.join(".pi", "scheduled_tasks.lock");
@@ -159,15 +159,6 @@ interface LockInfo {
 	heartbeatAt: number;
 }
 
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-}
-
 /** Who a lock belongs to. Injectable so tests can play several processes. */
 export interface LockIdentity {
 	pid?: number;
@@ -190,7 +181,7 @@ export class SchedulerLock {
 		this.file = path.join(cwd, LOCK_FILE);
 		this.pid = identity.pid ?? process.pid;
 		this.hostname = identity.hostname ?? os.hostname();
-		this.isAlive = identity.isAlive ?? pidAlive;
+		this.isAlive = identity.isAlive ?? ((pid) => isPidAlive(pid));
 		this.staleMs = identity.staleMs ?? LOCK_STALE_MS;
 	}
 

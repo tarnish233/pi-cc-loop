@@ -1,4 +1,4 @@
-/** Only rendering and task-panel sources remain shared between Loop and Monitor. */
+/** Check bundled sources that must agree across independent installations. */
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -12,6 +12,11 @@ const SHARED = {
 	"render.ts": SIBLINGS,
 	"tasks.ts": SIBLINGS,
 	"log-tail.ts": SIBLINGS,
+	"observation-link.ts": SIBLINGS,
+	"terminal-outbox.ts": SIBLINGS,
+	"plugin-settings.ts": SIBLINGS,
+	"scripts/host-paths.mjs": SIBLINGS,
+	"scripts/typecheck.mjs": SIBLINGS,
 };
 
 test("the shared source has a check-only sync command", () => {

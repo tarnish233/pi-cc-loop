@@ -28,7 +28,7 @@ export function writeAtomic(file: string, text: string): void {
 	try {
 		fs.writeFileSync(marker, JSON.stringify(owner), { mode: 0o600 });
 		const temp = path.join(dir, "value.tmp");
-		fs.writeFileSync(temp, text, "utf8");
+		fs.writeFileSync(temp, text, { mode: 0o600 });
 		fs.renameSync(temp, file);
 	} finally {
 		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {

@@ -18,7 +18,7 @@
  * fails when the two copies drift apart.
  */
 
-import { keyHint, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	Text,
@@ -110,6 +110,7 @@ export function renderCard(options: {
 	expanded: boolean;
 	outputPad: number;
 	theme: Theme;
+	keyHint?: KeyHintFn;
 }): Box {
 	const { header, body, expanded, outputPad, theme } = options;
 	const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
@@ -117,27 +118,24 @@ export function renderCard(options: {
 	if (expanded && body) {
 		box.addChild(new Text(theme.fg("customMessageText", `\n${body}`), 0, 0));
 	} else if (!expanded) {
-		box.addChild(new Text(theme.fg("dim", `  ${expandHint()}`), 0, 0));
+		box.addChild(new Text(theme.fg("dim", `  ${expandHint(options.keyHint)}`), 0, 0));
 	}
 	return box;
 }
 
 /**
- * The hint for the expand shortcut. The keybinding is configurable and the
- * theme has to be initialised, so fall back to the default when the hint
- * would come out empty.
+ * The hint for the expand shortcut. Falls back to the default when the host
+ * provides no keybinding helper or when the hint comes out empty.
  */
-function expandHint(): string {
+function expandHint(keyHint?: KeyHintFn): string {
 	try {
-		const hint = keyHint("app.tools.expand", "to expand");
-		const plain = hint.replace(/\x1b\[[0-9;]*m/g, "");
-		if (!plain.trim() || plain.trim().startsWith("to expand")) {
-			return "(Ctrl+O to expand)";
-		}
-		return hint;
+		const hint = keyHint?.("app.tools.expand", "to expand");
+		const plain = hint?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+		if (plain.trim() && !plain.trim().startsWith("to expand")) return hint!;
 	} catch {
-		return "(Ctrl+O to expand)";
+		// Fall back to default expand shortcut.
 	}
+	return "(Ctrl+O to expand)";
 }
 
 // ------------------------------------------------------- notification card

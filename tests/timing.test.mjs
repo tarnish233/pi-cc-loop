@@ -12,10 +12,18 @@ import { loadModule } from "./helpers.mjs";
 
 const schedule = await loadModule("schedule.ts");
 const cron = await loadModule("cron.ts");
-const { DEFAULT_TIMING, LoopScheduler, nextRunTime } = schedule;
+const { CC_TIMING } = await loadModule("cc-loop-policy.ts");
+const { LoopScheduler } = schedule;
+const nextRunTime = (job, from, timing = CC_TIMING) => schedule.nextRunTime(job, from, timing);
 
 const at = (iso) => new Date(iso).getTime();
 const job = (id, cronExpr, recurring = true) => ({ id, cron: cronExpr, recurring });
+
+test("without a preset the timing mechanism uses the exact cron slot", () => {
+	const one = at("2026-10-22T08:01:00"), slot = at("2026-10-22T09:00:00");
+	assert.equal(schedule.nextRunTime(job("z1234567", "0 9 * * *"), one), slot);
+	assert.equal(schedule.nextRunTime(job("z1234567", "0 9 * * *", false), one), slot);
+});
 
 test("a recurring delivery that throws is dropped without consuming a fire or escaping the scan", () => {
 	const errors = [];
@@ -215,7 +223,7 @@ test("a one-shot on :00 or :30 runs up to 90s early, never before it was created
 });
 
 test("PI_LOOP_JITTER=0 style timing runs exactly on the cron minute", () => {
-	const exact = { ...DEFAULT_TIMING, recurringFrac: 0, oneShotMaxMs: 0 };
+	const exact = { ...CC_TIMING, recurringFrac: 0, oneShotMaxMs: 0 };
 	const from = at("2026-10-22T10:02:30");
 	assert.equal(nextRunTime(job("aaaa1111", "*/10 * * * *"), from, exact), at("2026-10-22T10:10:00"));
 	assert.equal(nextRunTime(job("aaaa1111", "*/5 * * * *"), from, exact), at("2026-10-22T10:05:00"));

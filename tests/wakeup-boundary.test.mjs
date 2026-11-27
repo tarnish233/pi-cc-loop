@@ -83,13 +83,13 @@ test("wakeup instructions require direct singleton calls and arm monitors before
 	const description = h.tools.get("schedule_wakeup").description;
 	assert.match(description, /only tool call in that assistant response/);
 	assert.match(description, /never through codemode or in a batch/);
-	h.setRegisteredTools(["Monitor"]);
+	h.pi.events.on("pi-cc:monitor:observation-link", request => { request.acceptedVersion = request.version; });
 	await h.commands.get("loop").handler("check CI", h.ctx);
 	const event = runEvent(h.sent.at(-1));
 	await h.handlers.get("before_agent_start")(event, h.ctx);
 	const selfPaced = guidelinesOf(event).split("## Self-paced")[1];
 	assert.ok(selfPaced, "the self-paced section exists");
-	const monitorIndex = selfPaced.indexOf("arm `Monitor`");
+	const monitorIndex = selfPaced.indexOf("with `Monitor` once");
 	const wakeupIndex = selfPaced.indexOf("then call `schedule_wakeup`");
 	assert.ok(monitorIndex >= 0, "Monitor setup is present when the tool is available");
 	assert.ok(wakeupIndex > monitorIndex, "Monitor setup precedes the final standalone wakeup");

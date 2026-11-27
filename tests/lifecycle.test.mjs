@@ -454,12 +454,13 @@ test("stop:true on the tick's own chain also blocks a reworded re-arm from that 
 
 test("stop:true after the first /loop arm blocks a reworded re-arm from that run", async () => {
 	const h = await start(makeHarness());
-	await startSelfPaced(h, "watch deploy", 600); // a chain from an earlier run
+	const deploy = await startSelfPaced(h, "watch deploy", 600); // a chain from an earlier run
 	await runTurn(h);
 	await h.commands.get("loop").handler("watch CI", h.ctx);
 	await h.handlers.get("before_agent_start")(runEvent(h.sent.at(-1)), h.ctx);
 	await startSelfPaced(h, "watch CI", 600); // the run armed this chain
-	await wakeup(h, { stop: true, prompt: "watch deploy" }); // unrelated: the run stays free
+	// Other activities are managed by explicit id, not by overloading this run's stop:true.
+	await h.tools.get("cron_delete").execute("c", { id: deploy.id }, undefined, undefined, h.ctx);
 	assert.ok(await wakeup(h, { delaySeconds: 600, prompt: "watch CI" }), "own chain re-arms after an unrelated stop");
 	await wakeup(h, { stop: true }); // the agent stops the loop it just armed
 	for (const prompt of ["watch CI", "watch the CI run"]) {
@@ -567,15 +568,16 @@ test("the tool descriptions carry Claude Code's guidance", async () => {
 	assert.equal(h.tools.get("cron_create").parameters.properties.maxFires.type, "integer");
 });
 
-test("two loops armed in the same run stay separate, and Esc cancels both", async () => {
+test("reworded wakeups in one identified run keep one activity, and Esc cancels it", async () => {
 	const h = await start(makeHarness());
 	await h.commands.get("loop").handler("watch CI and the deploy", h.ctx);
 	await h.handlers.get("before_agent_start")(runEvent(h.sent[0]), h.ctx);
-	await wakeup(h, { delaySeconds: 600, prompt: "watch CI" });
-	await wakeup(h, { delaySeconds: 600, prompt: "watch deploy" });
-	assert.equal(h.scheduler().byKind("wakeup").length, 2, "the second prompt starts its own chain");
+	const first = await wakeup(h, { delaySeconds: 600, prompt: "watch CI" });
+	const second = await wakeup(h, { delaySeconds: 600, prompt: "watch deploy" });
+	assert.equal(second.details.id, first.details.id, "task text does not split the current activity");
+	assert.equal(h.scheduler().byKind("wakeup").length, 1);
 	await runTurn(h, { aborted: true });
-	assert.equal(h.scheduler().byKind("wakeup").length, 0, "both belong to the interrupted run");
+	assert.equal(h.scheduler().byKind("wakeup").length, 0, "the interrupted activity ended");
 });
 
 

@@ -1,18 +1,9 @@
 /**
- * Bounded, sanitized log-tail reading for the shared /tasks overlay.
+ * Bounded, sanitized log-tail reading for the shared /tasks overlay and
+ * Monitor completion summaries.
  *
- * Node builtins only: this file is copied verbatim between the task-owning
- * packages (pi-cc-monitor and pi-cc-loop) and must never import Pi or the
- * TUI. Every byte shown is bounded (total tail bytes, line count, characters
- * per line), sanitized (ANSI escapes, C0/C1 controls and bidi overrides are
- * stripped, so nothing can be re-injected into the terminal), and the raw
- * log file is never modified.
- *
- * Failure policy: a missing, unreadable or non-file path is a note, not an
- * error - the task viewer must keep working after a log is cleaned up. All
- * clipping is detected and reported truthfully: byte-bounded tails, dropped
- * older lines, and long lines shortened with their ending preserved (log
- * lines end with the marker that matters: an exit status or result).
+ * Node builtins only: this file is copied verbatim between pi-cc-monitor and
+ * pi-cc-loop and must never import Pi or the TUI.
  */
 
 import fs from "node:fs";
@@ -25,14 +16,13 @@ export interface LogTail {
 	note?: string;
 }
 
-/** A log tail is small enough to read synchronously and wide enough to be useful. */
 const LOG_MAX_BYTES = 8192;
 const LOG_MAX_LINES = 60;
 const LOG_LINE_MAX = 500;
 
-/** Terminal escape sequences: OSC ( BEL / ST terminated), CSI, and other Fe escapes. */
+/** Terminal escape sequences: OSC/DCS/SOS/PM/APC (BEL or ST terminated), CSI, and Fe escapes. */
 const TERMINAL_ESCAPES =
-	/\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
+	/\x1b(?:[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
 /** Dangling surrogates: not valid UTF-8 once the text is written back out. */
 const DANGLING_SURROGATES = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
@@ -54,18 +44,39 @@ export function sanitizeDisplay(value: unknown): string {
 		.replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
+function readTailBytes(filePath: string, start: number, want: number): { data: Buffer; atLineStart: boolean } {
+	if (want <= 0) return { data: EMPTY_BUFFER, atLineStart: start === 0 };
+	const fd = fs.openSync(filePath, "r");
+	try {
+		let data = Buffer.alloc(want);
+		let read = 0;
+		while (read < want) {
+			const chunk = fs.readSync(fd, data, read, want - read, start + read);
+			if (chunk <= 0) break;
+			read += chunk;
+		}
+		if (read < want) data = data.subarray(0, read);
+		let atLineStart = start === 0;
+		if (start > 0) {
+			const prior = Buffer.alloc(1);
+			atLineStart = fs.readSync(fd, prior, 0, 1, start - 1) === 1 && prior[0] === 0x0a;
+		}
+		return { data, atLineStart };
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 /**
- * Read a bounded tail of a log. Missing files and permission errors are
- * notes, not failures. Byte clipping drops the partial first line of the
- * tail - unless that would leave nothing (the whole tail is one huge line),
- * in which case a bounded fragment of its ending is kept so a final marker
- * survives. `truncated` and `note` report every kind of clipping truthfully.
+ * Read a bounded tail of a log (optionally bridging from a rotated `.1` archive
+ * when the current segment holds fewer than `maxBytes` bytes).
  */
 export function readLogTail(
 	filePath: string,
 	maxBytes = LOG_MAX_BYTES,
 	maxLines = LOG_MAX_LINES,
 	maxLineChars = LOG_LINE_MAX,
+	archivePath?: string,
 ): LogTail {
 	if (!filePath) return { text: "", truncated: false, note: "no log path" };
 	let stat: fs.Stats;
@@ -84,57 +95,57 @@ export function readLogTail(
 	const size = stat.size;
 	const start = Math.max(0, size - byteLimit);
 	const want = size - start;
-	let buffer = EMPTY_BUFFER;
-	let atLineStart = false;
-	if (want > 0) {
-		try {
-			const fd = fs.openSync(filePath, "r");
+	let buffer: Buffer = EMPTY_BUFFER;
+	let atLineStart = start === 0;
+	let totalSize = size;
+	let byteClipped = start > 0;
+
+	try {
+		const current = readTailBytes(filePath, start, want);
+		buffer = current.data;
+		atLineStart = current.atLineStart;
+
+		if (archivePath) {
 			try {
-				buffer = Buffer.alloc(want);
-				let read = 0;
-				while (read < want) {
-					const chunk = fs.readSync(fd, buffer, read, want - read, start + read);
-					if (chunk <= 0) break;
-					read += chunk;
+				const archiveStat = fs.statSync(archivePath);
+				if (archiveStat.isFile() && archiveStat.size > 0) {
+					totalSize += archiveStat.size;
+					const remaining = byteLimit - buffer.length;
+					if (remaining > 0) {
+						const archiveStart = Math.max(0, archiveStat.size - remaining);
+						const archive = readTailBytes(archivePath, archiveStart, archiveStat.size - archiveStart);
+						buffer = archive.data.length ? Buffer.concat([archive.data, buffer]) : buffer;
+						atLineStart = archive.atLineStart;
+						byteClipped = archiveStart > 0;
+					} else {
+						byteClipped = true;
+						if (start === 0) {
+							const last = readTailBytes(archivePath, archiveStat.size - 1, 1);
+							atLineStart = last.data.length === 1 && last.data[0] === 0x0a;
+						}
+					}
 				}
-				// Trust only the bytes actually read: the file may have shrunk
-				// between stat and read.
-				if (read < want) buffer = buffer.subarray(0, read);
-				// A tail that starts right after a newline holds a complete first
-				// line; only a genuinely partial one may be dropped below.
-				if (start > 0) {
-					const prior = Buffer.alloc(1);
-					atLineStart = fs.readSync(fd, prior, 0, 1, start - 1) === 1 && prior[0] === 0x0a;
-				}
-			} finally {
-				fs.closeSync(fd);
+			} catch {
+				// Missing or unreadable rotated archive is ignored; current segment stands.
 			}
-		} catch {
-			return { text: "", truncated: false, note: "log unreadable" };
 		}
+	} catch {
+		return { text: "", truncated: false, note: "log unreadable" };
 	}
 
-	// A byte-bounded tail can start inside a UTF-8 character; skip the sliced
-	// continuation bytes so the decoded head is valid UTF-8.
 	let offset = 0;
-	if (start > 0) {
+	if (byteClipped) {
 		while (offset < buffer.length && (buffer[offset]! & 0xc0) === 0x80) offset++;
 	}
 	let text = buffer.subarray(offset).toString("utf8");
 
-	// Drop a partial first line only when useful content survives the drop.
-	// Blank lines (or terminal styles) after a huge line are not a replacement
-	// for that line's final result.
-	const byteClipped = start > 0;
-	if (start > 0 && !atLineStart) {
+	if (byteClipped && !atLineStart) {
 		const newline = text.indexOf("\n");
 		const rest = newline < 0 ? "" : text.slice(newline + 1);
 		if (sanitizeDisplay(rest).trim()) text = rest;
 	}
 
 	let lines = text.split(/\r\n|\r|\n/);
-	// Trim the terminal empty line before the line-count limit so a trailing
-	// newline never consumes one of the last-lines slots.
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	const lineLimit = Math.max(1, Math.floor(maxLines));
 	const lineClipped = lines.length > lineLimit;
@@ -159,19 +170,13 @@ export function readLogTail(
 	}
 	const reasons: string[] = [];
 	if (byteClipped || lineClipped) reasons.push(`last ${sanitized.length} line${sanitized.length === 1 ? "" : "s"}`);
-	if (byteClipped) reasons.push(`${formatBytes(buffer.length)} tail of ${formatBytes(size)}`);
+	if (byteClipped) reasons.push(`${formatBytes(buffer.length)} tail of ${formatBytes(totalSize)}`);
 	if (shortenedLines > 0) {
 		reasons.push(`${shortenedLines} long line${shortenedLines === 1 ? "" : "s"} shortened (ends kept)`);
 	}
 	return { text: text_, truncated: true, note: reasons.join(" \u00b7 ") };
 }
 
-/**
- * Shorten one plain line to at most `maxChars` characters while keeping its
- * ending. Character counts, not terminal widths: no TUI dependency here.
- * The final ellipsis marks the cut; dangling surrogates at the cut points
- * are removed so the result stays valid UTF-8.
- */
 function shortenLine(line: string, maxChars: number): string {
 	const tail = Math.max(1, Math.floor(maxChars / 4));
 	const head = Math.max(1, maxChars - tail - 1);

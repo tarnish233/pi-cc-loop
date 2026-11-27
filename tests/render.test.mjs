@@ -121,7 +121,7 @@ test("a self-paced tick is a loop, not a scheduled task", async () => {
 		prompt: "watch CI",
 	});
 	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
-	assert.match(text, /\u273b loop #7/);
+	assert.match(text, /\u273b Loop #7/);
 	assert.ok(!text.includes("Running scheduled task"));
 	assert.ok(!text.includes("[loop tick"));
 });
@@ -155,7 +155,7 @@ test("the reason for the delay rides in the header", async () => {
 		reason: "CI run still going",
 	});
 	const { text } = render(renderers.get("pi-cc-loop-tick"), message, false);
-	assert.match(text, /\u273b loop #7 \u00b7 CI run still going \u00b7 \d{1,2}:\d{2}(am|pm)/);
+	assert.match(text, /\u273b Loop #7 \u00b7 CI run still going \u00b7 \d{1,2}:\d{2}(am|pm)/);
 });
 
 test("with compactMessages off, a scheduled fire is still a scheduled task, not a loop tick", async () => {
@@ -175,7 +175,7 @@ test("with compactMessages off, a scheduled fire is still a scheduled task, not 
 		assert.ok(!card.text.includes("loop tick"), card.text);
 
 		const wakeup = tickMessage("[loop tick #7 \u00b7 ...]\nwatch CI", { kind: "wakeup", jobId: "abc", prompt: "watch CI" });
-		assert.match(render(renderers.get("pi-cc-loop-tick"), wakeup, false).text, /loop #7 \u00b7 watch CI/);
+		assert.match(render(renderers.get("pi-cc-loop-tick"), wakeup, false).text, /Loop #7 \u00b7 watch CI/);
 	} finally {
 		fs.writeFileSync(process.env.PI_CC_CONFIG_FILE, JSON.stringify({ compactMessages: true }), "utf8");
 		(await loadModule("config.ts")).invalidateConfig();
@@ -209,7 +209,7 @@ test("with compactMessages off, an emoji/CJK/ANSI prompt header stays within 80 
 			const message = tickMessage(`[loop tick #7 \u00b7 ...]\n${long}`, { kind: "wakeup", jobId: "abc", prompt: long });
 			const collapsed = render(renderers.get("pi-cc-loop-tick"), message, false);
 			assert.ok(collapsed.lines.length <= 5, `a one-line header, not a wrapped prompt (${collapsed.lines.length} lines)`);
-			const headerLine = collapsed.lines.find((line) => line.includes("loop #7"));
+			const headerLine = collapsed.lines.find((line) => line.includes("Loop #7"));
 			assert.ok(headerLine, "the header line");
 			const promptPart = headerLine.slice(headerLine.indexOf("\u00b7 ") + 2).trimEnd();
 			assert.ok(visibleWidth(promptPart) <= 80, `the prompt fits 80 terminal columns (${visibleWidth(promptPart)})`);
@@ -259,6 +259,41 @@ test("a missed-jobs card warns and lists what was late", async () => {
 	const message = tickMessage("[loop \u00b7 missed jobs]\njob a\njob b", { missed: true });
 	const { text, lines } = render(renderers.get("pi-cc-loop-tick"), message, false);
 	assert.equal(lines.length, 1, "one line, always");
-	assert.match(text, /\u26a0 loop \u00b7 missed jobs \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 2 jobs/);
+	assert.match(text, /\u26a0 Loop \u00b7 missed jobs \u00b7 \d{1,2}:\d{2}(am|pm) \u00b7 2 jobs/);
 	assert.ok(!text.includes("job a"), "the list is behind the expansion");
+});
+
+test("the end of a loop is titled by its outcome, never by the raw message type", async () => {
+	const { renderers } = makeHarness();
+	const renderer = renderers.get("pi-cc-loop-outcome");
+	assert.ok(renderer, "the outcome message has its own renderer");
+	const outcome = (details, content = "Loop 7 stopped (stopped by the agent). Any Monitor observation bound to this loop was stopped with it.") => ({
+		role: "custom",
+		customType: "pi-cc-loop-outcome",
+		display: true,
+		content,
+		details: { ended: true, ...details },
+		timestamp: Date.now(),
+	});
+	// A finished loop is a quiet outcome: violet square, not the live spark. A
+	// retryable dispatch failure is a warning that keeps its loop alive.
+	const cases = [
+		[{ cause: "stopped", jobId: "7", prompt: "watch CI", reason: "stopped by the agent" }, "\u25a0 Loop Stopped", "not rescheduled"],
+		[{ cause: "expired", jobId: "7", prompt: "watch CI" }, "\u26a0 Loop Expired", "schedule expired"],
+		[{ cause: "dispatch-failed", jobId: "7", prompt: "watch CI", reason: "delivery rejected", retry: "due" }, "\u26a0 Loop Tick Failed", "stays due"],
+		[{ cause: "dispatch-failed", jobId: "7", prompt: "watch CI", reason: "delivery rejected", retry: "skipped" }, "\u26a0 Loop Tick Failed", "this tick skipped"],
+		[{}, "\u25a0 Loop Ended", "not rescheduled"],
+	];
+	for (const [details, title, stat] of cases) {
+		const { text } = render(renderer, outcome(details), false);
+		const id = details.jobId ? ` ${details.jobId}` : "";
+		assert.match(text, new RegExp(`${title}${id}`), `${JSON.stringify(details)}: ${text}`);
+		assert.ok(text.includes(stat), `${JSON.stringify(details)}: ${stat} (${text})`);
+		assert.ok(!text.includes("pi-cc-loop-outcome"), "the machine name is not the title");
+	}
+	const expanded = render(renderer, outcome(cases[0][0]), true).text;
+	// The reason already rides in the status sentence; it is not printed twice.
+	assert.match(expanded, /Status[\s\S]*stopped by the agent/);
+	assert.doesNotMatch(expanded, /Reason/);
+	assert.match(expanded, /Prompt[\s\S]*watch CI/);
 });

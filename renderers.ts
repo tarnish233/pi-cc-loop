@@ -5,7 +5,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import {
 	bodyLines,
 	contentText,
@@ -46,6 +46,63 @@ export interface ScheduledDetails {
 	missed?: boolean;
 }
 
+/** Why a loop ended; the model reads `content`, the reader sees the title. */
+export interface OutcomeDetails {
+	ended?: boolean;
+	cause?: "stopped" | "expired" | "dispatch-failed";
+	jobId?: string;
+	prompt?: string;
+	reason?: string;
+	/** A dispatch failure is not terminal: it stays due or only skips this tick. */
+	retry?: "due" | "skipped";
+}
+
+const OUTCOME_TITLES = { stopped: "Loop Stopped", expired: "Loop Expired", "dispatch-failed": "Loop Tick Failed" } as const;
+
+export function outcomeTitle(details: OutcomeDetails): string {
+	return details.cause ? OUTCOME_TITLES[details.cause] : "Loop Ended";
+}
+
+/** The one fact a collapsed card carries besides its title. */
+function outcomeStat(details: OutcomeDetails): string {
+	if (details.cause === "expired") return "schedule expired";
+	if (details.cause === "dispatch-failed") return details.retry === "due" ? "stays due" : "this tick skipped";
+	return "not rescheduled";
+}
+
+/**
+ * Draw the end of a loop: a title naming the outcome instead of the raw
+ * `pi-cc-loop-outcome` custom type Pi prints for an unregistered message.
+ */
+export function renderOutcomeMessage(
+	message: { content: unknown; details?: unknown; timestamp?: number },
+	options: { expanded: boolean; outputPad: number; keyHint?: KeyHintFn },
+	theme: Theme,
+): Component {
+	const details = (message.details ?? {}) as OutcomeDetails;
+	const title = outcomeTitle(details);
+	const text = contentText(message.content);
+
+	if (!loadConfig().compactMessages) {
+		return renderCard({ header: details.jobId ? `${title} \u00b7 ${details.jobId}` : title, body: text, expanded: options.expanded, outputPad: options.outputPad, theme, keyHint: options.keyHint });
+	}
+
+	const sections: NotificationSection[] = [];
+	if (text.trim()) sections.push({ heading: "Status", lines: bodyLines(text), color: "toolOutput" });
+	if (details.jobId) sections.push({ heading: "Job", lines: [details.jobId, "scheduled by /loop"], color: "dim" });
+	if (details.prompt) sections.push({ heading: "Prompt", lines: bodyLines(displayPrompt(details.prompt)), color: "dim" });
+
+	return renderNotificationCard(message, options, theme, {
+		title,
+		...(details.jobId ? { id: details.jobId } : {}),
+		stamp: formatStamp(message.timestamp),
+		stats: [outcomeStat(details)],
+		tone: details.cause === "expired" || details.cause === "dispatch-failed" ? "warning" : "accent",
+		terminal: details.cause !== "dispatch-failed",
+		sections,
+	});
+}
+
 /**
  * Draw a scheduled fire the way Claude Code does: `✻ Running scheduled task ·
  * 6:16pm`, then the task. The provenance line in `content` is addressed to the
@@ -60,13 +117,14 @@ export function renderScheduledMessage(
 	// The provenance line is addressed to the model, not the reader.
 	const prompt = details.prompt ?? contentText(message.content).replace(/^\[[^\]]*\]\n?/, "");
 	// A fixed interval fires a scheduled task; only a self-paced tick is a loop.
+	// Titles read like every other card: capitalised, with the fact after a dot.
 	const label = details.missed
-		? "loop \u00b7 missed jobs"
+		? "Loop \u00b7 missed jobs"
 		: details.kind === "cron"
 			? "Running scheduled task"
 			: details.tickCount !== undefined
-				? `loop #${details.tickCount}`
-				: "loop";
+				? `Loop #${details.tickCount}`
+				: "Loop";
 
 	if (!loadConfig().compactMessages) {
 		// Same naming as the block: a cron fire is a scheduled task, only a
@@ -74,7 +132,7 @@ export function renderScheduledMessage(
 		// must not render whole while the card is collapsed. Width-aware, so
 		// emoji/CJK/ANSI are never cut mid-grapheme or mid-escape.
 		const header = details.missed ? label : `${label} \u00b7 ${truncateToWidth(displayPrompt(prompt).replace(/\s+/g, " ").trim(), 80, "\u2026")}`;
-		return renderCard({ header, body: prompt, expanded: options.expanded, outputPad: options.outputPad, theme });
+		return renderCard({ header, body: prompt, expanded: options.expanded, outputPad: options.outputPad, theme, keyHint: options.keyHint });
 	}
 
 	const lines = bodyLines(prompt);

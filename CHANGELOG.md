@@ -1,6 +1,26 @@
 # Changelog — pi-cc-loop
 
-## [Unreleased]
+## [0.14.0] - 2026-11-27
+
+### Fixed
+- Scope tentative Loop identities in plain user runs to their own prompt. Named existing Loops remain independent, and an unrelated fixed cron cannot detach the tentative observation.
+- Retain owner-marked atomic staging and its startup/periodic recovery when using the shared settings implementation. Retry an interrupted idle batch wake once without restarting after Esc or a manual session operation.
+- Count ticks on each schedule, not on its prompt text. Return ambiguous binding errors in the synchronous reply instead of throwing into Pi’s event bus.
+- Allocate a stable activity identity when a new Loop run starts, before observers or wakeups exist; register its first wakeup on that id instead of adopting prompt-keyed groups. Keep explicit same-prompt activities separate, make identified events/re-arms/stops authoritative over task text, reject ambiguous legacy lookups, and fence late events/rebindings/replacement crons without cancelling external runner jobs. Distinguish explicitly unbound modern notifications and outcome facts from legacy text-only events; prevent an activity id from overwriting a different schedule. Preserve fixed-cron Esc semantics, public tool contracts and idempotent initial stops.
+- Keep Loop outcomes outside Pi's Esc-clearable queues; deliver at response/tool-batch boundaries, coalesce continuation requests, preserve facts on aborted settlement without restarting, and dispose retry/fallback resources safely.
+- Add real offline SDK and cross-extension ownership regressions, including initial setup cancellation, fixed cron, same-prompt isolation and stopped-run re-arms.
+- Retain the owned cache-probe workspace whenever Pi cleanup is unconfirmed, including when the scenario already failed; keep both diagnostics and cover all success/failure combinations with an offline RPC host fixture.
+
+### Changed
+- Negotiate the optional observation-only Monitor link by protocol version, not tool name. Share the protected outbox source without sharing instances or wake policy.
+- Separate CC-compatible default policy from scheduling and loop.md delivery. Extract the task panel projection and show due schedules waiting for idle distinctly; preserve existing defaults and public tools.
+- End a loop with a real card: `Loop Stopped`, `Loop Expired` or `Loop Tick Failed` instead of Pi's raw `[pi-cc-loop-outcome]` title, with the status text and job/prompt behind the expansion. A retryable dispatch failure is a warning that keeps the loop alive, and a duration limit reports the same `Loop Expired` outcome as the scheduler's own expiry.
+- Capitalise the fire cards (`Loop #7`, `Loop · missed jobs`) so the two message families read alike; the cron fire keeps `Running scheduled task`.
+- Guide background business work through the execution host's native external runner; Monitor observes existing file/job/WebSocket sources, and loop retirement stops only schedules and bound observations, never cancelling or resubmitting the external job.
+- Migrate the optional cache-check script to an externally produced observation-protocol fixture; its offline dry-run neither starts Pi nor contacts a provider and explicitly reports that cache usage was not measured.
+- Keep the online cache probe's scenario and report readable, and report a failed Pi cleanup alongside the original scenario error instead of replacing it.
+- Skip the cache probe contract test when the sibling pi-cc-monitor checkout is absent, so a standalone Loop package still tests cleanly.
+- Preserve the existing task-panel layout, independent settings and scheduling algorithms; add guidance, probe-ownership and stop-outcome regressions.
 
 ## [0.13.1] - 2026-11-25
 

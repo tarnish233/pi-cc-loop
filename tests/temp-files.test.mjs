@@ -68,6 +68,40 @@ test("cleanup failure does not fail a successful save and marks the scratch dire
 	assert.deepEqual(fs.readdirSync(dir), [path.basename(file)]);
 });
 
+test("an interrupted Loop settings save leaves a private and reclaimable scratch directory", { skip: process.platform === "win32" }, (t) => {
+	const { dir, file } = fixture(t);
+	const before = '{"footer":true}\n';
+	fs.writeFileSync(file, before);
+	const helper = new URL("./helpers.mjs", import.meta.url).href;
+	const code = `
+		import fs from "node:fs";
+		const { loadModule } = await import(process.argv[1]);
+		const { saveConfig } = await loadModule("config.ts");
+		const rename = fs.renameSync;
+		fs.renameSync = (from, to) => {
+			if (to === process.env.PI_CC_CONFIG_FILE) process.kill(process.pid, "SIGKILL");
+			return rename(from, to);
+		};
+		saveConfig({ footer: false });
+	`;
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", code, helper], {
+		env: { ...process.env, PI_CC_CONFIG_FILE: file }, timeout: 10000,
+	});
+	assert.equal(child.signal, "SIGKILL", String(child.stderr));
+	assert.equal(fs.readFileSync(file, "utf8"), before);
+	const leftover = fs.readdirSync(dir).find(name => name.startsWith(path.basename(file) + ".pi-cc-loop-tmp-"));
+	assert.ok(leftover);
+	const scratch = path.join(dir, leftover);
+	const owner = JSON.parse(fs.readFileSync(path.join(scratch, "owner.json"), "utf8"));
+	assert.equal(owner.target, file);
+	assert.equal(owner.pid, child.pid);
+	assert.equal(owner.closedAt, null);
+	assert.equal(fs.statSync(path.join(scratch, "value.tmp")).mode & 0o777, 0o600);
+	cleanRuntimeTemps([file], Date.now() + 2 * DAY);
+	assert.equal(fs.existsSync(scratch), false);
+	assert.equal(fs.readFileSync(file, "utf8"), before);
+});
+
 test("old verified-dead or closed scratch directories are removed, never the target", (t) => {
 	const { file } = fixture(t), now = Date.now();
 	fs.writeFileSync(file, "user tasks");
@@ -100,6 +134,8 @@ test("unmarked legacy files, invalid markers and symlinks are not guessed to be 
 	const { dir, file } = fixture(t), now = Date.now();
 	const legacy = file + ".123.12345678-1234-1234-1234-123456789abc.tmp";
 	fs.writeFileSync(legacy, "unknown old file");
+	const unmarked = file + `.tmp-${deadPid()}-12345678-1234-1234-1234-123456789abc`;
+	fs.writeFileSync(unmarked, "no ownership marker");
 	const wrong = owned(file, now, { target: path.join(dir, "another.json"), closedAt: now - 2 * DAY });
 	const invalid = owned(file, now); fs.writeFileSync(path.join(invalid, "owner.json"), "{broken");
 	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "loop-temp-victim-"));
@@ -107,7 +143,7 @@ test("unmarked legacy files, invalid markers and symlinks are not guessed to be 
 	fs.writeFileSync(path.join(outside, "keep"), "important");
 	const link = file + ".pi-cc-loop-tmp-symlink"; fs.symlinkSync(outside, link);
 	cleanRuntimeTemps([file], now + 5 * DAY);
-	for (const p of [legacy, wrong, invalid, link]) assert.ok(fs.existsSync(p));
+	for (const p of [legacy, unmarked, wrong, invalid, link]) assert.ok(fs.existsSync(p));
 	assert.equal(fs.readFileSync(path.join(outside, "keep"), "utf8"), "important");
 });
 
